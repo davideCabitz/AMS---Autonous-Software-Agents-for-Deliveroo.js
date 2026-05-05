@@ -1,0 +1,14 @@
+{
+  "name": "ams-deliveroo-agent",
+  "version": "1.0.0",
+  "description": "Autonomous Software Agents for Deliveroo — BDI architecture",
+  "type": "module",
+  "main": "myAgent/agent.js",
+  "scripts": {
+    "start": "node myAgent/agent.js"
+  },
+  "dependencies": {
+    "@unitn-asa/deliveroo-js-sdk": "*",
+    "dotenv": "^16.0.0"
+  }
+}
