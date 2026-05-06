@@ -1,33 +1,28 @@
 import { PlanBase } from './PlanBase.js';
+import { me, socket } from '../context.js';
 
 export class BlindMove extends PlanBase {
-    /** @param {object} me - shared belief reference */
-    constructor(parent, me) {
-        super(parent);
-        this.me = me;
-    }
-
     static isApplicableTo(intent) {
         return intent === 'go_to';
     }
 
-    async execute(intent, x, y, socket) {
-        while (this.me.x !== x || this.me.y !== y) {
+    async execute(intent, x, y) {
+        while (me.x !== x || me.y !== y) {
             if (this.stopped) throw ['stopped'];
 
             let movedH, movedV;
 
-            if (x > this.me.x)      movedH = await socket.emitMove('right');
-            else if (x < this.me.x) movedH = await socket.emitMove('left');
+            if (x > me.x)      movedH = await socket.emitMove('right');
+            else if (x < me.x) movedH = await socket.emitMove('left');
 
-            if (movedH) { this.me.x = movedH.x; this.me.y = movedH.y; }
+            if (movedH) { me.x = movedH.x; me.y = movedH.y; }
 
             if (this.stopped) throw ['stopped'];
 
-            if (y > this.me.y)      movedV = await socket.emitMove('up');
-            else if (y < this.me.y) movedV = await socket.emitMove('down');
+            if (y > me.y)      movedV = await socket.emitMove('up');
+            else if (y < me.y) movedV = await socket.emitMove('down');
 
-            if (movedV) { this.me.x = movedV.x; this.me.y = movedV.y; }
+            if (movedV) { me.x = movedV.x; me.y = movedV.y; }
 
             if (!movedH && !movedV) throw 'stuck';
         }

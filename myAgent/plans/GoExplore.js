@@ -1,11 +1,10 @@
 import { PlanBase } from './PlanBase.js';
 
-export class GoDeliver extends PlanBase {
+export class GoExplore extends PlanBase {
     static isApplicableTo(intent) {
-        return intent === 'go_deliver';
+        return intent === 'go_explore';
     }
 
-    // Delivery happens automatically when stepping onto a delivery tile.
     async execute(intent, x, y) {
         if (this.stopped) throw ['stopped'];
         await this.subIntention(['go_to', x, y]);
