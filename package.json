@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "*",
+    "@unitn-asa/pddl-client": "^1.7.7",
     "dotenv": "^16.0.0"
   }
 }
