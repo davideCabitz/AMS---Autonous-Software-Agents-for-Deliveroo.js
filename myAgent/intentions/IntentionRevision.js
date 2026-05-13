@@ -9,10 +9,7 @@ export class IntentionRevision {
 
     async loop() {
         while (true) {
-            // yield first so sensing callbacks can update beliefs between iterations
             await new Promise(res => setImmediate(res));
-
-            // drain intentions that were stopped by a revision push
             while (this.#queue.length > 0 && this.#queue[0].stopped) {
                 this.#queue.shift();
             }
@@ -21,7 +18,6 @@ export class IntentionRevision {
 
             const intention = this.#queue[0];
 
-            // drop stale pick-up intentions (parcel already taken)
             if (!this.#isValid(intention)) {
                 this.log('dropping stale intention:', intention.predicate.join(' '));
                 this.#queue.shift();
@@ -39,7 +35,6 @@ export class IntentionRevision {
         }
     }
 
-    /** Override in subclasses to implement a revision strategy. */
     async push(_predicate) {}
 
     #isValid(intention) {

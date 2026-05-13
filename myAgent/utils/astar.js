@@ -25,7 +25,7 @@ function astar(start, goal, walkable) {
 
     const gScore   = new Map([[startKey, 0]]);
     const fScore   = new Map([[startKey, h(start.x, start.y, goal.x, goal.y)]]);
-    const cameFrom = new Map(); // nodeKey → { parentKey, dir }
+    const cameFrom = new Map(); 
     const open     = new Map([[startKey, start]]);
     const closed   = new Set();
 
@@ -74,34 +74,25 @@ function astar(start, goal, walkable) {
 }
 
 const GOAL_BLOCKED_WAIT_MS  = 500;
-const GOAL_BLOCKED_MAX_WAIT = 6; // give up after ~3 s
+const GOAL_BLOCKED_MAX_WAIT = 6; 
 
-/**
- * Move the agent to (targetX, targetY) following A*.
- *
- * Blocked intermediate tile  → excluded from walkable so A* detours around it
- *   (in a single-lane hallway A* naturally backtracks to find the alternate route).
- * Blocked goal tile          → wait 500 ms per retry; give up after ~3 s so the
- *   agent can pick a different intention rather than looping forever.
- */
 export async function navigateTo(targetX, targetY, stoppedFn) {
     const goal    = { x: Math.round(targetX), y: Math.round(targetY) };
     const goalKey = key(goal.x, goal.y);
     const walkable = getWalkable();
-    const agentBlocked  = new Set(); // intermediate tiles occupied by other agents
+    const agentBlocked  = new Set(); 
     let goalBlockedCount = 0;
 
     while (Math.round(me.x) !== goal.x || Math.round(me.y) !== goal.y) {
         if (stoppedFn()) throw ['stopped'];
 
-        // Build effective walkable excluding known agent-blocked tiles (never the goal)
         const effective = agentBlocked.size === 0
             ? walkable
             : new Set([...walkable].filter(k => !agentBlocked.has(k)));
 
         let path = astar({ x: Math.round(me.x), y: Math.round(me.y) }, goal, effective);
 
-        // If exclusions cut off all routes, clear them and retry with full walkable
+        // If the agent is blocked, we replan excluding the blocking tiles.
         if (!path || path.length === 0) {
             agentBlocked.clear();
             path = astar({ x: Math.round(me.x), y: Math.round(me.y) }, goal, walkable);
@@ -125,14 +116,14 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                 const bk = key(Math.round(me.x) + dx, Math.round(me.y) + dy);
 
                 if (bk === goalKey) {
-                    // Goal tile occupied by another agent — wait briefly, then give up
+                    // In this case we implemented that if an agent is blocking a tile, we wait and retry (maybe the agent will move). Otherwise we replan trying to go around it
                     goalBlockedCount++;
                     if (goalBlockedCount >= GOAL_BLOCKED_MAX_WAIT)
                         throw ['goal blocked', goal.x, goal.y];
                     console.log(`[nav] goal ${bk} blocked — waiting (${goalBlockedCount}/${GOAL_BLOCKED_MAX_WAIT})`);
                     await new Promise(r => setTimeout(r, GOAL_BLOCKED_WAIT_MS));
                 } else {
-                    // Intermediate tile blocked — exclude it so A* routes around
+                    // If an intermediate tile is blocked, we add it to the blocked set and replan immediately
                     agentBlocked.add(bk);
                     console.log(`[nav] blocked at ${bk} — recomputing path`);
                 }

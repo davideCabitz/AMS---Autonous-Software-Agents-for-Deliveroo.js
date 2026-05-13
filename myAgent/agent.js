@@ -7,11 +7,9 @@ import { distance }                from './utils/distance.js';
 import { IntentionRevisionReplace } from './intentions/IntentionRevisionReplace.js';
 
 const MIN_DELIVERY_REWARD = 5;
-const IDLE_WAIT_MS        = 2000; // ms to wait before exploring away (skipped when on a spawner)
+const IDLE_WAIT_MS        = 2000; // IDLE time that agent waits on a parcel spawner, maybe other parcel will spawn and it will increase its total score
 
-let idleWaitStart = null; // timestamp when agent became idle at a spawner
-
-// ─── BELIEF REVISION ──────────────────────────────────────────────────────────
+let idleWaitStart = null; // var for tracking when the agent started waiting on a spawner.
 
 socket.onYou(data => {
     me.update(data);
@@ -23,8 +21,6 @@ socket.onSensing(sensing => {
     optionsGeneration();
 });
 
-// ─── SHARED UTILITIES ─────────────────────────────────────────────────────────
-
 function nearestDelivery(from = me) {
     return [...deliveryTiles].sort((a, b) => distance(from, a) - distance(from, b))[0];
 }
@@ -33,10 +29,7 @@ function scoreOf(parcel) {
     return parcel.reward / Math.max(1, distance(me, parcel));
 }
 
-/**
- * Reward still available when the agent reaches the parcel then delivers it.
- * Reward decays −1 every DECAY_STEPS_PER_REWARD movement steps.
- */
+/** Here we compute the estimated reward at delivery for a given parcel */
 function estimatedRewardAtDelivery(parcel) {
     const toParcel   = distance(me, parcel);
     const delTile    = nearestDelivery(parcel);
@@ -73,7 +66,9 @@ function strategySimple() {
     exploreIfIdle();
 }
 
-// ─── STRATEGY 2: greedy multi-pickup (accumulate parcels, then deliver) ───────
+// In this strategy we try to accumulate parcels in the inventory if they are worth picking up (i.e. they have a positive estimated reward at delivery),
+// and only deliver when we don't have any worthwhile parcel in sensing range. The intuition is that maybe it's better to pick up multiple parcels and deliver
+//  them together before the reward starts decaying, rather than delivering immediately after each pickup.
 
 function strategyGreedy() {
     const carrying = parcels.carriedBy(me.id);
@@ -117,7 +112,9 @@ function strategyGreedy() {
     exploreIfIdle();
 }
 
-// ─── EXPLORATION (shared) ─────────────────────────────────────────────────────
+// Exploration plan in case if idlness. Important when in a spawner zone of parcel there is no parcel coming for 2/3s, we prioritize
+// exploring other spawners NOT IN SENSING ZONE to increase the chances of finding valid parcels. RightNow this strategy is valid only if
+// the agent doesn't carry any parcel, because in this case he will only deliver it to the delivery zone
 
 function exploreIfIdle() {
     const current = myAgent.intention_queue.at(-1);
@@ -125,19 +122,15 @@ function exploreIfIdle() {
     if (current) {
         const [intent, tx, ty] = current.predicate;
 
-        // never interrupt an active pickup or delivery
         if (intent === 'go_pick_up' || intent === 'go_deliver') {
             idleWaitStart = null;
             return;
         }
 
-        // already heading to an out-of-range spawner — still moving, not idle
         if (intent === 'go_explore' && distance(me, { x: tx, y: ty }) > OBSERVATION_DISTANCE) {
             idleWaitStart = null;
             return;
         }
-
-        // explore target is now inside vision → agent has arrived, start idle timer below
     }
 
     // On a spawner tile — wait 2 s for a parcel to potentially spawn
@@ -167,16 +160,12 @@ function exploreIfIdle() {
     }
 }
 
-// ─── ACTIVE STRATEGY — comment/uncomment to switch ───────────────────────────
-
 function optionsGeneration() {
     if (!me.isReady) return;
 
     //strategySimple();   // deliver immediately after each pickup
      strategyGreedy();   // accumulate parcels in sensing range, then deliver
 }
-
-// ─── START ────────────────────────────────────────────────────────────────────
 
 const myAgent = new IntentionRevisionReplace();
 myAgent.loop();

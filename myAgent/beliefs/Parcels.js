@@ -1,14 +1,8 @@
-/**
- * Belief state for parcels.
- * Synced with every sensing tick: new parcels are added, vanished ones removed.
- *
- * @typedef {{ id: string, x: number, y: number, reward: number, carriedBy?: string }} Parcel
- */
 export class Parcels {
     /** @type {Map<string, Parcel>} */
     #map = new Map();
 
-    /** Called each sensing tick with the full visible parcel list. */
+
     sync(sensingParcels) {
         for (const p of sensingParcels) {
             this.#map.set(p.id, p);
@@ -25,7 +19,7 @@ export class Parcels {
         return [...this.#map.values()];
     }
 
-    /** Free parcels (not carried by anyone). */
+    /*Free parcels */
     free() {
         return this.all().filter(p => !p.carriedBy);
     }

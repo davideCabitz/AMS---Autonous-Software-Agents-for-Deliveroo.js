@@ -7,22 +7,16 @@ import { Parcels }     from './beliefs/Parcels.js';
 export const socket  = DjsConnect();
 export const me      = new Me();
 export const parcels = new Parcels();
-
-/**
- * Tile type reference (IOTile.js):
- *   '0' = wall  '1' = parcel spawner  '2' = delivery
- *   '3' = plain walkable  '4' = base
- */
 export const deliveryTiles = [];
 export const spawnerTiles  = [];
 export const walkableTiles = [];
 
-/** PDDL beliefset — topology + delivery facts, rebuilt every onMap. */
+/* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
 export let beliefset = new Beliefset();
 
 export let OBSERVATION_DISTANCE   = 5;
-export let DECAY_STEPS_PER_REWARD = 10; // steps of movement between each -1 reward
-export let MOVEMENT_DURATION      = 100; // ms per step
+export let DECAY_STEPS_PER_REWARD = 10;
+export let MOVEMENT_DURATION      = 100; // Time per step
 
 const DECAY_EVENT_MS = {
     'frame': 50, '1s': 1000, '2s': 2000,
@@ -42,7 +36,6 @@ socket.onConfig(config => {
 socket.onMap((_w, _h, tiles) => {
     console.log('[map] sample tile:', JSON.stringify(tiles[0]));
 
-    // ── tile classification (handles both boolean-flag and type-string formats)
     deliveryTiles.length = 0;
     deliveryTiles.push(...tiles.filter(t =>
         t.delivery || t.type === '2' || t.type === 2
@@ -60,7 +53,7 @@ socket.onMap((_w, _h, tiles) => {
 
     console.log(`[map] delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | walkable: ${walkableTiles.length}`);
 
-    // ── build PDDL beliefset from map topology
+    // We build the beliefeset for the PDDL solver for now. Must be updated on each map event since the solver doesn't have direct access to the map data structure.
     beliefset = new Beliefset();
     const walkSet  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
     const delivSet = new Set(deliveryTiles.map(t => `${t.x}_${t.y}`));
