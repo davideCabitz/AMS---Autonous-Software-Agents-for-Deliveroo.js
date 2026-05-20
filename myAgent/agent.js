@@ -203,11 +203,12 @@ function exploreIfIdle() {
     }
 
     // On a spawner tile — wait 2 s for a parcel to potentially spawn
+    // Skip wait entirely when sensing area is too small to ever detect a parcel
     const onSpawner = spawnerTiles.some(
         t => Math.round(me.x) === t.x && Math.round(me.y) === t.y
     );
 
-    if (onSpawner) {
+    if (onSpawner && OBSERVATION_DISTANCE > 1) {
         if (idleWaitStart === null) {
             idleWaitStart = Date.now();
             console.log('[explore] on spawner — waiting 2 s for parcel to appear');
