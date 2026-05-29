@@ -73,8 +73,25 @@ function astar(start, goal, walkable) {
     return null;
 }
 
+/**
+ * Path (array of directions) from start to goal over the walkable map, optionally
+ * treating `blockedKeys` (a Set of "x_y") as impassable. Returns null if no path.
+ * Used by PddlMove to decide whether a crate actually blocks the route (so the
+ * online solver is only contacted when pushing is genuinely required).
+ */
+export function findRoute(start, goal, blockedKeys = null) {
+    let walkable = getWalkable();
+    if (blockedKeys && blockedKeys.size > 0)
+        walkable = new Set([...walkable].filter(k => !blockedKeys.has(k)));
+    return astar(
+        { x: Math.round(start.x), y: Math.round(start.y) },
+        { x: Math.round(goal.x),  y: Math.round(goal.y) },
+        walkable
+    );
+}
+
 const GOAL_BLOCKED_WAIT_MS  = 500;
-const GOAL_BLOCKED_MAX_WAIT = 6; 
+const GOAL_BLOCKED_MAX_WAIT = 6;
 
 export async function navigateTo(targetX, targetY, stoppedFn) {
     const goal    = { x: Math.round(targetX), y: Math.round(targetY) };

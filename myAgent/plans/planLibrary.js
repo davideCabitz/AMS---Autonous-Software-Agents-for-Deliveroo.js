@@ -5,4 +5,7 @@ import { PddlMove }   from './PddlMove.js';
 import { AStarMove }  from './AStarMove.js';
 
 
-export const planLibrary = [GoPickUp, GoDeliver, GoExplore, AStarMove];
+// PddlMove takes priority for go_to, but only applies when crates are present
+// (see PddlMove.isApplicableTo). Otherwise it falls through to AStarMove, which
+// also serves as fallback if the online solver fails.
+export const planLibrary = [GoPickUp, GoDeliver, GoExplore, PddlMove, AStarMove];
