@@ -174,7 +174,7 @@ socket.on('crate', (action, { x, y }) => {
 });
 
 socket.onSensing(sensing => {
-    console.log('[sensing] crates in range:', JSON.stringify(sensing.crates));
+    if (sensing.crates?.length) console.log('[sensing] crates in range:', JSON.stringify(sensing.crates));
     if (!mapHasCrates) {
         if (sensing.crates?.length > 0) {
             mapHasCrates = true;

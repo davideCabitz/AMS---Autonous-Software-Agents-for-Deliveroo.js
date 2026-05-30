@@ -25,6 +25,13 @@ export class Strategy {
     idleWaitStart = null;
 
     /**
+     * Re-deliberation cadence in ms, owned by the agent loop. 0 = no heartbeat
+     * (rely purely on sensing/you events). Strategies that can idle without an
+     * event to wake them (e.g. blind, stationary after a pickup) override this.
+     */
+    tickIntervalMs = 0;
+
+    /**
      * @param {Array|null} _currentIntent predicate of the current intention, e.g. ['go_deliver', x, y]
      * @returns {Array|null} predicate to push, or null to keep the current intention
      */
