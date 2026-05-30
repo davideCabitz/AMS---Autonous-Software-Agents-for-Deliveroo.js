@@ -1,4 +1,4 @@
-import { me, socket, walkableTiles, MOVEMENT_DURATION } from '../context.js';
+import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, MOVEMENT_DURATION } from '../context.js';
 
 const DIRS = [
     { dx:  1, dy:  0, dir: 'right' },
@@ -14,7 +14,8 @@ const h   = (x1, y1, x2, y2) => Math.abs(x1 - x2) + Math.abs(y1 - y2);
 
 let _walkable = null;
 function getWalkable() {
-    if (!_walkable || _walkable.size === 0)
+    // Rebuild if null or if walkableTiles changed (map reload).
+    if (!_walkable || _walkable.size !== walkableTiles.length)
         _walkable = new Set(walkableTiles.map(t => key(t.x, t.y)));
     return _walkable;
 }
@@ -96,23 +97,30 @@ const GOAL_BLOCKED_MAX_WAIT = 6;
 export async function navigateTo(targetX, targetY, stoppedFn) {
     const goal    = { x: Math.round(targetX), y: Math.round(targetY) };
     const goalKey = key(goal.x, goal.y);
-    const walkable = getWalkable();
-    const agentBlocked  = new Set(); 
+    const agentBlocked  = new Set();
     let goalBlockedCount = 0;
 
     while (Math.round(me.x) !== goal.x || Math.round(me.y) !== goal.y) {
         if (stoppedFn()) throw ['stopped'];
 
+        // Rebuild crate exclusion on every iteration: a new crate may have entered
+        // sensing range or been reported via event since the last step.
+        // Crates are treated as walls; when they block all routes A* returns null
+        // and we throw 'no path to', letting PddlMove take over.
+        const crateSet    = new Set(crateTiles.map(c => key(Math.round(c.x), Math.round(c.y))));
+        const baseWalkable = crateSet.size > 0
+            ? new Set([...getWalkable()].filter(k => !crateSet.has(k)))
+            : getWalkable();
+
         const effective = agentBlocked.size === 0
-            ? walkable
-            : new Set([...walkable].filter(k => !agentBlocked.has(k)));
+            ? baseWalkable
+            : new Set([...baseWalkable].filter(k => !agentBlocked.has(k)));
 
         let path = astar({ x: Math.round(me.x), y: Math.round(me.y) }, goal, effective);
 
-        // If the agent is blocked, we replan excluding the blocking tiles.
         if (!path || path.length === 0) {
             agentBlocked.clear();
-            path = astar({ x: Math.round(me.x), y: Math.round(me.y) }, goal, walkable);
+            path = astar({ x: Math.round(me.x), y: Math.round(me.y) }, goal, baseWalkable);
         }
 
         if (!path || path.length === 0) throw ['no path to', goal.x, goal.y];
@@ -127,6 +135,14 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                 me.y = result.y;
                 agentBlocked.clear();
                 goalBlockedCount = 0;
+                // If we moved onto a tile that was in crateTiles, the crate is gone
+                // (was pushed or was a stale inference). Remove it so A* can use the tile again.
+                const movedKey = key(Math.round(result.x), Math.round(result.y));
+                const staleIdx = crateTiles.findIndex(c => key(Math.round(c.x), Math.round(c.y)) === movedKey);
+                if (staleIdx !== -1) {
+                    crateTiles.splice(staleIdx, 1);
+                    console.log(`[nav] walked through ${movedKey} — removed stale crate entry`);
+                }
                 await new Promise(r => setTimeout(r, MOVEMENT_DURATION));
             } else {
                 const { dx, dy } = DIRS.find(d => d.dir === dir);
@@ -140,9 +156,19 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                     console.log(`[nav] goal ${bk} blocked — waiting (${goalBlockedCount}/${GOAL_BLOCKED_MAX_WAIT})`);
                     await new Promise(r => setTimeout(r, GOAL_BLOCKED_WAIT_MS));
                 } else {
-                    // If an intermediate tile is blocked, we add it to the blocked set and replan immediately
                     agentBlocked.add(bk);
-                    console.log(`[nav] blocked at ${bk} — recomputing path`);
+                    // Only infer a crate if the blocked tile is a known crate zone tile.
+                    // Any other block (other agents, temporary obstacles) goes into
+                    // agentBlocked only — adding them to crateTiles would mark the tile
+                    // as having a crate, suppressing (free t) and breaking PDDL goals.
+                    const isKnownCrateZone = crateSpawnerTiles.some(t => key(t.x, t.y) === bk);
+                    if (isKnownCrateZone && !crateTiles.some(c => key(Math.round(c.x), Math.round(c.y)) === bk)) {
+                        const [bx, by] = bk.split('_').map(Number);
+                        crateTiles.push({ x: bx, y: by });
+                        console.log(`[nav] inferred crate at ${bk} — crateTiles: ${crateTiles.length}`);
+                    } else {
+                        console.log(`[nav] blocked at ${bk} — recomputing path`);
+                    }
                 }
                 break;
             }

@@ -5,14 +5,13 @@ import { onlineSolver }   from '@unitn-asa/pddl-client';
 
 import { PlanBase } from './PlanBase.js';
 import {
-    me, socket, beliefset, mapHasCrates, MOVEMENT_DURATION,
+    me, socket, beliefset, mapHasCrates, MOVEMENT_DURATION, pddl,
     crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
 } from '../context.js';
 import { findRoute } from '../utils/astar.js';
 
-const __dirname         = dirname(fileURLToPath(import.meta.url));
-const domain            = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'),  'utf8');
-const problemTemplate   = readFileSync(join(__dirname, '../../problem-deliveroo.pddl'), 'utf8');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const domain    = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'), 'utf8');
 
 // PDDL object names must start with a letter (a leading digit is read as a number
 // by the solver), so tiles are named t<x>_<y> and crates c<x>_<y>.
@@ -37,18 +36,14 @@ const MAX_REPLANS = 6;
  * crate blocks a step mid-execution.
  */
 export class PddlMove extends PlanBase {
-    // Applicable only if a crate genuinely blocks the path to the target:
-    // reachable when crates are treated as removable, but NOT reachable around them.
-    // If a crate-free route exists, this returns false and the cheap AStarMove runs
-    // instead — so merely being near a crate never triggers the solver.
+    // Only engage the online solver when a crate genuinely blocks the route:
+    // - if a crate-free path exists, return false → AStarMove handles it cheaply
+    // - if crates block all paths but a topological path exists → true → plan pushes
     static isApplicableTo(intent, x, y) {
         if (intent !== 'go_to' || !mapHasCrates || crateTiles.length === 0) return false;
-
         const crateKeys = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
-        // A route that avoids every crate exists -> no need to push, let A* handle it.
-        if (findRoute(me, { x, y }, crateKeys)) return false;
-        // Otherwise: only reachable if crates move. Worth pushing iff a route exists at all.
-        return !!findRoute(me, { x, y });
+        if (findRoute(me, { x, y }, crateKeys)) return false; // crate-free path exists
+        return !!findRoute(me, { x, y });                     // reachable if crates move
     }
 
     async execute(intent, x, y) {
@@ -74,17 +69,20 @@ export class PddlMove extends PlanBase {
             if (this.stopped) throw ['stopped'];
             if (!plan || plan.length === 0) throw ['pddl-no-plan'];
 
-            // Execute the whole macro-plan; stop early only if a move is blocked.
-            const blocked = await this.#runPlan(plan);
+            // Lock: once a plan is in hand, block intention replacement until done.
+            pddl.busy = true;
+            let blocked;
+            try {
+                blocked = await this.#runPlan(plan);
+            } finally {
+                pddl.busy = false;
+            }
 
             if (this.stopped) throw ['stopped'];
             if (pTile(me.x, me.y) === goalTile) return true;
 
-            // Plan ran to completion but we're not at the goal and nothing blocked us:
-            // the world disagrees with our model — hand back so another plan can try.
             if (!blocked) throw ['pddl-plan-incomplete'];
 
-            // A step was blocked (a crate appeared / shifted): loop and replan from here.
             console.log('[pddl] route blocked mid-plan — replanning from current state');
         }
 
@@ -93,17 +91,53 @@ export class PddlMove extends PlanBase {
 
     /** Run the plan step by step. Returns true if a step was blocked (replan needed). */
     async #runPlan(plan) {
+        const DIR_DELTA = { right: [1,0], left: [-1,0], up: [0,1], down: [0,-1] };
+        const ck = (x, y) => `${Math.round(x)}_${Math.round(y)}`;
+
         for (const step of plan) {
             if (this.stopped) throw ['stopped'];
 
-            const dir = ACTION_DIR[String(step.action).toLowerCase()];
-            if (!dir) continue; // unknown action — skip defensively
+            const actionName = String(step.action).toLowerCase();
+            const dir = ACTION_DIR[actionName];
+            if (!dir) continue;
+
+            const isPush = actionName.startsWith('push');
+            const [dx, dy] = DIR_DELTA[dir];
+
+            // For push actions, capture old/new crate positions before the move.
+            // Agent is at me.x/me.y; crate is one step ahead; destination is two steps ahead.
+            let newCrateTile = null;
+            if (isPush) {
+                newCrateTile = {
+                    x: Math.round(me.x) + dx * 2,
+                    y: Math.round(me.y) + dy * 2,
+                };
+            }
 
             const r = await socket.emitMove(dir);
-            if (!r) return true; // blocked by an unforeseen obstacle -> needs replan
+            if (!r) return true;
 
             me.x = r.x;
             me.y = r.y;
+
+            // The agent just moved onto a tile — if it was tracked as a crate (the old
+            // crate position after a push), remove it now.
+            const movedKey = ck(r.x, r.y);
+            const staleIdx = crateTiles.findIndex(c => ck(c.x, c.y) === movedKey);
+            if (staleIdx !== -1) {
+                crateTiles.splice(staleIdx, 1);
+                console.log(`[pddl] cleared old crate at ${movedKey}`);
+            }
+
+            // Track where the crate landed after a push.
+            if (isPush && newCrateTile) {
+                const nk = ck(newCrateTile.x, newCrateTile.y);
+                if (!crateTiles.some(c => ck(c.x, c.y) === nk)) {
+                    crateTiles.push(newCrateTile);
+                    console.log(`[pddl] crate pushed to ${nk} — crateTiles: ${crateTiles.length}`);
+                }
+            }
+
             await new Promise(res => setTimeout(res, MOVEMENT_DURATION));
         }
         return false;
@@ -137,14 +171,26 @@ export class PddlMove extends PlanBase {
             if (crateZoneSet.has(raw)) freeFacts.push(`(pushable ${name})`);
         }
 
-        const objects = `me ${crateObjects.join(' ')} ${beliefset.objects.join(' ')}`.trim();
+        const freePushable = [...crateZoneSet].filter(k => !crateSet.has(k));
+        console.log(`[pddl] crates: [${[...crateSet].join(', ')}]`);
+        console.log(`[pddl] crate zones (pushable): [${[...crateZoneSet].join(', ')}]`);
+        console.log(`[pddl] free pushable targets: [${freePushable.join(', ')}]`);
+        console.log(`[pddl] goal: ${goalTile} | me: ${myTile}`);
 
-        return problemTemplate
-            .replace('{{OBJECTS}}',        objects)
-            .replace('{{MY_TILE}}',        myTile)
-            .replace('{{CRATE_FACTS}}',    crateFacts.join(' '))
-            .replace('{{TOPOLOGY_FACTS}}', beliefset.toPddlString())
-            .replace('{{FREE_FACTS}}',     freeFacts.join(' '))
-            .replace('{{GOAL_TILE}}',      goalTile);
+        const objects = `me ${crateObjects.join(' ')} ${beliefset.objects.join(' ')}`.trim();
+        const init = [
+            `(me me) (agent me) (at me ${myTile})`,
+            crateFacts.join(' '),
+            beliefset.toPddlString(),
+            freeFacts.join(' '),
+        ].filter(Boolean).join(' ');
+
+        return `\
+(define (problem deliveroo)
+    (:domain default)
+    (:objects ${objects})
+    (:init ${init})
+    (:goal (at me ${goalTile}))
+)`;
     }
 }

@@ -5,7 +5,7 @@ import { PddlMove }   from './PddlMove.js';
 import { AStarMove }  from './AStarMove.js';
 
 
-// PddlMove takes priority for go_to, but only applies when crates are present
-// (see PddlMove.isApplicableTo). Otherwise it falls through to AStarMove, which
-// also serves as fallback if the online solver fails.
+// PddlMove is checked first for go_to: if a crate genuinely blocks the route it
+// plans the full macro-plan (push + navigate). If no crate blocks, isApplicableTo
+// returns false instantly and AStarMove handles it with zero network cost.
 export const planLibrary = [GoPickUp, GoDeliver, GoExplore, PddlMove, AStarMove];

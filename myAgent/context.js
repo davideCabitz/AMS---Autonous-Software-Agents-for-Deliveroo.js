@@ -19,6 +19,12 @@ export const crateTiles    = [];
 export const crateSpawnerTiles = [];
 export let   mapHasCrates      = false;
 
+/* Shared PDDL execution state. PddlMove sets busy=true once a plan is found and
+ * executing; IntentionRevisionReplace refuses to stop the current intention while
+ * busy is true, ensuring the full macro-plan (including crate pushes) runs to
+ * completion before the agent switches to a new goal. */
+export const pddl = { busy: false };
+
 /* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
 export let beliefset = new Beliefset();
 
@@ -64,9 +70,11 @@ socket.onMap((_w, _h, tiles) => {
     console.log(`[map] mapHasCrates=${mapHasCrates} (${crateSpawnerTiles.length} crate tiles)`);
 
     walkableTiles.length = 0;
-    walkableTiles.push(...tiles.filter(t =>
-        t.walkable !== false && t.type !== '0' && t.type !== 0
-    ));
+    walkableTiles.push(...tiles.filter(t => {
+        if (t.type === '0' || t.type === 0) return false;           // wall — always exclude
+        if (t.type === '5!' || t.type === '5' || t.type === 5) return true; // crate zone — always include (server may mark walkable:false when a crate is on it, but the PDDL planner needs these tiles for push planning)
+        return t.walkable !== false;
+    }));
 
     console.log(`[map] delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length}`);
 
@@ -90,16 +98,38 @@ socket.onMap((_w, _h, tiles) => {
     console.log(`[map] beliefset: ${beliefset.objects.length} objects`);
 });
 
-socket.onSensing(sensing => {
-    // Fallback: if map detection missed crate tiles (type format mismatch) but
-    // sensing actually sees crates, enable crate mode now so nothing is skipped.
-    if (!mapHasCrates && sensing.crates?.length > 0) {
-        mapHasCrates = true;
-        console.log('[sensing] crates detected via sensing — enabling crate mode');
-    }
+// Primary crate tracking via server events (global, not range-limited).
+socket.on('crate', (action, { x, y }) => {
     if (!mapHasCrates) return;
-    // Track sensed crates (movable obstacles). PddlMove only runs when this is
-    // non-empty, so we never pay the online-solver round-trip with no crate to push.
-    crateTiles.length = 0;
-    if (sensing.crates) crateTiles.push(...sensing.crates);
+    const rx = Math.round(x), ry = Math.round(y);
+    if (action === 'create') {
+        if (!crateTiles.some(c => Math.round(c.x) === rx && Math.round(c.y) === ry))
+            crateTiles.push({ x: rx, y: ry });
+        console.log(`[crate] appeared at ${rx}_${ry} | total: ${crateTiles.length}`);
+    } else if (action === 'dispose') {
+        const idx = crateTiles.findIndex(c => Math.round(c.x) === rx && Math.round(c.y) === ry);
+        if (idx !== -1) crateTiles.splice(idx, 1);
+        console.log(`[crate] removed at ${rx}_${ry} | total: ${crateTiles.length}`);
+    }
+});
+
+socket.onSensing(sensing => {
+    console.log('[sensing] crates in range:', JSON.stringify(sensing.crates));
+    if (!mapHasCrates) {
+        if (sensing.crates?.length > 0) {
+            mapHasCrates = true;
+            console.log('[sensing] crates detected via sensing — enabling crate mode');
+        } else return;
+    }
+    if (!sensing.crates?.length) return;
+    // Merge: add newly sensed crates without clearing inferred ones.
+    // Inferred crates (from physical blocks) may be outside sensing range —
+    // clearing them here causes the blocked→infer→clear→blocked loop.
+    // Removal only happens via socket 'dispose' events or when the agent
+    // successfully walks through a tile (see astar.js).
+    for (const c of sensing.crates) {
+        const rx = Math.round(c.x), ry = Math.round(c.y);
+        if (!crateTiles.some(t => Math.round(t.x) === rx && Math.round(t.y) === ry))
+            crateTiles.push({ x: rx, y: ry });
+    }
 });
