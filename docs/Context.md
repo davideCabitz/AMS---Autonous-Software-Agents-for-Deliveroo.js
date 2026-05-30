@@ -93,7 +93,7 @@ BDI agent in ES modules (Node.js, `"type": "module"`). A* for movement; PDDL (on
 
 ```
 myAgent/
-├── agent.js                 # Entry point: sensing hooks, option generation, strategies
+├── agent.js                 # Thin entry: sensing hooks → strategy.decide() → push; starts the loop
 ├── context.js               # Shared state: socket, beliefs, map tiles, config, PDDL beliefset
 ├── beliefs/
 │   ├── Me.js                # Agent self-state (id, name, x, y, score)
@@ -111,6 +111,13 @@ myAgent/
 │   ├── GoExplore.js         # go_explore → go_to
 │   ├── AStarMove.js         # go_to via A* (default movement)
 │   └── PddlMove.js          # go_to via online PDDL solver (only when a crate blocks the route)
+├── strategies/             # Strategy pattern: option-generation policies
+│   ├── Strategy.js             # Base: decide() contract + shared helpers + exploreIfIdle()
+│   ├── StrategyGreedy.js       # Accumulate in-range parcels, then deliver (default, sensing maps)
+│   ├── StrategySimple.js       # Deliver as soon as carrying; else best free parcel
+│   ├── StrategyNotTooGreedy.js # Greedy + one-time detour to a nearby unseen spawner
+│   ├── StrategyBlind.js        # Explore-only, anti-lock wandering for (near-)zero-sensing maps
+│   └── selectStrategy.js       # Picks the strategy from config (OBSERVATION_DISTANCE)
 └── utils/
     ├── astar.js             # A* pathfinder: findRoute() + navigateTo() with blocking/replan
     └── distance.js          # Manhattan distance
@@ -127,7 +134,7 @@ multiple_run.js              # Spawns 5 agent processes for multi-agent runs
    - `onMap`: classifies tiles into `deliveryTiles`, `spawnerTiles`, `crateSpawnerTiles`, `walkableTiles`; sets `mapHasCrates`; builds the PDDL `beliefset` (tile/delivery/right/left/up/down facts).
    - `onSensing`: refreshes `crateTiles` (only if `mapHasCrates`).
 2. `agent.js` registers `onYou` (updates `me`) and `onSensing` (updates `parcels`); both call `optionsGeneration()`.
-3. `optionsGeneration()` runs the active strategy, which pushes a predicate via `myAgent.push([...])`.
+3. `optionsGeneration()` lazily resolves a strategy via `selectStrategy()` (once, when ready), then calls `strategy.decide(currentIntent)`; the returned predicate (if any) is pushed via `myAgent.push([...])`. `decide()` returning `null` means "keep the current intention".
 4. `IntentionRevisionReplace` queues an `IntentionDeliberation` and stops the previous intention.
 5. `IntentionRevision.loop()` continuously pursues the front intention, dropping stale ones (`#isValid`: a `go_pick_up` is invalid once its parcel is gone or carried).
 6. `IntentionDeliberation.achieve()` walks `planLibrary` and runs the first plan whose `isApplicableTo()` matches the predicate.
@@ -162,14 +169,18 @@ multiple_run.js              # Spawns 5 agent processes for multi-agent runs
 - `#buildProblem()` substitutes runtime facts into `problem-deliveroo.pddl` (objects, agent tile, crate facts, beliefset topology, free/pushable facts, goal tile). Tile/crate object names are letter-prefixed (`t<x>_<y>`, `c<x>_<y>`) for the solver.
 - Calls `onlineSolver(domain, problem)`, executes the macro-plan step by step, and replans (up to `MAX_REPLANS = 6`) if a move is blocked mid-plan by a newly sensed crate.
 
-### 5.8 Strategies (`agent.js`)
+### 5.8 Strategies (`strategies/`)
 
-Selected in `optionsGeneration()` (currently `strategyGreedy`):
+Option generation follows the **Strategy pattern**. Each strategy is a pure decider implementing `decide(currentIntent) → predicate | null` — returning `null` means "keep the current intention". Strategies never touch the intention queue (`agent.js` does the `push`), and per-strategy mutable state lives on the instance (no module globals), so switching strategy can't leak state between them.
 
-- `strategySimple` — deliver immediately whenever carrying; otherwise pick the best free parcel by `reward / distance`.
-- `strategyGreedy` (active) — accumulate parcels still worth picking up within sensing range (`estimatedRewardAtDelivery ≥ MIN_DELIVERY_REWARD`), then deliver when nothing nearby is worthwhile.
-- `strategyNotTooGreedy` — like greedy, but does a one-time detour to a nearby unseen spawner (just outside sensing range) before delivering.
-- `exploreIfIdle()` — when no parcel/delivery is pending: wait briefly on a spawner tile for a spawn, else `go_explore` toward the nearest out-of-sensing-range spawner (or walkable tile).
+- `Strategy` (base) — shared helpers `nearestDelivery` / `scoreOf` / `estimatedRewardAtDelivery`, the sensing-map `exploreIfIdle()`, and `idleWaitStart` state. Exports `MIN_DELIVERY_REWARD`, `IDLE_WAIT_MS`.
+- `StrategySimple` — deliver immediately whenever carrying; otherwise pick the best free parcel by `reward / distance`.
+- `StrategyGreedy` — accumulate parcels still worth picking up within sensing range (`estimatedRewardAtDelivery ≥ MIN_DELIVERY_REWARD`), then deliver when nothing nearby is worthwhile. Default for sensing maps.
+- `StrategyNotTooGreedy` — like greedy, but does a one-time per-trip detour (`#detourDone`) to a nearby unseen spawner just outside sensing range before delivering.
+- `StrategyBlind` — exploration-only policy for (near-)zero-sensing maps (e.g. chaotic maze), where the parcel belief model is useless. Fixes the "target lock" problem: the explore commitment is bounded by a time-box, a physical-movement stall detector (not Manhattan progress, which misleads in mazes), and a short per-target blacklist (also applied on arrival so exploration fans out instead of ping-ponging).
+- `exploreIfIdle()` (in base) — when no parcel/delivery is pending: wait briefly on a spawner tile for a spawn (skipped when `OBSERVATION_DISTANCE <= 1`), else `go_explore` toward the nearest out-of-sensing-range spawner (or walkable tile).
+
+`selectStrategy()` chooses once when the agent is ready: `OBSERVATION_DISTANCE` in `0..1` → `StrategyBlind`; otherwise (including the `< 0` infinite-sensing sentinel) → `StrategyGreedy` (the previous default, so non-blind maps are unchanged).
 
 ### 5.9 Configuration / external
 
