@@ -10,8 +10,9 @@ import {
 } from '../context.js';
 import { findRoute } from '../utils/astar.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const domain    = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'), 'utf8');
+const __dirname         = dirname(fileURLToPath(import.meta.url));
+const domain            = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'),  'utf8');
+const problemTemplate   = readFileSync(join(__dirname, '../../problem-deliveroo.pddl'), 'utf8');
 
 // PDDL object names must start with a letter (a leading digit is read as a number
 // by the solver), so tiles are named t<x>_<y> and crates c<x>_<y>.
@@ -110,7 +111,7 @@ export class PddlMove extends PlanBase {
 
     /** Encode the current world (agent, crates, free/pushable tiles) as a PDDL problem. */
     #buildProblem(goalTile) {
-        const myTile   = pTile(me.x, me.y);
+        const myTile       = pTile(me.x, me.y);
         const crateSet     = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
         // Crates can only be pushed onto crate-zone tiles (the yellow sliding/spawner
         // tiles). Pushing onto delivery or regular walkable tiles is not allowed by the
@@ -125,35 +126,25 @@ export class PddlMove extends PlanBase {
             crateFacts.push(`(crate ${id}) (at ${id} ${pTile(c.x, c.y)})`);
         }
 
-        const extraFacts = [];
+        const freeFacts = [];
         for (const tile of walkableTiles) {
             const raw  = `${tile.x}_${tile.y}`;
             const name = `t${raw}`;
-            if (!crateSet.has(raw))    extraFacts.push(`(free ${name})`);
+            if (!crateSet.has(raw))    freeFacts.push(`(free ${name})`);
             // A crate-zone tile that already has a crate on it is not free,
             // so it won't receive (free) above — and (pushable) without (free)
             // is harmless (the domain requires both to allow a push).
-            if (crateZoneSet.has(raw)) extraFacts.push(`(pushable ${name})`);
+            if (crateZoneSet.has(raw)) freeFacts.push(`(pushable ${name})`);
         }
 
         const objects = `me ${crateObjects.join(' ')} ${beliefset.objects.join(' ')}`.trim();
-        const init = [
-            `(me me) (agent me) (at me ${myTile})`,
-            '(= (total-cost) 0)',
-            ...crateFacts,
-            beliefset.toPddlString(),
-            ...extraFacts
-        ].join(' ');
 
-        // Built by hand: the library's PddlProblem cannot emit a :metric, which we
-        // need so the planner accounts for push cost (move=1, push=2).
-        return `\
-(define (problem deliveroo)
-    (:domain default)
-    (:objects ${objects})
-    (:init ${init})
-    (:goal (at me ${goalTile}))
-    (:metric minimize (total-cost))
-)`;
+        return problemTemplate
+            .replace('{{OBJECTS}}',        objects)
+            .replace('{{MY_TILE}}',        myTile)
+            .replace('{{CRATE_FACTS}}',    crateFacts.join(' '))
+            .replace('{{TOPOLOGY_FACTS}}', beliefset.toPddlString())
+            .replace('{{FREE_FACTS}}',     freeFacts.join(' '))
+            .replace('{{GOAL_TILE}}',      goalTile);
     }
 }

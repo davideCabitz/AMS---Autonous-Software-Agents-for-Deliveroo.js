@@ -5,7 +5,7 @@
 ;; Pushing costs more than a plain step so the planner only moves obstacles when
 ;; doing so opens a genuinely shorter route.
 (define (domain default)
-    (:requirements :strips :action-costs)
+    (:requirements :strips)
     (:predicates
         (tile ?t)
         (delivery ?t)
@@ -21,31 +21,29 @@
         (down  ?t1 ?t2)
     )
 
-    (:functions (total-cost))
-
     ;; ---- plain agent moves: step onto an adjacent free tile ----
     (:action right
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (right ?from ?to) (free ?to))
-        :effect       (and (at ?me ?to) (not (at ?me ?from)) (increase (total-cost) 1))
+        :effect       (and (at ?me ?to) (not (at ?me ?from)))
     )
 
     (:action left
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (left ?from ?to) (free ?to))
-        :effect       (and (at ?me ?to) (not (at ?me ?from)) (increase (total-cost) 1))
+        :effect       (and (at ?me ?to) (not (at ?me ?from)))
     )
 
     (:action up
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (up ?from ?to) (free ?to))
-        :effect       (and (at ?me ?to) (not (at ?me ?from)) (increase (total-cost) 1))
+        :effect       (and (at ?me ?to) (not (at ?me ?from)))
     )
 
     (:action down
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (down ?from ?to) (free ?to))
-        :effect       (and (at ?me ?to) (not (at ?me ?from)) (increase (total-cost) 1))
+        :effect       (and (at ?me ?to) (not (at ?me ?from)))
     )
 
     ;; ---- push a crate one tile ahead; the agent follows into the crate's old tile ----
@@ -61,7 +59,6 @@
             (at ?me ?cratePos) (not (at ?me ?myPos))
             (at ?crate ?destPos) (not (at ?crate ?cratePos))
             (free ?cratePos) (not (free ?destPos))
-            (increase (total-cost) 2)
         )
     )
 
@@ -77,7 +74,6 @@
             (at ?me ?cratePos) (not (at ?me ?myPos))
             (at ?crate ?destPos) (not (at ?crate ?cratePos))
             (free ?cratePos) (not (free ?destPos))
-            (increase (total-cost) 2)
         )
     )
 
@@ -93,7 +89,6 @@
             (at ?me ?cratePos) (not (at ?me ?myPos))
             (at ?crate ?destPos) (not (at ?crate ?cratePos))
             (free ?cratePos) (not (free ?destPos))
-            (increase (total-cost) 2)
         )
     )
 
@@ -109,7 +104,6 @@
             (at ?me ?cratePos) (not (at ?me ?myPos))
             (at ?crate ?destPos) (not (at ?crate ?cratePos))
             (free ?cratePos) (not (free ?destPos))
-            (increase (total-cost) 2)
         )
     )
 )
