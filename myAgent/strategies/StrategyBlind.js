@@ -37,6 +37,10 @@ const EXPLORE_BLACKLIST_MS = 5000;
  * genuine path progress is being made).
  */
 export class StrategyBlind extends Strategy {
+    // Blind agents go stationary after a pickup/putdown and own-tile sensing emits
+    // no event to wake them, so they need the agent loop to re-deliberate on a timer.
+    tickIntervalMs = 100;
+
     #commitKey   = null;        // "x_y" of the current explore target
     #commitSince = 0;           // when we committed to it
     #lastPos     = null;        // last observed agent tile
