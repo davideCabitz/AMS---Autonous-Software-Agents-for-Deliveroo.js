@@ -1,5 +1,5 @@
-import { Strategy } from './Strategy.js';
-import { me, spawnerTiles, walkableTiles } from '../context.js';
+import { Strategy, MIN_DELIVERY_REWARD } from './Strategy.js';
+import { me, parcels, spawnerTiles, walkableTiles } from '../context.js';
 import { distance } from '../utils/distance.js';
 
 // Re-evaluate the explore target at least this often, even while committed.
@@ -10,18 +10,28 @@ const EXPLORE_STALL_MS     = 1500;
 const EXPLORE_BLACKLIST_MS = 5000;
 
 /**
- * Exploration-only strategy for maps with (near-)zero sensing — e.g. the chaotic
- * maze where OBSERVATION_DISTANCE <= 1. With no sensing the parcel-belief model is
- * useless (sensing.parcels is empty), so this strategy does not reason about
- * parcels at all this pass: it just keeps the agent wandering between spawners.
+ * Strategy for blind / (near-)zero-sensing maps — e.g. the chaotic maze, or any
+ * map reporting OBSERVATION_DISTANCE in -1..1, where the agent senses only the
+ * parcel(s) on its own tile. The static map (tiles, spawners, delivery zones,
+ * walkability) is fully known from onMap regardless of sensing, so navigation and
+ * delivery work normally; only parcel/agent visibility is limited.
  *
- * The point of this class is to fix the "target lock" problem: the base
- * exploreIfIdle keeps a go_explore target forever, so a blind agent that gets
- * displaced or blocked aims at a stale tile indefinitely. Here the commitment is
- * bounded by two signals that work without sensing:
+ * Behaviour:
+ *   - Grab what we step on: if standing on a parcel worth carrying (cost
+ *     heuristic), pick it up — even while already carrying, since blind sightings
+ *     are scarce. Then deliver to the nearest known delivery tile.
+ *   - Otherwise wander between spawners to discover parcels, using the anti-lock
+ *     exploration below.
+ *
+ * Anti-lock exploration fixes the "target lock" problem (the base exploreIfIdle
+ * keeps a go_explore target forever, so a displaced/blocked blind agent aims at a
+ * stale tile indefinitely). The commitment is bounded by signals that work
+ * without sensing:
  *   - a time-box (EXPLORE_COMMIT_MS): re-pick periodically regardless;
  *   - physical-movement stall (EXPLORE_STALL_MS): if the agent's tile stops
- *     changing it's stuck, so blacklist the target briefly and pick another.
+ *     changing it's stuck, so blacklist the target briefly and pick another;
+ *   - on arrival, blacklist the reached tile briefly so exploration fans out
+ *     instead of ping-ponging between the two closest spawners.
  * Manhattan progress toward the target is deliberately NOT used — in a maze it is
  * misleading (the agent routes around walls, so distance can plateau/grow while
  * genuine path progress is being made).
@@ -41,6 +51,30 @@ export class StrategyBlind extends Strategy {
         if (!this.#lastPos || this.#lastPos.x !== px || this.#lastPos.y !== py) {
             this.#lastPos   = { x: px, y: py };
             this.#lastMoved = now;
+        }
+
+        // ── Grab what we step on, then deliver ──────────────────────────────
+        // Blind agents sense parcels only on their own tile, so pickup is purely
+        // opportunistic. Grab a parcel under us if it's worth carrying (cost
+        // heuristic at distance 0 = reward minus decay over the trip to the
+        // nearest known delivery) — even while already carrying, since sightings
+        // are scarce. Both branches reset the explore commitment.
+        const onTileParcel = parcels.free()
+            .filter(p => distance(me, p) === 0 && this.estimatedRewardAtDelivery(p) >= MIN_DELIVERY_REWARD)
+            .sort((a, b) => this.scoreOf(b) - this.scoreOf(a))[0];
+        if (onTileParcel) {
+            this.#commitKey = null;
+            console.log(`[blind] → go_pick_up ${onTileParcel.id} est:${this.estimatedRewardAtDelivery(onTileParcel).toFixed(1)}`);
+            return ['go_pick_up', onTileParcel.x, onTileParcel.y, onTileParcel.id];
+        }
+
+        if (parcels.carriedBy(me.id).length > 0) {
+            const target = this.nearestDelivery();
+            if (target) {
+                this.#commitKey = null;
+                console.log(`[blind] → go_deliver to ${target.x},${target.y}`);
+                return ['go_deliver', target.x, target.y];
+            }
         }
 
         // While heading to a target we haven't reached yet, stay committed unless

@@ -19,7 +19,7 @@ export { StrategyGreedy, StrategyBlind };
  * visibility), NOT a blind map — so only 0..1 counts as blind.
  */
 export function selectStrategy() {
-    const blind = OBSERVATION_DISTANCE >= 0 && OBSERVATION_DISTANCE <= 1;
+    const blind = OBSERVATION_DISTANCE >= -1 && OBSERVATION_DISTANCE <= 1;
     if (blind) {
         console.log(`[strategy] OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} → StrategyBlind`);
         return new StrategyBlind();
