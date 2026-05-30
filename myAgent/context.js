@@ -3,6 +3,7 @@ import { DjsConnect }  from '@unitn-asa/deliveroo-js-sdk/client';
 import { Beliefset }   from '@unitn-asa/pddl-client';
 import { Me }          from './beliefs/Me.js';
 import { Parcels }     from './beliefs/Parcels.js';
+import { isDirectional } from './utils/directions.js';
 
 export const socket  = DjsConnect();
 export const me      = new Me();
@@ -18,6 +19,11 @@ export const crateTiles    = [];
  * skip crate sensing and PddlMove entirely (never pay the online-solver cost). */
 export const crateSpawnerTiles = [];
 export let   mapHasCrates      = false;
+
+/* Directional ("arrow") tiles sensed on the map, keyed "x_y" -> arrow char
+ * ('↑'|'→'|'↓'|'←'). A* and the PDDL edge generator consult this to avoid
+ * planning an illegal entry (entering opposite the arrow). See utils/directions.js. */
+export const directionalTiles = new Map();
 
 /* Shared PDDL execution state. PddlMove sets busy=true once a plan is found and
  * executing; IntentionRevisionReplace refuses to stop the current intention while
@@ -76,7 +82,13 @@ socket.onMap((_w, _h, tiles) => {
         return t.walkable !== false;
     }));
 
-    console.log(`[map] delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length}`);
+    // Directional arrow tiles: record type by coordinate so pathfinding and the
+    // PDDL edge generator can enforce the one-way entry rule.
+    directionalTiles.clear();
+    for (const t of walkableTiles)
+        if (isDirectional(t.type)) directionalTiles.set(`${t.x}_${t.y}`, t.type);
+
+    console.log(`[map] delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length} | directional: ${directionalTiles.size}`);
 
     // We build the beliefeset for the PDDL solver for now. Must be updated on each map event since the solver doesn't have direct access to the map data structure.
     beliefset = new Beliefset();

@@ -1,4 +1,5 @@
-import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, MOVEMENT_DURATION } from '../context.js';
+import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, MOVEMENT_DURATION } from '../context.js';
+import { canEnterDir } from './directions.js';
 
 const DIRS = [
     { dx:  1, dy:  0, dir: 'right' },
@@ -58,6 +59,9 @@ function astar(start, goal, walkable) {
         for (const { dx, dy, dir } of DIRS) {
             const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
             if (closed.has(nk) || !walkable.has(nk)) continue;
+            // Arrow tiles: skip a neighbour we'd enter from the forbidden side
+            // (opposite the arrow). Normal tiles return undefined -> unrestricted.
+            if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
 
             const penalty    = (parent && nk === parent.parentKey) ? BACKTRACK_PENALTY : 0;
             const tentativeG = g + 1 + penalty;
