@@ -60,12 +60,14 @@ export class StrategyBlind extends Strategy {
         // nearest known delivery) — even while already carrying, since sightings
         // are scarce. Both branches reset the explore commitment.
         const onTileParcel = parcels.free()
-            .filter(p => distance(me, p) === 0 && this.estimatedRewardAtDelivery(p) >= MIN_DELIVERY_REWARD)
-            .sort((a, b) => this.scoreOf(b) - this.scoreOf(a))[0];
+            .filter(p => distance(me, p) === 0)
+            .map(p => ({ p, value: this.pickupValue(p), gain: this.pickupGain(p) }))
+            .filter(({ gain }) => gain >= MIN_DELIVERY_REWARD)
+            .sort((a, b) => b.value - a.value)[0];
         if (onTileParcel) {
             this.#commitKey = null;
-            console.log(`[blind] → go_pick_up ${onTileParcel.id} est:${this.estimatedRewardAtDelivery(onTileParcel).toFixed(1)}`);
-            return ['go_pick_up', onTileParcel.x, onTileParcel.y, onTileParcel.id];
+            console.log(`[blind] → go_pick_up ${onTileParcel.p.id} value:${onTileParcel.value.toFixed(1)} gain:${onTileParcel.gain.toFixed(1)}`);
+            return ['go_pick_up', onTileParcel.p.x, onTileParcel.p.y, onTileParcel.p.id];
         }
 
         if (parcels.carriedBy(me.id).length > 0) {

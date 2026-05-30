@@ -43,14 +43,62 @@ const DECAY_EVENT_MS = {
     '5s': 5000, '10s': 10000, 'infinite': Infinity
 };
 
+/* Decay interval in ms (how often the server drops 1 reward point), from config.
+ * Infinity ⇒ parcels never decay. Used together with the *measured* time-per-tile
+ * to compute the real decay rate (see moveTiming below). */
+export let DECAY_INTERVAL_MS = 1000;
+
+/* Empirically-measured real time per tile.
+ *
+ * The scoring needs to know how much reward a parcel loses while we walk to it,
+ * and decay is wall-clock based (1 point per DECAY_INTERVAL_MS). Pacing is left
+ * to the server's movement_duration (emitMove resolves only when the move
+ * completes), so the real cost of a tile is movement_duration plus network
+ * latency, replanning and blocked-tile waits. We time each real emitMove cycle
+ * and keep an exponential moving average; `msPerTile` starts at MOVEMENT_DURATION
+ * and converges to the true value as the agent moves. */
+export const moveTiming = {
+    msPerTile: MOVEMENT_DURATION,
+    _alpha: 0.2,                       // EMA weight for the newest sample
+    record(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) return;
+        // Ignore absurd samples (long stalls/blocks) so one freeze doesn't poison
+        // the average; those are handled as outliers, not the steady-state pace.
+        if (ms > 10 * MOVEMENT_DURATION) return;
+        this.msPerTile = this._alpha * ms + (1 - this._alpha) * this.msPerTile;
+    },
+    /** Reward lost per parcel per tile travelled (0 when parcels never decay). */
+    decayPerTile() {
+        return Number.isFinite(DECAY_INTERVAL_MS) && DECAY_INTERVAL_MS > 0
+            ? this.msPerTile / DECAY_INTERVAL_MS
+            : 0;
+    },
+};
+
 socket.onConfig(config => {
-    OBSERVATION_DISTANCE = config.GAME.player.observation_distance;
-    MOVEMENT_DURATION    = config.GAME.player.movement_duration ?? 100;
+    // Dump the raw config once so the exact runtime shape is visible in the log.
+    console.log('[config] raw:', JSON.stringify(config));
 
-    const decayMs          = DECAY_EVENT_MS[config.GAME.parcels.decaying_event] ?? 1000;
+    // The config has been seen in two shapes depending on SDK/server version:
+    // nested under GAME (config.GAME.player.*) or flat at the root (config.player.*).
+    // Reading the previous hard-coded GAME path threw when GAME was absent, which
+    // aborted the whole handler and silently left every value at its default
+    // (that's why movement_duration stuck at 100 when the server sent 50).
+    const game   = config?.GAME ?? config;
+    const player = game?.player ?? config?.player ?? {};
+    const parcelCfg = game?.parcels ?? config?.parcels ?? {};
+
+    OBSERVATION_DISTANCE = player.observation_distance ?? OBSERVATION_DISTANCE;
+    MOVEMENT_DURATION    = player.movement_duration ?? game?.movement_duration ?? MOVEMENT_DURATION;
+
+    const decayMs          = DECAY_EVENT_MS[parcelCfg.decaying_event] ?? 1000;
+    DECAY_INTERVAL_MS      = decayMs;
     DECAY_STEPS_PER_REWARD = decayMs / MOVEMENT_DURATION;
+    // Reset the measured pace to the server's movement_duration whenever config
+    // changes; it re-converges to the real per-tile cost as the agent moves.
+    moveTiming.msPerTile   = MOVEMENT_DURATION;
 
-    console.log(`[config] obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)}`);
+    console.log(`[config] obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)}`);
 });
 
 socket.onMap((_w, _h, tiles) => {

@@ -11,21 +11,22 @@ import { distance } from '../utils/distance.js';
 export class StrategyGreedy extends Strategy {
     decide(currentIntent) {
         const carrying = parcels.carriedBy(me.id);
+        const bankNow  = this.bankNowValue(); // value A: deliver current load now
 
-        // Parcels in sensing range still worth picking up
+        // Free parcels in sensing range whose pickup nets at least MIN_DELIVERY_REWARD
+        // over just delivering now (ΔB = B(p) − A). Ranked by banked value B(p).
         const worthwhileInRange = parcels.free()
-            .filter(p =>
-                distance(me, p) <= OBSERVATION_DISTANCE &&
-                this.estimatedRewardAtDelivery(p) >= MIN_DELIVERY_REWARD
-            )
-            .sort((a, b) => this.scoreOf(b) - this.scoreOf(a));
+            .filter(p => distance(me, p) <= OBSERVATION_DISTANCE)
+            .map(p => ({ p, value: this.pickupValue(p) }))
+            .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)
+            .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
             this.idleWaitStart = null;
             if (worthwhileInRange.length > 0) {
-                const next = worthwhileInRange[0];
-                console.log(`[greedy] → multi-pickup ${next.id} est:${this.estimatedRewardAtDelivery(next).toFixed(1)}`);
-                return ['go_pick_up', next.x, next.y, next.id];
+                const { p } = worthwhileInRange[0];
+                console.log(`[greedy] → multi-pickup ${this.pickupDebug(p)}`);
+                return ['go_pick_up', p.x, p.y, p.id];
             }
 
             const target = this.nearestDelivery();
@@ -36,13 +37,14 @@ export class StrategyGreedy extends Strategy {
         }
 
         const best = parcels.free()
-            .filter(p => this.estimatedRewardAtDelivery(p) >= MIN_DELIVERY_REWARD)
-            .sort((a, b) => this.scoreOf(b) - this.scoreOf(a))[0];
+            .map(p => ({ p, value: this.pickupValue(p) }))
+            .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)
+            .sort((a, b) => b.value - a.value)[0];
 
         if (best) {
             this.idleWaitStart = null;
-            console.log(`[greedy] → go_pick_up ${best.id} score:${this.scoreOf(best).toFixed(2)} est:${this.estimatedRewardAtDelivery(best).toFixed(1)}`);
-            return ['go_pick_up', best.x, best.y, best.id];
+            console.log(`[greedy] → go_pick_up ${this.pickupDebug(best.p)}`);
+            return ['go_pick_up', best.p.x, best.p.y, best.p.id];
         }
 
         return this.exploreIfIdle(currentIntent);

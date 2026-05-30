@@ -1,4 +1,4 @@
-import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, MOVEMENT_DURATION } from '../context.js';
+import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, moveTiming } from '../context.js';
 import { canEnterDir } from './directions.js';
 
 const DIRS = [
@@ -133,6 +133,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
             if (stoppedFn()) throw ['stopped'];
             if (Math.round(me.x) === goal.x && Math.round(me.y) === goal.y) return;
 
+            const tStep  = Date.now();
             const result = await socket.emitMove(dir);
             if (result) {
                 me.x = result.x;
@@ -147,7 +148,12 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                     crateTiles.splice(staleIdx, 1);
                     console.log(`[nav] walked through ${movedKey} — removed stale crate entry`);
                 }
-                await new Promise(r => setTimeout(r, MOVEMENT_DURATION));
+                // Measure the real wall-clock cost of one successful tile
+                // (emitMove resolves only when the server completes the move,
+                // plus network latency) so the scoring's decay rate reflects how
+                // fast the agent actually travels. Movement pacing is governed by
+                // the server's movement_duration, not a client-side sleep.
+                moveTiming.record(Date.now() - tStep);
             } else {
                 const { dx, dy } = DIRS.find(d => d.dir === dir);
                 const bk = key(Math.round(me.x) + dx, Math.round(me.y) + dy);

@@ -1,9 +1,10 @@
 import {
     me, parcels,
     deliveryTiles, spawnerTiles, walkableTiles,
-    OBSERVATION_DISTANCE, DECAY_STEPS_PER_REWARD
+    OBSERVATION_DISTANCE, moveTiming
 } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { findRoute } from '../utils/astar.js';
 
 export const MIN_DELIVERY_REWARD = 5;
 export const IDLE_WAIT_MS        = 2000; // IDLE time the agent waits on a spawner hoping a parcel appears
@@ -31,20 +32,100 @@ export class Strategy {
 
     // ─── shared helpers ──────────────────────────────────────────────────────
 
+    /**
+     * Delivery tile reachable with the shortest A* route from `from` (the real
+     * number of tiles walked, walls/crates/arrows respected), NOT the closest by
+     * straight-line Manhattan. Unreachable tiles fall back to Manhattan so a tile
+     * is always returned even when no route exists.
+     */
     nearestDelivery(from = me) {
-        return [...deliveryTiles].sort((a, b) => distance(from, a) - distance(from, b))[0];
+        return [...deliveryTiles]
+            .sort((a, b) => this.pathLen(from, a) - this.pathLen(from, b))[0];
     }
 
+    /** Naive reward-per-distance ratio. Used only by StrategySimple. */
     scoreOf(parcel) {
         return parcel.reward / Math.max(1, distance(me, parcel));
     }
 
-    /** Estimated reward still available once this parcel is carried to delivery. */
-    estimatedRewardAtDelivery(parcel) {
-        const toParcel   = distance(me, parcel);
-        const delTile    = this.nearestDelivery(parcel);
-        const toDelivery = delTile ? distance(parcel, delTile) : Infinity;
-        return parcel.reward - Math.ceil((toParcel + toDelivery) / DECAY_STEPS_PER_REWARD);
+    /**
+     * Reward lost per parcel per tile travelled (0 when parcels never decay).
+     * Derived from the *measured* real time per tile, not the optimistic
+     * MOVEMENT_DURATION: decay is wall-clock based, and the move loop throttles
+     * each step (server move + extra sleep + latency), so a tile really costs
+     * ~2·MOVEMENT_DURATION. moveTiming converges to the true pace as we move.
+     */
+    decayRate() {
+        return moveTiming.decayPerTile();
+    }
+
+    /**
+     * Travel cost in tiles between two points: the length of the A* route the
+     * agent would actually walk (direction-aware, walls/crates excluded), NOT the
+     * straight-line Manhattan distance. Falls back to Manhattan only when no route
+     * exists (so the scoring never silently treats an unreachable target as free).
+     */
+    pathLen(from, to) {
+        const route = findRoute(from, to);
+        return route ? route.length : distance(from, to);
+    }
+
+    /**
+     * Value A — reward banked by delivering the currently-carried load right now.
+     * All n carried parcels decay over the trip to the nearest delivery.
+     *   A = R − n·ρ·dist(me, D_me)
+     * Returns 0 when carrying nothing (there's nothing to "deliver now").
+     */
+    bankNowValue() {
+        const carried = parcels.carriedBy(me.id);
+        const n = carried.length;
+        if (n === 0) return 0;
+        const R   = carried.reduce((sum, p) => sum + p.reward, 0);
+        const del = this.nearestDelivery(me);
+        const d0  = del ? this.pathLen(me, del) : Infinity;
+        return R - n * this.decayRate() * d0;
+    }
+
+    /**
+     * Value B(p) — reward banked if we detour to pick up `parcel` and then deliver
+     * the whole load. Accounts for the extra decay the detour inflicts on every
+     * already-carried parcel plus the new one (both legs of the trip).
+     *   B(p) = (R + reward_p) − (n+1)·ρ·(d1 + d2)
+     * with d1 = dist(me, p), d2 = dist(p, D_p).
+     */
+    pickupValue(parcel) {
+        const carried = parcels.carriedBy(me.id);
+        const n   = carried.length;
+        const R   = carried.reduce((sum, p) => sum + p.reward, 0);
+        const d1  = this.pathLen(me, parcel);
+        const del = this.nearestDelivery(parcel);
+        const d2  = del ? this.pathLen(parcel, del) : Infinity;
+        return (R + parcel.reward) - (n + 1) * this.decayRate() * (d1 + d2);
+    }
+
+    /** Net gain of a pickup over delivering now: ΔB = B(p) − A. */
+    pickupGain(parcel) {
+        return this.pickupValue(parcel) - this.bankNowValue();
+    }
+
+    /**
+     * Human-readable breakdown of a pickup decision, for debugging the scoring.
+     * Shows the parcel→delivery distance (d2) explicitly so it's clear how much
+     * the delivery leg costs in the value/gain.
+     */
+    pickupDebug(parcel) {
+        const carried = parcels.carriedBy(me.id);
+        const n   = carried.length;
+        const d1  = this.pathLen(me, parcel);
+        const del = this.nearestDelivery(parcel);
+        const d2  = del ? this.pathLen(parcel, del) : Infinity;
+        const rho = this.decayRate();
+        return `id=${parcel.id} reward=${parcel.reward} carrying=${n} `
+             + `d(me→parcel)=${d1} d(parcel→delivery)=${d2} `
+             + `delivery=${del ? `${del.x},${del.y}` : 'none'} `
+             + `msPerTile=${moveTiming.msPerTile.toFixed(0)} decayRate=${rho.toFixed(3)} `
+             + `value=${this.pickupValue(parcel).toFixed(1)} `
+             + `gain=${this.pickupGain(parcel).toFixed(1)} (threshold=${MIN_DELIVERY_REWARD})`;
     }
 
     /**

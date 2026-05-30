@@ -5,7 +5,7 @@ import { onlineSolver }   from '@unitn-asa/pddl-client';
 
 import { PlanBase } from './PlanBase.js';
 import {
-    me, socket, beliefset, mapHasCrates, MOVEMENT_DURATION, pddl,
+    me, socket, beliefset, mapHasCrates, pddl, moveTiming,
     crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
 } from '../context.js';
 import { findRoute } from '../utils/astar.js';
@@ -114,6 +114,7 @@ export class PddlMove extends PlanBase {
                 };
             }
 
+            const tStep = Date.now();
             const r = await socket.emitMove(dir);
             if (!r) return true;
 
@@ -138,7 +139,9 @@ export class PddlMove extends PlanBase {
                 }
             }
 
-            await new Promise(res => setTimeout(res, MOVEMENT_DURATION));
+            // Pacing is governed by the server's movement_duration (emitMove
+            // resolves only when the move completes), not a client-side sleep.
+            moveTiming.record(Date.now() - tStep);
         }
         return false;
     }
