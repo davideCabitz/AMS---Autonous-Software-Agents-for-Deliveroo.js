@@ -8,7 +8,7 @@ import {
     me, socket, beliefset, mapHasCrates, pddl, moveTiming,
     crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
 } from '../context.js';
-import { findRoute } from '../utils/astar.js';
+import { findRoute, waitForArrival } from '../utils/astar.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const domain    = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'), 'utf8');
@@ -114,16 +114,27 @@ export class PddlMove extends PlanBase {
                 };
             }
 
+            // Target tile of this step (agent advances one tile, into the crate's
+            // old position on a push).
+            const tx = Math.round(me.x) + dx;
+            const ty = Math.round(me.y) + dy;
+
+            const fromX = Math.round(me.x), fromY = Math.round(me.y);
             const tStep = Date.now();
             const r = await socket.emitMove(dir);
             if (!r) return true;
 
-            me.x = r.x;
-            me.y = r.y;
+            // Wait until the agent has actually arrived before the next step — the
+            // ack fires mid-transition, so continuing immediately overlaps moves
+            // and drifts diagonally. `me` is updated (rounded) by onYou.
+            const ok = await waitForArrival(tx, ty);
+            console.log(`[move:pddl] ${dir}${isPush ? '(push)' : ''} `
+                + `(${fromX},${fromY})→(${tx},${ty}) ${ok ? 'arrived' : 'TIMEOUT'} `
+                + `in ${Date.now() - tStep}ms now raw=(${me.rawX},${me.rawY}) tile=(${me.x},${me.y})`);
 
             // The agent just moved onto a tile — if it was tracked as a crate (the old
             // crate position after a push), remove it now.
-            const movedKey = ck(r.x, r.y);
+            const movedKey = ck(me.x, me.y);
             const staleIdx = crateTiles.findIndex(c => ck(c.x, c.y) === movedKey);
             if (staleIdx !== -1) {
                 crateTiles.splice(staleIdx, 1);
