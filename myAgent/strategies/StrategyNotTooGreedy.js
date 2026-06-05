@@ -30,7 +30,8 @@ export class StrategyNotTooGreedy extends Strategy {
 
         if (carrying.length > 0) {
             this.idleWaitStart = null;
-            if (worthwhileInRange.length > 0) {
+            // Only consider another pickup if there's still room to carry it.
+            if (!this.atCapacity() && worthwhileInRange.length > 0) {
                 const { p } = worthwhileInRange[0];
                 console.log(`[not-too-greedy] → multi-pickup ${this.pickupDebug(p)}`);
                 return ['go_pick_up', p.x, p.y, p.id];

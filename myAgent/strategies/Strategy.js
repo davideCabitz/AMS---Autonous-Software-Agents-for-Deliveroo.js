@@ -1,7 +1,7 @@
 import {
     me, parcels,
     deliveryTiles, spawnerTiles, walkableTiles,
-    OBSERVATION_DISTANCE, moveTiming
+    OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { findRoute } from '../utils/astar.js';
@@ -53,6 +53,11 @@ export class Strategy {
     /** Naive reward-per-distance ratio. Used only by StrategySimple. */
     scoreOf(parcel) {
         return parcel.reward / Math.max(1, distance(me, parcel));
+    }
+
+    /** True when the agent already carries the max parcels allowed (server capacity). */
+    atCapacity() {
+        return parcels.carriedBy(me.id).length >= CARRYING_CAPACITY;
     }
 
     /**

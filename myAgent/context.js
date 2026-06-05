@@ -37,6 +37,9 @@ export let beliefset = new Beliefset();
 export let OBSERVATION_DISTANCE   = 5;
 export let DECAY_STEPS_PER_REWARD = 10;
 export let MOVEMENT_DURATION      = 100; // Time per step
+/* Max parcels the agent can carry at once (server config player.capacity).
+ * Default Infinity ⇒ no cap when the config omits it (behaviour unchanged). */
+export let CARRYING_CAPACITY      = Infinity;
 
 const DECAY_EVENT_MS = {
     'frame': 50, '1s': 1000, '2s': 2000,
@@ -90,6 +93,7 @@ socket.onConfig(config => {
 
     OBSERVATION_DISTANCE = player.observation_distance ?? OBSERVATION_DISTANCE;
     MOVEMENT_DURATION    = player.movement_duration ?? game?.movement_duration ?? MOVEMENT_DURATION;
+    CARRYING_CAPACITY    = player.capacity ?? CARRYING_CAPACITY;
 
     const decayMs          = DECAY_EVENT_MS[parcelCfg.decaying_event] ?? 1000;
     DECAY_INTERVAL_MS      = decayMs;
@@ -98,7 +102,7 @@ socket.onConfig(config => {
     // changes; it re-converges to the real per-tile cost as the agent moves.
     moveTiming.msPerTile   = MOVEMENT_DURATION;
 
-    console.log(`[config] obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)}`);
+    console.log(`[config] obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY}`);
 });
 
 socket.onMap((_w, _h, tiles) => {
