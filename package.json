@@ -5,11 +5,13 @@
   "type": "module",
   "main": "myAgent/agent.js",
   "scripts": {
-    "start": "node myAgent/agent.js"
+    "start": "node myAgent/agent.js",
+    "llm": "node llmAgent/llmAgent.js"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "*",
     "@unitn-asa/pddl-client": "^1.7.7",
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "openai": "^6.42.0"
   }
 }
