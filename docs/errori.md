@@ -6,6 +6,10 @@
 - `agent.js:87-93`: quando l'agente porta già parcelle continua a raccogliere altre `worthwhileInRange` senza limite. Fix: aggiungere un tetto `MAX_CARRY` — se `carrying.length >= MAX_CARRY` saltare il blocco di pickup e andare direttamente al `go_deliver` di riga 96.
 - `agent.js:36-41` (`estimatedRewardAtDelivery`): la formula non penalizza il costo di deviazione per raccogliere un'ulteriore parcella mentre si è già in viaggio verso il delivery. Fix: aggiungere alla formula la distanza di deviazione `distance(me, newParcel) + distance(newParcel, delivery) - distance(me, delivery)` invece di solo `toParcel + toDelivery`.
 
+## Geneal
+L'agente prende sempre il pacco con più punti, anche quando vicino a tanti pacchi. Se i pacchi non sono in ordine di valore (questo accade sempre), l'agente li prende nell'ordine di valore compiendo mosse come "su-giù" o "avanti-indietro". Questo va bene in un contesto multi agente. In mappe con alto penalty non va bene. Se l'agente non "sensa" altri agenti non c'è bisogno di ricorrere a prendere il pacco più goloso, può prenderli tutti in ordine sparso senza sprecare mosse o subire penalty
+
+
 ## Mappa con sensing-area elevata:
 
 - il pacco "impazzisce" andando avanti e indietro senza prendere una decisione chiara sul percorso -> in caso di stalling forzare una "direzione" di percorrenza
@@ -47,25 +51,6 @@ Non so bene cosa dire, da una parte direi che l'agente deve prioritizzare l'atte
 - `agent.js:9` (`MIN_DELIVERY_REWARD = 5`) e `agent.js:10` (`IDLE_WAIT_MS = 2000`): su questa mappa conviene alzare `MIN_DELIVERY_REWARD` (non vale la pena raccogliere parcelle con reward basso se il viaggio le azzera) e ridurre `IDLE_WAIT_MS` (non conviene aspettare a lungo se le parcelle spawnano con score basso).
 - `agent.js:36-41` (`estimatedRewardAtDelivery`): la formula già tiene conto del decay durante il viaggio; su mappe enormi il `toDelivery` è alto e il filtro `>= MIN_DELIVERY_REWARD` dovrebbe già escludere pacchi inutili — verificare che `DECAY_STEPS_PER_REWARD` sia calibrato correttamente dal config (`context.js:21-31`).
 - Strategia da valutare: aggiungere un controllo esplicito "se sto già portando parcelle il cui reward totale supera soglia X, consegna subito senza aspettare altri pickup" — da inserire in `agent.js:87` prima del blocco `worthwhileInRange`.
-
-## Wide paths
-
-Nel caso in cui l'gente si trovi su uno spawn e raccoglie una parcella, ed esiste un altro spawn molto vicino, l'agente dovrebbe almeno far entrare il secondo spawn nella propria area di sensing invece di precipitarsi al delivery della parcella.
-
-**Puntatori al codice:**
-- La logica di detour esiste già ma è in `strategyNotTooGreedy()` a `agent.js:144-160`, che è **commentata/disabilitata** (`agent.js:237`). La strategia attiva è `strategyGreedy()` che non ha nessun detour.
-- Fix più semplice: in `agent.js:236` sostituire `strategyGreedy()` con `strategyNotTooGreedy()`.
-- In alternativa, copiare il blocco detour (`agent.js:144-160`) dentro `strategyGreedy()` tra le righe 93 e 96 (dopo aver esaurito i pickup in range, prima di pushare `go_deliver`).
-- Verificare anche il parametro `DETOUR_SPAWNER_MAX_DIST = 5` a `agent.js:11`: su mappe wide path potrebbe essere troppo piccolo — aumentarlo a 8-10.
-
-## Chaotic Maze
-
-No sensing area, questo blocca completamente l'agente se si posiziona su una spawn parcel poichè aspetta all'infinito che esca una parcella. Tra l'altro sembrerebbe che una volta scelto un target spawn tile, l'agente punti sempre a quello anche se viene spostato.
-
-**Puntatori al codice:**
-- Attesa infinita su spawner → `agent.js:206-217` (`exploreIfIdle`): il timer scade solo se arriva una parcella; con `OBSERVATION_DISTANCE = 0` non ne arriverà mai nessuna. Fix: se `OBSERVATION_DISTANCE <= 1`, saltare il blocco di attesa completamente.
-- Lock sul target spawn tile già scelto → `agent.js:199-202`: si ritorna early se l'intent corrente è `go_explore` e il target è fuori range; il target non viene mai rivalutato. Fix: limitare questo early-return a un timeout massimo (es. tempo trascorso dall'ultima push), oppure confrontare anche se l'agente è stato spostato rispetto all'ultima posizione registrata.
-- Stessa causa in `IntentionRevisionReplace.js:7`: la push viene ignorata se il predicato è identico — quindi `go_explore X Y` non viene mai sostituito. Fix: aggiungere un tempo di vita massimo all'intenzione corrente di tipo `go_explore`.
 
 ## 25c1_8
 
