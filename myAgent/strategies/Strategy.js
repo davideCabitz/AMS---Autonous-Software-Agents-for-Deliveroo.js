@@ -8,6 +8,11 @@ import { findRoute } from '../utils/astar.js';
 
 export const MIN_DELIVERY_REWARD = 5;
 export const IDLE_WAIT_MS        = 2000; // IDLE time the agent waits on a spawner hoping a parcel appears
+// A different pickup must beat the CURRENT target's value by at least this much to
+// justify abandoning the in-progress trip. Without it, parcels crossing in/out of
+// the worthwhile set each tick (decay/distance/sensing shifts) make the agent
+// flip between "pick up" and "deliver" every tick → physical back-and-forth.
+export const SWITCH_MARGIN       = 5;
 
 /**
  * Base class for option-generation strategies.
@@ -40,14 +45,16 @@ export class Strategy {
     // ─── shared helpers ──────────────────────────────────────────────────────
 
     /**
-     * Delivery tile reachable with the shortest A* route from `from` (the real
-     * number of tiles walked, walls/crates/arrows respected), NOT the closest by
-     * straight-line Manhattan. Unreachable tiles fall back to Manhattan so a tile
-     * is always returned even when no route exists.
+     * Nearest delivery tile A*-reachable from `from` (shortest real route, walls/
+     * crates/agents/arrows respected). Returns undefined when NO delivery is
+     * currently reachable (e.g. other agents wall off every route) — callers must
+     * handle that instead of committing to an unreachable delivery and spinning.
      */
     nearestDelivery(from = me) {
         return [...deliveryTiles]
-            .sort((a, b) => this.pathLen(from, a) - this.pathLen(from, b))[0];
+            .map(d => ({ d, len: this.pathLen(from, d) }))
+            .filter(({ len }) => Number.isFinite(len))
+            .sort((a, b) => a.len - b.len)[0]?.d;
     }
 
     /** Naive reward-per-distance ratio. Used only by StrategySimple. */
@@ -73,13 +80,40 @@ export class Strategy {
 
     /**
      * Travel cost in tiles between two points: the length of the A* route the
-     * agent would actually walk (direction-aware, walls/crates excluded), NOT the
-     * straight-line Manhattan distance. Falls back to Manhattan only when no route
-     * exists (so the scoring never silently treats an unreachable target as free).
+     * agent would actually walk (direction-aware; walls, crates and other agents
+     * excluded). Returns Infinity when no A* route exists — Manhattan is NOT used
+     * as a fallback because it's unreliable for reachability and would make an
+     * unreachable target look cheap (the cause of the back-and-forth looping).
      */
     pathLen(from, to) {
         const route = findRoute(from, to);
-        return route ? route.length : distance(from, to);
+        return route ? route.length : Infinity;
+    }
+
+    /** True when an A* route from the agent to `to` currently exists. */
+    isReachable(to) {
+        return Number.isFinite(this.pathLen(me, to));
+    }
+
+    /**
+     * Hysteresis for pickup commitment: should we keep the current go_pick_up
+     * rather than switch to `candidate`? Keeps the trip stable unless the new
+     * option is meaningfully better, eliminating the per-tick flip-flop that makes
+     * the agent walk back and forth.
+     * @param {Array|null} currentIntent  e.g. ['go_pick_up', x, y, id]
+     * @param {{p:object,value:number}|undefined} candidate  the best new option
+     * @returns {boolean}
+     */
+    shouldKeepCurrentPickup(currentIntent, candidate) {
+        if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
+        const curId = currentIntent[3];
+        const cur   = parcels.get(curId);
+        // Drop the current target if its parcel is gone, taken, or now unreachable.
+        if (!cur || cur.carriedBy || !this.isReachable(cur)) return false;
+        // No alternative, or candidate IS the current target → keep going.
+        if (!candidate || candidate.p.id === curId) return true;
+        // Keep unless the candidate beats the current target's value by the margin.
+        return candidate.value - this.pickupValue(cur) < SWITCH_MARGIN;
     }
 
     /**
@@ -181,13 +215,21 @@ export class Strategy {
 
         this.idleWaitStart = null;
 
+        // Only consider tiles the agent can actually A*-reach (walls/crates/agents
+        // respected). Unreachable spawners are never targeted — that caused the
+        // repeated re-selection of an out-of-reach tile and the back-and-forth.
         const pool       = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
-        const outOfRange = pool.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
-        const candidates = outOfRange.length > 0 ? outOfRange : pool;
+        const reachable  = pool.filter(t => this.isReachable(t));
+        if (reachable.length === 0) return null; // nothing reachable → stay idle
 
-        const target = [...candidates].sort((a, b) => distance(me, a) - distance(me, b))[0];
+        // Prefer reachable tiles outside current sensing (new ground), else any
+        // reachable tile; pick the nearest by real A* path length.
+        const outOfRange = reachable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
+        const candidates = outOfRange.length > 0 ? outOfRange : reachable;
+
+        const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
         if (target) {
-            console.log(`[explore] → out-of-range spawner ${target.x},${target.y} dist:${distance(me, target)}`);
+            console.log(`[explore] → reachable spawner ${target.x},${target.y} pathLen:${this.pathLen(me, target)}`);
             return ['go_explore', target.x, target.y];
         }
         return null;

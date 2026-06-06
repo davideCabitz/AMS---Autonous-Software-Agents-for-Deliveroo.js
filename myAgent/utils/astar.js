@@ -1,4 +1,4 @@
-import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, moveTiming } from '../context.js';
+import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, otherAgents, moveTiming } from '../context.js';
 import { canEnterDir } from './directions.js';
 
 const DIRS = [
@@ -57,6 +57,11 @@ function getWalkable() {
     if (!_walkable || _walkable.size !== walkableTiles.length)
         _walkable = new Set(walkableTiles.map(t => key(t.x, t.y)));
     return _walkable;
+}
+
+/** "x_y" keys currently occupied by other agents (impassable). */
+function agentKeys() {
+    return new Set(otherAgents.map(a => key(Math.round(a.x), Math.round(a.y))));
 }
 
 function astar(start, goal, walkable) {
@@ -119,18 +124,23 @@ function astar(start, goal, walkable) {
 /**
  * Path (array of directions) from start to goal over the walkable map, optionally
  * treating `blockedKeys` (a Set of "x_y") as impassable. Returns null if no path.
- * Used by PddlMove to decide whether a crate actually blocks the route (so the
- * online solver is only contacted when pushing is genuinely required).
+ * Other agents are always treated as obstacles. An agent standing on the goal tile
+ * makes the target unreachable (returns null); only the start tile is exempt.
+ * Used by scoring (pathLen) and by PddlMove to decide whether a crate blocks.
  */
 export function findRoute(start, goal, blockedKeys = null) {
+    const s = { x: Math.round(start.x), y: Math.round(start.y) };
+    const g = { x: Math.round(goal.x),  y: Math.round(goal.y) };
+
+    const blocked = agentKeys();
+    if (blockedKeys) for (const k of blockedKeys) blocked.add(k);
+    blocked.delete(key(s.x, s.y)); // never block where we already stand
+
     let walkable = getWalkable();
-    if (blockedKeys && blockedKeys.size > 0)
-        walkable = new Set([...walkable].filter(k => !blockedKeys.has(k)));
-    return astar(
-        { x: Math.round(start.x), y: Math.round(start.y) },
-        { x: Math.round(goal.x),  y: Math.round(goal.y) },
-        walkable
-    );
+    if (blocked.size > 0)
+        walkable = new Set([...walkable].filter(k => !blocked.has(k)));
+
+    return astar(s, g, walkable);
 }
 
 const GOAL_BLOCKED_WAIT_MS  = 500;
@@ -145,13 +155,17 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
     while (Math.round(me.x) !== goal.x || Math.round(me.y) !== goal.y) {
         if (stoppedFn()) throw ['stopped'];
 
-        // Rebuild crate exclusion on every iteration: a new crate may have entered
-        // sensing range or been reported via event since the last step.
-        // Crates are treated as walls; when they block all routes A* returns null
-        // and we throw 'no path to', letting PddlMove take over.
+        // Rebuild crate + agent exclusion on every iteration: a new crate or agent
+        // may have entered sensing range since the last step. Both are treated as
+        // walls; when they block all routes A* returns null and we throw
+        // 'no path to', letting PddlMove / re-deliberation take over. Never block
+        // the tile we currently stand on.
+        const hereKey     = key(Math.round(me.x), Math.round(me.y));
         const crateSet    = new Set(crateTiles.map(c => key(Math.round(c.x), Math.round(c.y))));
-        const baseWalkable = crateSet.size > 0
-            ? new Set([...getWalkable()].filter(k => !crateSet.has(k)))
+        const blockSet    = new Set([...crateSet, ...agentKeys()]);
+        blockSet.delete(hereKey);
+        const baseWalkable = blockSet.size > 0
+            ? new Set([...getWalkable()].filter(k => !blockSet.has(k)))
             : getWalkable();
 
         const effective = agentBlocked.size === 0

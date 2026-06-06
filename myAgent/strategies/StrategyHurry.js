@@ -84,28 +84,31 @@ export class StrategyHurry extends StrategyGreedy {
             this.#commitKey = null;
         }
 
-        // Pick the nearest spawner not yet observed this sweep (skip blacklisted / our tile).
+        // Pick the nearest spawner not yet observed this sweep (skip blacklisted /
+        // our tile). Only A*-reachable tiles are eligible — never commit to a
+        // frontier the agent can't actually path to (walls/crates/agents).
         const pool = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
         const here = `${px}_${py}`;
         let candidates = pool.filter(t => {
             const k = `${t.x}_${t.y}`;
-            return !this.#visited.has(k) && !this.#blacklist.has(k) && k !== here;
+            return !this.#visited.has(k) && !this.#blacklist.has(k) && k !== here
+                && this.isReachable(t);
         });
 
-        // Whole map observed → start a fresh sweep.
+        // Whole reachable frontier observed → start a fresh sweep.
         if (candidates.length === 0) {
             this.#visited.clear();
             candidates = pool.filter(t => {
                 const k = `${t.x}_${t.y}`;
-                return !this.#blacklist.has(k) && k !== here;
+                return !this.#blacklist.has(k) && k !== here && this.isReachable(t);
             });
         }
 
-        const target = [...candidates].sort((a, b) => distance(me, a) - distance(me, b))[0];
+        const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
         if (target) {
             this.#commitKey   = `${target.x}_${target.y}`;
             this.#commitSince = now;
-            console.log(`[hurry] → go_explore ${target.x},${target.y} dist:${distance(me, target)}`);
+            console.log(`[hurry] → go_explore ${target.x},${target.y} pathLen:${this.pathLen(me, target)}`);
             return ['go_explore', target.x, target.y];
         }
         return null;

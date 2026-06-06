@@ -20,6 +20,11 @@ export const crateTiles    = [];
 export const crateSpawnerTiles = [];
 export let   mapHasCrates      = false;
 
+/* Other agents currently sensed (excluding self), as {x,y} (rounded). Treated as
+ * impassable obstacles by A* (see utils/astar.js). Fully replaced each sensing
+ * event — agents move, so stale positions must not linger. */
+export const otherAgents = [];
+
 /* Directional ("arrow") tiles sensed on the map, keyed "x_y" -> arrow char
  * ('↑'|'→'|'↓'|'←'). A* and the PDDL edge generator consult this to avoid
  * planning an illegal entry (entering opposite the arrow). See utils/directions.js. */
@@ -178,6 +183,17 @@ socket.on('crate', (action, { x, y }) => {
 });
 
 socket.onSensing(sensing => {
+    // Other agents are obstacles for A*. Full replace (not merge): agents move, so
+    // a stale position would wrongly block a tile. Runs before any crate-related
+    // early-return below so agent tracking is independent of mapHasCrates.
+    otherAgents.length = 0;
+    for (const a of sensing.agents ?? []) {
+        if (a.id === me.id) continue;
+        otherAgents.push({ x: Math.round(a.x), y: Math.round(a.y) });
+    }
+    if (otherAgents.length)
+        console.log(`[sensing] agents: ${otherAgents.length} at [${otherAgents.map(a => `${a.x},${a.y}`).join(' ')}]`);
+
     if (sensing.crates?.length) console.log('[sensing] crates in range:', JSON.stringify(sensing.crates));
     if (!mapHasCrates) {
         if (sensing.crates?.length > 0) {
