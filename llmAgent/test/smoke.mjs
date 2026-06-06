@@ -111,6 +111,16 @@ try {
     const badMove = await TOOLS.move('sideways');
     check('invalid direction rejected', badMove.startsWith('Error'), badMove);
 
+    // --- general-purpose tutorial tools (calculate + get_current_time) ---
+    const calc = await TOOLS.calculate('11 + 2');
+    check('calculate evaluates arithmetic', calc === '13', calc);
+
+    const badCalc = await TOOLS.calculate('process.exit(1)');
+    check('calculate rejects non-arithmetic input', badCalc.startsWith('Error'), badCalc);
+
+    const time = await TOOLS.get_current_time('Rome');
+    check('get_current_time returns a HH:MM:SS time', /"time":"\d{2}:\d{2}:\d{2}"/.test(time), time);
+
     const startX = me.x, startY = me.y;
     const upRes = await TOOLS.move('up');
     check('move(up) returns a Moved/Failed observation', /^Moved|^Failed/.test(upRes), upRes);

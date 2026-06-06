@@ -40,6 +40,8 @@ export function buildSystemPrompt(objective) {
         '- get_my_position(): your current x, y and score.',
         '- sense_parcels(): free parcels currently in view.',
         '- sense_delivery_tiles(): coordinates of delivery tiles.',
+        '- calculate(expression): evaluate a math expression, e.g. "11 + 2". Do not do arithmetic yourself.',
+        '- get_current_time(location): current local time in Rome as {time:"HH:MM:SS"}.',
         '',
         'A move into a wall/edge/occupied tile fails; the observation will say so — pick another direction.',
         '',

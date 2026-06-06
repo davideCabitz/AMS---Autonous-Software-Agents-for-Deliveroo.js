@@ -25,4 +25,25 @@ export class IntentionRevisionReplace extends IntentionRevision {
 
         if (last) last.stop();
     }
+
+    /**
+     * LLM command path. Pushes a predicate as the agent's next intention and
+     * returns a promise that resolves when THAT intention finishes (loop() runs
+     * its single achieve(), which settles intention.completion). Unlike push(),
+     * it bypasses the autonomous-only guards (same-predicate / go_deliver chain)
+     * so a chat directive always executes and always settles its promise — but it
+     * still respects pddl.busy so an in-flight crate macro-plan isn't corrupted.
+     * @param {Array} predicate e.g. ['go_to', x, y]
+     * @returns {Promise<*>} resolves on completion; rejects ['busy'|'stopped'|'no plan for', ...]
+     */
+    async commandAndAwait(predicate) {
+        if (pddl.busy) return Promise.reject(['busy', ...predicate]);
+
+        const last = this.intention_queue.at(-1);
+        const intention = new IntentionDeliberation(this, predicate);
+        this.intention_queue.push(intention);
+        if (last) last.stop();
+
+        return intention.completion;
+    }
 }
