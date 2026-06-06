@@ -1,6 +1,7 @@
-import { socket, me, parcels }       from './context.js';
+import { socket, me, parcels, directive } from './context.js';
 import { IntentionRevisionReplace }   from './intentions/IntentionRevisionReplace.js';
 import { selectStrategy }             from './strategies/selectStrategy.js';
+import { registerLlm }                from './llm/index.js';
 
 const myAgent = new IntentionRevisionReplace();
 
@@ -9,6 +10,10 @@ let strategy = null;
 
 function optionsGeneration() {
     if (!me.isReady) return;
+    // The LLM command layer is driving the agent: stand down so the autonomous
+    // strategy doesn't clobber the intention it pushed. Beliefs still update
+    // (parcels.sync in onSensing runs regardless) — only deciding/pushing pauses.
+    if (directive.active) return;
     if (!strategy) {
         strategy = selectStrategy();
         // The strategy declares its re-deliberation cadence; the loop owns the timer.
@@ -32,5 +37,14 @@ socket.onSensing(sensing => {
     parcels.sync(sensing.parcels, me.id);
     optionsGeneration();
 });
+
+// LLM command layer: listens to chat directives and commands this same agent.
+// Enabled only when an LLM key is configured, so the BDI agent runs standalone
+// without it. resumeAutonomy lets a finished directive re-deliberate immediately.
+if (process.env.LITELLM_API_KEY) {
+    registerLlm(myAgent, { resumeAutonomy: optionsGeneration });
+} else {
+    console.log('[llm] LITELLM_API_KEY not set — running BDI only, no chat command layer.');
+}
 
 myAgent.loop();

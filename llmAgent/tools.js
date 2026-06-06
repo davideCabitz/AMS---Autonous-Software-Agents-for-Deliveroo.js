@@ -56,6 +56,41 @@ async function sense_delivery_tiles() {
     return JSON.stringify(deliveryTiles);
 }
 
+/*
+ * General-purpose tools from the lab tutorial (steps 3–6). They let the agent
+ * solve mixed objectives such as "go to x+2, y-3" or "extract the hour in Rome,
+ * subtract 10, and move up by the result" — the Step 9 exercises.
+ */
+
+// Safe arithmetic evaluator. The tutorial uses raw eval() but warns it is unsafe
+// (step 3 exercise); we whitelist characters so only arithmetic can run. Results
+// still use JS Number, so huge products lose precision — that is the intended
+// lesson of the "377834873478 * 974829994" exercise.
+async function calculate(expression) {
+    const expr = String(expression ?? '').trim();
+    if (!/^[\d\s+\-*/().]+$/.test(expr))
+        return `Error: invalid expression '${expression}'. Only numbers and + - * / ( ) are allowed.`;
+    try {
+        const result = Function(`"use strict"; return (${expr});`)();
+        if (typeof result !== 'number' || !Number.isFinite(result))
+            return `Error: '${expr}' did not evaluate to a finite number.`;
+        return String(result);
+    } catch (err) {
+        return `Error: ${err.message}`;
+    }
+}
+
+// Tutorial scope is Rome/Roma; we return the current Europe/Rome time as a
+// parseable HH:MM:SS field so the model can extract the hour.
+async function get_current_time(location) {
+    const where = String(location ?? 'Rome').trim() || 'Rome';
+    const timezone = 'Europe/Rome';
+    const time = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(new Date());
+    return JSON.stringify({ location: where, timezone, time });
+}
+
 export const TOOLS = {
     move,
     pick_up,
@@ -63,4 +98,6 @@ export const TOOLS = {
     get_my_position,
     sense_parcels,
     sense_delivery_tiles,
+    calculate,
+    get_current_time,
 };

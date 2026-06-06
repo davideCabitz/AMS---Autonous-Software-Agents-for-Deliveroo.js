@@ -36,6 +36,14 @@ export const directionalTiles = new Map();
  * completion before the agent switches to a new goal. */
 export const pddl = { busy: false };
 
+/* Shared LLM-directive state. While the LLM command layer (myAgent/llm/) is
+ * carrying out a chat directive it sets active=true; optionsGeneration() then
+ * stands down so the autonomous strategy loop does not clobber the intention the
+ * LLM pushed. Beliefs keep updating (parcels.sync still runs) — only autonomous
+ * deciding/pushing is suspended. Cleared (and autonomy resumed) when the
+ * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
+export const directive = { active: false };
+
 /* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
 export let beliefset = new Beliefset();
 
