@@ -144,7 +144,6 @@ export function findRoute(start, goal, blockedKeys = null) {
 }
 
 /**
-<<<<<<< HEAD
  * Set of "x_y" tiles from which AT LEAST ONE of `goals` is reachable, honouring
  * arrow constraints on the *reversed* edges. Structure-only: considers walls and
  * directional tiles, but NOT other agents or crates — the verdict is stable map
@@ -213,7 +212,8 @@ export function reachableFrom(start) {
             stack.push({ x: nx, y: ny });
         }
     }
-
+    return seen;
+}
 
 const GOAL_BLOCKED_WAIT_MS  = 500;
 const GOAL_BLOCKED_MAX_WAIT = 6;
@@ -320,5 +320,4 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
             }
         }
     }
-}
 }
