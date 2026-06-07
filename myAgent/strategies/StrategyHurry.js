@@ -104,6 +104,11 @@ export class StrategyHurry extends StrategyGreedy {
             });
         }
 
+        // Prefer frontier tiles in the sustainable-loop region (don't sweep into a
+        // one-way trap); fall back to all reachable candidates if none are safe.
+        const safe = candidates.filter(t => this.inSafe(t));
+        if (safe.length > 0) candidates = safe;
+
         const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
         if (target) {
             this.#commitKey   = `${target.x}_${target.y}`;

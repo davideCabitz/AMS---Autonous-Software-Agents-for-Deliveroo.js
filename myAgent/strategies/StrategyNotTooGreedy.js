@@ -24,7 +24,7 @@ export class StrategyNotTooGreedy extends Strategy {
         // MIN_DELIVERY_REWARD over just delivering now (ΔB = B(p) − A). Unreachable
         // parcels are dropped so they can never be selected. Ranked by value B(p).
         const worthwhileInRange = parcels.free()
-            .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p))
+            .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
             .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)
             .sort((a, b) => b.value - a.value);
@@ -62,7 +62,7 @@ export class StrategyNotTooGreedy extends Strategy {
             // If the detour go_explore is still running, don't replace it with go_deliver yet.
             if (this.#detourDone && currentIntent?.[0] === 'go_explore') return null;
 
-            const target = this.nearestDelivery();
+            const target = this.nearestEscapableDelivery();
             if (target) {
                 console.log(`[not-too-greedy] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
@@ -73,7 +73,7 @@ export class StrategyNotTooGreedy extends Strategy {
         }
 
         const best = parcels.free()
-            .filter(p => this.isReachable(p))
+            .filter(p => this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
             .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)
             .sort((a, b) => b.value - a.value)[0];

@@ -143,6 +143,46 @@ export function findRoute(start, goal, blockedKeys = null) {
     return astar(s, g, walkable);
 }
 
+/**
+ * Set of "x_y" tiles from which AT LEAST ONE of `goals` is reachable, honouring
+ * arrow constraints on the *reversed* edges. Structure-only: considers walls and
+ * directional tiles, but NOT other agents or crates — the verdict is stable map
+ * geometry, not transient occupancy. Multi-source reverse BFS seeded from the
+ * goals. Used at map load (context.onMap) to find the sustainable pick-up→deliver
+ * region for trap avoidance on directional mazes.
+ * See docs/DIRECTIONAL_TRAP_AVOIDANCE.md.
+ */
+export function tilesThatReach(goals) {
+    const walkable = getWalkable();
+    const seen  = new Set();
+    const queue = [];
+
+    for (const gt of goals) {
+        const gx = Math.round(gt.x), gy = Math.round(gt.y), gk = key(gx, gy);
+        if (walkable.has(gk) && !seen.has(gk)) {
+            seen.add(gk);
+            queue.push({ x: gx, y: gy });
+        }
+    }
+
+    // Index-based queue (avoid O(n) Array.shift). For each known-good tile v, a
+    // predecessor u = v − Δ is good iff the *forward* edge u→v is legal (i.e. v's
+    // own arrow, if any, permits being entered from u).
+    for (let i = 0; i < queue.length; i++) {
+        const v = queue[i];
+        const vKey = key(v.x, v.y);
+        for (const { dx, dy } of DIRS) {
+            const ux = v.x - dx, uy = v.y - dy, uk = key(ux, uy);
+            if (seen.has(uk) || !walkable.has(uk)) continue;
+            if (!canEnterDir(directionalTiles.get(vKey), ux, uy, v.x, v.y)) continue;
+            seen.add(uk);
+            queue.push({ x: ux, y: uy });
+        }
+    }
+
+    return seen;
+}
+
 const GOAL_BLOCKED_WAIT_MS  = 500;
 const GOAL_BLOCKED_MAX_WAIT = 6;
 

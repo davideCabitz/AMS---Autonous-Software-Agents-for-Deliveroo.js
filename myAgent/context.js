@@ -4,6 +4,7 @@ import { Beliefset }   from '@unitn-asa/pddl-client';
 import { Me }          from './beliefs/Me.js';
 import { Parcels }     from './beliefs/Parcels.js';
 import { isDirectional } from './utils/directions.js';
+import { tilesThatReach } from './utils/astar.js';
 
 export const socket  = DjsConnect();
 export const me      = new Me();
@@ -24,6 +25,16 @@ export let   mapHasCrates      = false;
  * impassable obstacles by A* (see utils/astar.js). Fully replaced each sensing
  * event — agents move, so stale positions must not linger. */
 export const otherAgents = [];
+
+/* Trap-avoidance sets for directional ("arrow") mazes, computed once per map in
+ * onMap from walls + arrow tiles only (static geometry — agents/crates excluded so
+ * the verdict can't flicker). usableDeliverySet: "x_y" of deliveries that sit in a
+ * sustainable pick-up→deliver loop (not one-way dead-ends). safeTargetSet: tiles
+ * from which a usable delivery is still reachable — gates pickups/explore so the
+ * agent never commits to a zone it can't get back out of.
+ * See docs/DIRECTIONAL_TRAP_AVOIDANCE.md. */
+export let usableDeliverySet = new Set();
+export let safeTargetSet     = new Set();
 
 /* Directional ("arrow") tiles sensed on the map, keyed "x_y" -> arrow char
  * ('↑'|'→'|'↓'|'←'). A* and the PDDL edge generator consult this to avoid
@@ -173,6 +184,28 @@ socket.onMap((_w, _h, tiles) => {
     }
 
     console.log(`[map] beliefset: ${beliefset.objects.length} objects`);
+
+    // Trap avoidance (directional mazes): find the sustainable pick-up→deliver
+    // region via a greatest fixpoint — keep only deliveries that can still reach a
+    // usable spawner and spawners that can still reach a usable delivery, until
+    // stable. Each pass only shrinks the sets, so it terminates in a few iterations.
+    // Static (walls + arrows only), so it's computed once here, not per tick.
+    {
+        let spawn = [...spawnerTiles], deliv = [...deliveryTiles];
+        while (true) {
+            const reachDeliv = tilesThatReach(deliv);
+            const newSpawn   = spawn.filter(s => reachDeliv.has(`${s.x}_${s.y}`));
+            const reachSpawn = tilesThatReach(newSpawn);
+            const newDeliv   = deliv.filter(d => reachSpawn.has(`${d.x}_${d.y}`));
+            if (newSpawn.length === spawn.length && newDeliv.length === deliv.length) break;
+            spawn = newSpawn; deliv = newDeliv;
+        }
+        usableDeliverySet = new Set(deliv.map(d => `${d.x}_${d.y}`));
+        // All-traps fallback: if no sustainable delivery exists (whole map is a trap,
+        // or there are no spawners to loop with), treat every delivery as a valid
+        // target so the agent still works instead of freezing.
+        safeTargetSet = tilesThatReach(deliv.length ? deliv : deliveryTiles);
+    }
 });
 
 // Primary crate tracking via server events (global, not range-limited).

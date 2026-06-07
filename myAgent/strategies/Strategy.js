@@ -1,7 +1,8 @@
 import {
     me, parcels,
     deliveryTiles, spawnerTiles, walkableTiles,
-    OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY
+    OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY,
+    usableDeliverySet, safeTargetSet
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { findRoute } from '../utils/astar.js';
@@ -55,6 +56,34 @@ export class Strategy {
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
             .sort((a, b) => a.len - b.len)[0]?.d;
+    }
+
+    /**
+     * True when `tile` lies in the sustainable pick-up→deliver region — i.e. from it
+     * a usable delivery is still reachable, so the agent won't get stranded by going
+     * there. Backed by the static safeTargetSet computed once at map load. Gates
+     * pickups and exploration on directional mazes. See docs/DIRECTIONAL_TRAP_AVOIDANCE.md.
+     */
+    inSafe(tile) {
+        return safeTargetSet.has(`${Math.round(tile.x)}_${Math.round(tile.y)}`);
+    }
+
+    /**
+     * Nearest A*-reachable delivery that is part of a sustainable pick-up→deliver
+     * loop (in usableDeliverySet) — one the agent can still leave afterwards, so it
+     * won't get trapped in a one-way pocket. Falls back to the nearest reachable
+     * delivery when none is usable (all-traps map) so the agent still delivers
+     * instead of freezing. Used for the actual go_deliver target; scoring keeps
+     * using nearestDelivery (nearest reachable) unchanged.
+     */
+    nearestEscapableDelivery(from = me) {
+        const reachable = [...deliveryTiles]
+            .map(d => ({ d, len: this.pathLen(from, d) }))
+            .filter(({ len }) => Number.isFinite(len))
+            .sort((a, b) => a.len - b.len);
+        if (reachable.length === 0) return undefined;
+        const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
+        return (usable[0] ?? reachable[0]).d;
     }
 
     /** Naive reward-per-distance ratio. Used only by StrategySimple. */
@@ -222,10 +251,15 @@ export class Strategy {
         const reachable  = pool.filter(t => this.isReachable(t));
         if (reachable.length === 0) return null; // nothing reachable → stay idle
 
+        // Prefer tiles in the sustainable-loop region (don't explore into a one-way
+        // trap); fall back to all reachable only if none are safe (all-traps map).
+        const safe   = reachable.filter(t => this.inSafe(t));
+        const usable = safe.length > 0 ? safe : reachable;
+
         // Prefer reachable tiles outside current sensing (new ground), else any
         // reachable tile; pick the nearest by real A* path length.
-        const outOfRange = reachable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
-        const candidates = outOfRange.length > 0 ? outOfRange : reachable;
+        const outOfRange = usable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
+        const candidates = outOfRange.length > 0 ? outOfRange : usable;
 
         const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
         if (target) {
