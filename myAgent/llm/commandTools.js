@@ -106,13 +106,10 @@ function describeFailure(err) {
 
 // ---- tool catalogue -----------------------------------------------------------
 
-export function buildTools(myAgent, replySender) {
-    // Push a BDI intention, await completion, return ok() string or a failure string.
-    const command = (predicate, ok) =>
-        withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0])
-            .then(() => ok())
-            .catch(err => describeFailure(err));
-
+/* Reasoning + read tools — safe to expose anywhere because they have NO world
+ * effect. Shared by the action toolset (buildTools) and the read-only
+ * conversational toolset (buildChatTools). */
+function readTools() {
     return {
         // reasoning
         async calculate(input)        { return calculate(input); },
@@ -161,6 +158,25 @@ export function buildTools(myAgent, replySender) {
                 },
             });
         },
+    };
+}
+
+/** Read-only toolset for the conversational fast-lane: observe + answer, but
+ *  NEVER move the agent or touch the autonomy gate, so it is safe to run
+ *  concurrently with an action directive. */
+export function buildChatTools() {
+    return readTools();
+}
+
+export function buildTools(myAgent, replySender) {
+    // Push a BDI intention, await completion, return ok() string or a failure string.
+    const command = (predicate, ok) =>
+        withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0])
+            .then(() => ok())
+            .catch(err => describeFailure(err));
+
+    return {
+        ...readTools(),
 
         // command
         async go_to(input) {

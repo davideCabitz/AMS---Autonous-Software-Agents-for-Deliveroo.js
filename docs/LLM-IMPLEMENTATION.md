@@ -4,9 +4,9 @@
 
 ---
 
-## 1. Summary (the one-paragraph version)
+## 1. Summary 
 
-We added an **LLM** (a large language model, like the engine behind ChatGPT) to the project. It is **not** a second player. It is a layer that sits **on top of our existing BDI agent** (`myAgent/`). You can type or chat an instruction in plain English — *"go pick up the parcel at (13,0) and deliver it"* — and the LLM figures out the steps and **tells the BDI agent what to do**. The BDI agent still does the actual driving (pathfinding, picking up, delivering) exactly as before. When the instruction is done, the agent goes back to playing on its own.
+We added an **LLM** to the project as a layer that sits **on top of our existing BDI agent** (`myAgent/`). You can type or chat an instruction in plain English — *"go pick up the parcel at (13,0) and deliver it"* — and the LLM figures out the steps and **tells the BDI agent what to do**. The BDI agent still does the actual driving (pathfinding, picking up, delivering) exactly as before. When the instruction is done, the agent goes back to playing on its own.
 
 **Key idea:** the LLM decides **WHAT** to do; the BDI agent decides **HOW** to do it.
 
@@ -62,12 +62,13 @@ An LLM is bad at low-level game control. If you ask it to walk somewhere, it tri
           the person who asked
 ```
 
-Four design decisions make this work:
+Five design decisions make this work:
 
 1. **Same program, same connection, shared knowledge.** The LLM layer imports the *same* `socket`, `me`, `parcels`, `deliveryTiles` the BDI agent already uses (`myAgent/context.js`). There is no second connection and no duplicate world-state.
 2. **One ReAct loop** per instruction (simple and predictable).
 3. **An "autonomy gate".** While the LLM is carrying out an instruction, the BDI agent's automatic decision-making is paused so the two don't fight over the player. It resumes the moment the instruction finishes.
 4. **"Command-and-wait".** When the LLM issues `go_to(9,11)`, our code pushes that as a normal BDI goal and **waits** until the BDI agent (via A\*) actually arrives, then tells the LLM the result. This keeps the LLM in sync with reality.
+5. **A conversational fast-lane.** A message that is just a *question* ("can you hear me?", "where are you?") is answered **immediately and concurrently** with read-only tools — it never waits behind a long action like a 25-second wait (see §6).
 
 ---
 
@@ -77,12 +78,15 @@ Four design decisions make this work:
 
 ```
 myAgent/llm/
-  index.js        connects the chat channel to the loop; runs one instruction at a
-                  time; keeps a short conversation memory per sender (so "do the
-                  same" works); supports /reset and /memory; sends the reply back;
+  index.js        connects the chat channel; ROUTES each message to the ACTION lane
+                  (one instruction at a time) or the conversational fast-lane
+                  (answered concurrently); keeps a short memory per sender (so "do
+                  the same" works); supports /reset and /memory; replies via chat;
                   also reads the terminal for testing; waits until connected first
-  commandLoop.js  the ReAct loop for one instruction; turns the autonomy gate on/off
-  commandTools.js the list of tools the LLM can use (see §5)
+  commandLoop.js  the ReAct loops: runDirective (actions, uses the autonomy gate) and
+                  runConversation (read-only chat); plus classifyDirective (ACTION vs CHAT)
+  commandTools.js the tools the LLM can use (see §5): the full set for actions, and a
+                  read-only subset (buildChatTools) for the conversational lane
   prompt.js       the instructions we give the LLM (its rules + a glossary of game
                   terms + a live snapshot of the world + the strict reply format)
 ```
@@ -129,6 +133,17 @@ The LLM is deliberately given only **high-level** tools — it can never move on
 5. **Autonomy gate OFF** — the BDI agent immediately goes back to playing on its own.
 
 **Conversation memory.** Each chat sender gets a short rolling memory (the last ~5 instructions + answers), so follow-ups like *"do the same but on a delivery tile"* or *"I said spawn, not delivery"* have context. Two special messages: **`/reset`** clears the memory, **`/memory`** prints it.
+
+### Two lanes: doing vs talking
+
+The agent can be **doing** something (e.g. a 25-second `wait`) when a new message arrives. We don't want a quick question to be stuck behind that. So every incoming message is routed:
+
+- If the agent is **idle**, the message just runs (steps 1–5 above).
+- If the agent is **busy** with an action, we ask the model one cheap question: *is this new message an ACTION (move/pick up/wait/…) or just CHAT (a question/greeting)?*
+  - **ACTION** → it **queues** behind the running instruction (we never run two movements at once — that's what the autonomy gate protects).
+  - **CHAT** → it runs on the **fast-lane**: a separate read-only loop that can look at the world and reply, but **cannot move the agent and never touches the autonomy gate**. It answers *while* the action keeps running.
+
+That read-only restriction is the whole safety story: the fast-lane physically can't move the player, so the two lanes can never fight. The only things that happen concurrently are *reading state* and *talking* — both harmless.
 
 ---
 
@@ -221,6 +236,19 @@ Instruction 2: *"do the same but on a delivery tile."*
 ```
 **What this proves:** (a) `wait` actually holds the agent still instead of pretending; (b) the agent knows what a *spawn tile* is and can locate it; (c) when the literal rightmost tile is momentarily blocked by another player it **falls back** to the next reachable one instead of giving up; (d) **memory** works — "do the same" correctly repeated the go-to-and-wait pattern, and even carried over "rightmost".
 
+### Test F — answering a question *while busy* (the conversational fast-lane)
+We sent an action and then, immediately, a question — the question was answered **during** the action, not after it.
+
+Instruction 1: *"wait where you are for 25 seconds."*  Instruction 2 (sent right after): *"can you hear me?"*
+```
+[llm] directive from console: wait where you are for 25 seconds
+[llm:chat] message from console: can you hear me?                ← classified CHAT → fast-lane
+[llm] reply -> console: Yes, I can hear you. How can I assist you today?   ← answered DURING the wait
+[llm tool] wait(25) -> Waited 25 second(s) holding position at (11, 4).    ← 25s later
+[llm] reply -> console: Waited for 25 seconds at my current position as instructed.
+```
+**What this proves:** the question reply appears **before** the wait finishes — the agent answered concurrently instead of making the admin wait 25 seconds. Movement stays serialized; only the verbal reply runs in parallel.
+
 ### What the tests also revealed (and we fixed)
 The first live runs of the *old* standalone prototype (§10) exposed two real bugs, which we fixed in the command layer:
 - The model sometimes writes `Action: go_to(5,3)` (function-call style). Our parser only accepted `go_to` + a separate input, so it failed with "unknown tool". **Fixed:** the parser now accepts both styles (visible in Test C — `calculate(13 + 2)` parsed fine).
@@ -235,6 +263,7 @@ The first live runs of the *old* standalone prototype (§10) exposed two real bu
 - **It finishes its current action before obeying.** When an instruction arrives, the agent stops choosing *new* goals, but it lets the goal it's *already doing* finish first. So for ~1–2 seconds (while the model is "thinking") you may see it complete its previous move before switching to your instruction. (This is intentional; it can be changed to "stop instantly" if we prefer.)
 - **Shared-game reachability is dynamic.** We only offer the LLM tiles it can reach, but other players can block a path *after* a tile was chosen. That's why a `go_to` can still fail mid-way; the LLM then falls back to the next candidate. A static check can't fully predict a moving opponent.
 - **Vague wording is still interpreted.** With the glossary the agent now understands "spawn tile", "delivery tile", "leftmost/rightmost", etc. But genuinely ambiguous wording is still resolved by the model's judgement; precise instructions remove any guesswork.
+- **The ACTION-vs-CHAT split is a model call.** When a message arrives *while the agent is busy*, we spend one extra (cheap) model call to classify it. If it's unsure it defaults to ACTION (the safe side — it queues rather than risking a concurrent move). A genuinely mis-classified action would just be handled verbally ("I'll do that next") instead of moving — never a wrong move.
 
 ---
 
