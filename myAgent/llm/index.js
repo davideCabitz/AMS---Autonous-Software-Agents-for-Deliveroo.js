@@ -20,9 +20,15 @@ function whenReady() {
  * testing without a second agent to chat from.
  */
 
+// Conversational memory across directives, kept per chat sender so follow-ups
+// like "do the same" or "I said spawn not delivery" have context. Capped to the
+// last few turns so it never grows unbounded. /reset clears it, /memory prints it.
+const MAX_HISTORY_TURNS = 5;   // 1 turn = 1 user directive + 1 assistant answer
+
 export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     let busy = false;
     const queue = [];
+    const histories = new Map();   // sender key -> [{role,content}, ...]
 
     async function drain() {
         if (busy) return;
@@ -30,15 +36,35 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         try {
             while (queue.length) {
                 const { objective, replySender } = queue.shift();
-                await whenReady();             // don't act before beliefs are populated
-                console.log(`[llm] directive from ${replySender ?? 'console'}: ${objective}`);
+                const key = replySender ?? 'console';
+                const cmd = objective.toLowerCase();
                 let answer;
-                try {
-                    answer = await runDirective(objective, myAgent, replySender, resumeAutonomy);
-                } catch (err) {
-                    answer = `Sorry, the directive failed: ${err?.message ?? err}`;
+
+                if (cmd === '/reset') {
+                    histories.delete(key);
+                    answer = 'Conversation memory cleared.';
+                } else if (cmd === '/memory') {
+                    const h = histories.get(key) ?? [];
+                    answer = h.length
+                        ? h.map(m => `${m.role}: ${m.content}`).join(' | ')
+                        : 'No memory yet.';
+                } else {
+                    await whenReady();             // don't act before beliefs are populated
+                    console.log(`[llm] directive from ${key}: ${objective}`);
+                    const history = histories.get(key) ?? [];
+                    try {
+                        answer = await runDirective(objective, myAgent, replySender, resumeAutonomy, history);
+                    } catch (err) {
+                        answer = `Sorry, the directive failed: ${err?.message ?? err}`;
+                    }
+                    // Record this turn and trim to the last MAX_HISTORY_TURNS.
+                    history.push({ role: 'user', content: objective });
+                    history.push({ role: 'assistant', content: answer });
+                    while (history.length > MAX_HISTORY_TURNS * 2) history.shift();
+                    histories.set(key, history);
                 }
-                console.log(`[llm] reply -> ${replySender ?? 'console'}: ${answer}`);
+
+                console.log(`[llm] reply -> ${key}: ${answer}`);
                 if (replySender) {
                     try { await socket.emitSay(replySender, answer); }
                     catch (err) { console.error('[llm] emitSay failed:', err?.message ?? err); }

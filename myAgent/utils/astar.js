@@ -143,6 +143,39 @@ export function findRoute(start, goal, blockedKeys = null) {
     return astar(s, g, walkable);
 }
 
+/**
+ * Set of "x_y" keys reachable from `start` over the walkable map (one BFS,
+ * respecting one-way arrow tiles and treating other agents as obstacles). Used to
+ * filter LLM tile queries to tiles the agent can actually get to — so "leftmost
+ * tile" means the leftmost *reachable* one without the admin having to say so.
+ * Crates are not modelled here (navigateTo handles them dynamically); this is the
+ * static "can the agent travel there in principle" set.
+ */
+export function reachableFrom(start) {
+    const s = { x: Math.round(start.x), y: Math.round(start.y) };
+    const startKey = key(s.x, s.y);
+    const walkable = getWalkable();
+    const blocked  = agentKeys();
+    // Treat current crates as walls, matching navigateTo's plain A* — otherwise a
+    // tile only reachable by pushing a crate would be reported as freely reachable.
+    for (const c of crateTiles) blocked.add(key(Math.round(c.x), Math.round(c.y)));
+    blocked.delete(startKey);                 // never block where we stand
+
+    const seen  = new Set([startKey]);
+    const stack = [s];
+    while (stack.length) {
+        const cur = stack.pop();
+        for (const { dx, dy } of DIRS) {
+            const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
+            if (seen.has(nk) || !walkable.has(nk) || blocked.has(nk)) continue;
+            if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
+            seen.add(nk);
+            stack.push({ x: nx, y: ny });
+        }
+    }
+    return seen;
+}
+
 const GOAL_BLOCKED_WAIT_MS  = 500;
 const GOAL_BLOCKED_MAX_WAIT = 6;
 
