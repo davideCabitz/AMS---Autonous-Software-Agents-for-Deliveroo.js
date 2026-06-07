@@ -47,14 +47,16 @@ function extractFinal(text) {
  * @param {object} myAgent      the IntentionRevisionReplace instance
  * @param {string|null} replySender  chat id to reply to (null for stdin tests)
  * @param {function} [resumeAutonomy] called once when the directive ends
+ * @param {Array} [history]     prior {role,content} turns for conversational context
  * @returns {Promise<string>} the final answer / failure summary
  */
-export async function runDirective(objective, myAgent, replySender, resumeAutonomy) {
+export async function runDirective(objective, myAgent, replySender, resumeAutonomy, history = []) {
     directive.active = true;                       // autonomy stands down
 
     const tools = buildTools(myAgent, replySender);
     const messages = [
         { role: 'system', content: buildSystemPrompt(objective) },
+        ...history,                                // earlier directives + answers (context)
         { role: 'user',   content: `Directive from chat: ${objective}` },
     ];
 

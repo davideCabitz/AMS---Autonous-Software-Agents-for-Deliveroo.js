@@ -1,6 +1,6 @@
 # LLM Agent — Implementation Report
 
-*Part 2 of the Autonomous Software Agents project. Written so a teammate who has **never worked with LLMs** can understand what was built, how it works, and the tests we ran to prove it.*
+*Dear AL, since u've **never worked with LLMs**, I've written this doc so u can understand what was built, how it works, and the tests we ran to prove it.*
 
 ---
 
@@ -78,12 +78,13 @@ Four design decisions make this work:
 ```
 myAgent/llm/
   index.js        connects the chat channel to the loop; runs one instruction at a
-                  time; sends the reply back; also reads the terminal for testing;
-                  waits until the agent is connected before acting
+                  time; keeps a short conversation memory per sender (so "do the
+                  same" works); supports /reset and /memory; sends the reply back;
+                  also reads the terminal for testing; waits until connected first
   commandLoop.js  the ReAct loop for one instruction; turns the autonomy gate on/off
   commandTools.js the list of tools the LLM can use (see §5)
-  prompt.js       the instructions we give the LLM (its rules + a live snapshot of
-                  the game world + the strict reply format)
+  prompt.js       the instructions we give the LLM (its rules + a glossary of game
+                  terms + a live snapshot of the world + the strict reply format)
 ```
 
 It reuses one file from the earlier prototype: `llmAgent/llmClient.js`, which is the small wrapper that actually sends the conversation to the model.
@@ -95,7 +96,8 @@ It reuses one file from the earlier prototype: `llmAgent/llmClient.js`, which is
 | `myAgent/context.js` | `directive = { active: false }` | a shared on/off switch: "is the LLM currently in charge?" |
 | `myAgent/agent.js` | one line: `if (directive.active) return;` inside `optionsGeneration` | when the LLM is in charge, the BDI agent stops choosing its own goals (but still keeps sensing the world). Also: the LLM layer only turns on if an API key is configured — otherwise the BDI agent runs exactly as before. |
 | `myAgent/intentions/IntentionDeliberation.js` | a `completion` promise | lets us *wait* for a goal to finish and find out if it succeeded |
-| `myAgent/intentions/IntentionRevisionReplace.js` | `commandAndAwait(goal)` | the bridge the LLM tools use: "make this your next goal, and tell me when it's done" |
+| `myAgent/intentions/IntentionRevisionReplace.js` | `commandAndAwait(goal)` and `haltCurrent()` | the bridge the LLM tools use ("make this your next goal, tell me when done"), and a way to stop the agent in place (used by the `wait` tool) |
+| `myAgent/utils/astar.js` | `reachableFrom(me)` | computes which tiles the agent can actually reach, so the LLM is only offered reachable tiles (see §5) |
 
 ---
 
@@ -106,11 +108,15 @@ The LLM is deliberately given only **high-level** tools — it can never move on
 | Kind | Tools | What it does |
 |---|---|---|
 | **Thinking** (no game effect) | `calculate(expression)`, `get_current_time(location)` | do maths; get the time in Rome |
-| **Looking** | `get_my_position()`, `sense_parcels()`, `sense_delivery_tiles()` | read the current world state |
+| **Looking** | `get_my_position()`, `sense_parcels()`, `sense_delivery_tiles()`, `sense_spawn_tiles()`, `get_map_info()` | read the current world state: where parcels are, where the drop-off (delivery) tiles are, where the green spawn tiles are, and the map's reachable bounds/edges |
 | **Doing** | `go_to(x,y)`, `go_pickup(x,y)`, `deliver()` | hand a goal to the BDI agent and wait for it to finish |
+| **Waiting** | `wait(seconds)` | hold position without moving for N seconds (max 30) — for "stop/wait/don't move for N s". It really stops the agent (it doesn't just claim to). |
 | **Talking** | `say(message)` | send a chat message back to whoever gave the instruction |
 
-If a "doing" tool fails (target unreachable, blocked, times out after ~60 s), it returns a clear message like *"Failed: target (3,9) is unreachable"* so the LLM can try something else instead of crashing.
+**Two things make these robust:**
+
+- **Reachable-only tiles.** `sense_spawn_tiles`, `sense_delivery_tiles` and `get_map_info` only report tiles the agent can actually get to (computed with `reachableFrom`). So when an admin says *"go to the leftmost tile"* it correctly means the leftmost **reachable** one — the admin never has to spell that out.
+- **Graceful failure + fallback.** If a "doing" tool fails (blocked, times out after ~60 s), it returns a clear message like *"Failed: target (3,9) is unreachable"*. Because this is a **shared** game (other players can block a path at any moment), the LLM is told to then try the next-best candidate from its list (e.g. the next-rightmost tile) instead of giving up.
 
 ---
 
@@ -118,9 +124,11 @@ If a "doing" tool fails (target unreachable, blocked, times out after ~60 s), it
 
 1. **An instruction arrives** — from in-game chat (`socket.onMsg`) or typed in the terminal. We wait until the agent is actually connected, and we handle one instruction at a time.
 2. **Autonomy gate ON** — the BDI agent stops picking its own goals.
-3. **The ReAct loop runs** — the LLM reads the instruction + a snapshot of the world, replies with one action, we run the matching tool, we feed back the result, and repeat — until the LLM says `Final Answer:` (max 12 steps as a safety limit).
-4. **Reply** — the final answer is sent back in chat (or printed in the terminal).
+3. **The ReAct loop runs** — the LLM reads the instruction + a short memory of the last few instructions + a snapshot of the world, replies with one action, we run the matching tool, we feed back the result, and repeat — until the LLM says `Final Answer:` (max 12 steps as a safety limit).
+4. **Reply** — the final answer is sent back in chat (or printed in the terminal), and the instruction + answer are saved to memory.
 5. **Autonomy gate OFF** — the BDI agent immediately goes back to playing on its own.
+
+**Conversation memory.** Each chat sender gets a short rolling memory (the last ~5 instructions + answers), so follow-ups like *"do the same but on a delivery tile"* or *"I said spawn, not delivery"* have context. Two special messages: **`/reset`** clears the memory, **`/memory`** prints it.
 
 ---
 
@@ -192,6 +200,27 @@ This is the real use-case: another player/admin messages our agent.
 ```
 **What this proves:** the whole loop works over chat — instruction in → LLM reasons → BDI agent drives → reply sent back to the sender → the agent goes back to playing on its own.
 
+### Test E — waiting, spawn tiles, memory, and reachable fallback (real model)
+A later round of testing added the `wait` tool, the spawn-tile / map tools, conversation memory, and reachable-only tile filtering. Two instructions in a row:
+
+Instruction 1: *"go to the rightmost spawn tile and wait there 2 seconds."*
+```
+[llm tool] sense_spawn_tiles(none) -> [ ... ,{"x":22,"y":19},{"x":23,"y":4}]
+[llm tool] go_to(23,4)  -> Failed: no plan applies to go_to 23 4.   ← blocked right now
+[llm tool] go_to(22,4)  -> Failed: no plan applies to go_to 22 4.   ← tries next candidate
+[llm tool] go_to(22,19) -> Arrived at (22, 19).                     ← reachable one
+[llm tool] wait(2)      -> Waited 2 second(s) holding position at (22, 19).
+[llm] reply -> I navigated to the rightmost spawn tile at (22, 19) and waited there for 2 seconds.
+```
+Instruction 2: *"do the same but on a delivery tile."*
+```
+[llm tool] sense_delivery_tiles(none) -> [ ... {"x":15,"y":11}]
+[llm tool] go_to(15,11) -> Arrived at (15, 11).
+[llm tool] wait(2)      -> Waited 2 second(s) holding position at (15, 11).
+[llm] reply -> Reached the rightmost delivery tile at (15, 11) and waited for 2 seconds.
+```
+**What this proves:** (a) `wait` actually holds the agent still instead of pretending; (b) the agent knows what a *spawn tile* is and can locate it; (c) when the literal rightmost tile is momentarily blocked by another player it **falls back** to the next reachable one instead of giving up; (d) **memory** works — "do the same" correctly repeated the go-to-and-wait pattern, and even carried over "rightmost".
+
 ### What the tests also revealed (and we fixed)
 The first live runs of the *old* standalone prototype (§10) exposed two real bugs, which we fixed in the command layer:
 - The model sometimes writes `Action: go_to(5,3)` (function-call style). Our parser only accepted `go_to` + a separate input, so it failed with "unknown tool". **Fixed:** the parser now accepts both styles (visible in Test C — `calculate(13 + 2)` parsed fine).
@@ -201,9 +230,11 @@ The first live runs of the *old* standalone prototype (§10) exposed two real bu
 
 ## 9. Known limitations (be aware of these)
 
+- **Needs the VPN / a reachable model.** The model lives behind the faculty proxy; without the university VPN the call fails with "Connection error". We deliberately do **not** auto-retry on this (it's an environment issue, not a bug) — connect the VPN and re-send.
 - **Model availability.** Only `gpt-4o` answers on the proxy right now; the assigned 70B model errors out. Smaller models also tend to drift from the strict reply format more than gpt-4o.
 - **It finishes its current action before obeying.** When an instruction arrives, the agent stops choosing *new* goals, but it lets the goal it's *already doing* finish first. So for ~1–2 seconds (while the model is "thinking") you may see it complete its previous move before switching to your instruction. (This is intentional; it can be changed to "stop instantly" if we prefer.)
-- **Vague instructions get interpreted.** "Go to the further left zone" made the LLM pick the leftmost *delivery tile* (9,11), not the far-left edge of the map. Precise instructions ("go to (0,10)") remove the guesswork.
+- **Shared-game reachability is dynamic.** We only offer the LLM tiles it can reach, but other players can block a path *after* a tile was chosen. That's why a `go_to` can still fail mid-way; the LLM then falls back to the next candidate. A static check can't fully predict a moving opponent.
+- **Vague wording is still interpreted.** With the glossary the agent now understands "spawn tile", "delivery tile", "leftmost/rightmost", etc. But genuinely ambiguous wording is still resolved by the model's judgement; precise instructions remove any guesswork.
 
 ---
 

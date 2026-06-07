@@ -46,4 +46,19 @@ export class IntentionRevisionReplace extends IntentionRevision {
 
         return intention.completion;
     }
+
+    /**
+     * Stop whatever intention is currently executing so the agent holds its
+     * position. Used by the LLM `wait` tool to make "don't move for N seconds"
+     * actually hold still (the autonomy gate only blocks NEW pushes, not the
+     * intention already running). Respects pddl.busy so a crate macro-plan is
+     * not yanked mid-execution.
+     * @returns {boolean} true if it halted, false if a PDDL plan blocked it
+     */
+    haltCurrent() {
+        if (pddl.busy) return false;
+        const last = this.intention_queue.at(-1);
+        if (last) last.stop();
+        return true;
+    }
 }

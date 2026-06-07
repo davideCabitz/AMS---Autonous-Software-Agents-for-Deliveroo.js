@@ -1,4 +1,5 @@
-import { socket, me, parcels, deliveryTiles } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles } from '../context.js';
+import { reachableFrom } from '../utils/astar.js';
 
 /*
  * Tool catalogue for the LLM command layer. Every tool returns a STRING
@@ -15,6 +16,8 @@ import { socket, me, parcels, deliveryTiles } from '../context.js';
 
 // Safety net: a wedged navigation must never hang the ReAct loop forever.
 const COMMAND_TIMEOUT_MS = 60_000;
+// Cap on the wait tool so a bad number can't freeze the agent indefinitely.
+const MAX_WAIT_SECONDS = 30;
 
 // ---- reasoning tools (copied from llmAgent/tools.js; that module must NOT be
 // imported because it opens a second socket via its own context.js) ------------
@@ -56,6 +59,16 @@ function resolveParcelId(x, y) {
     const here = parcels.free().filter(p => Math.round(p.x) === x && Math.round(p.y) === y);
     if (!here.length) return null;
     return here.sort((a, b) => b.reward - a.reward)[0].id;
+}
+
+/** Keep only tiles the agent can actually reach from its current position, so
+ *  "leftmost/rightmost/nearest X" directives never resolve to a walled-off tile.
+ *  Falls back to the full list if nothing is reachable (so a tool never lies by
+ *  returning empty when tiles do exist). */
+function onlyReachable(tiles) {
+    const reach = reachableFrom(me);
+    const filtered = tiles.filter(t => reach.has(`${t.x}_${t.y}`));
+    return filtered.length ? filtered : tiles;
 }
 
 /** Nearest delivery tile to the agent (Manhattan), or null if none known. */
@@ -117,9 +130,36 @@ export function buildTools(myAgent, replySender) {
                 : 'No free parcels currently in view.';
         },
         async sense_delivery_tiles() {
-            return deliveryTiles.length
-                ? JSON.stringify(deliveryTiles.map(t => ({ x: t.x, y: t.y })))
-                : 'No delivery tiles known yet.';
+            if (!deliveryTiles.length) return 'No delivery tiles known yet.';
+            return JSON.stringify(onlyReachable(deliveryTiles).map(t => ({ x: t.x, y: t.y })));
+        },
+        async sense_spawn_tiles() {
+            if (!spawnerTiles.length) return 'No spawn tiles known yet.';
+            return JSON.stringify(onlyReachable(spawnerTiles).map(t => ({ x: t.x, y: t.y })));
+        },
+        async get_map_info() {
+            if (!walkableTiles.length) return 'Map not loaded yet.';
+            // Report only reachable tiles so edges are the reachable extremes.
+            const reach = onlyReachable(walkableTiles);
+            const xs = reach.map(t => t.x);
+            const ys = reach.map(t => t.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs);
+            const minY = Math.min(...ys), maxY = Math.max(...ys);
+            const at = (pred) => reach.filter(pred).map(t => ({ x: t.x, y: t.y }));
+            // Reachable tiles on each extreme, so "leftmost/rightmost/top/bottom tile"
+            // directives resolve to a real tile the agent can get to, not a guess.
+            return JSON.stringify({
+                bounds: { minX, maxX, minY, maxY },
+                width: maxX - minX + 1,
+                height: maxY - minY + 1,
+                counts: { delivery: deliveryTiles.length, spawn: spawnerTiles.length, walkable: walkableTiles.length },
+                edges: {
+                    leftmost:  at(t => t.x === minX),
+                    rightmost: at(t => t.x === maxX),
+                    bottom:    at(t => t.y === minY),
+                    top:       at(t => t.y === maxY),
+                },
+            });
         },
 
         // command
@@ -149,6 +189,15 @@ export function buildTools(myAgent, replySender) {
             if (!t) return 'Failed: no delivery tile known. Call sense_delivery_tiles first.';
             return command(['go_deliver', t.x, t.y], () =>
                 `Delivered at (${t.x},${t.y}); score now ${me.score}.`);
+        },
+        async wait(input) {
+            const n = String(input ?? '').match(/-?\d+(\.\d+)?/);
+            const secs = Math.max(0, Math.min(MAX_WAIT_SECONDS, n ? parseFloat(n[0]) : 0));
+            // Halt any in-flight movement so the agent genuinely holds position
+            // (the autonomy gate only blocks NEW autonomous goals, not a running one).
+            myAgent.haltCurrent();
+            await new Promise(resolve => setTimeout(resolve, secs * 1000));
+            return `Waited ${secs} second(s) holding position at (${me.x}, ${me.y}).`;
         },
 
         // chat
