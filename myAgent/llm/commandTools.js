@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive } from '../context.js';
 import { reachableFrom } from '../utils/astar.js';
 
 /*
@@ -14,26 +14,37 @@ import { reachableFrom } from '../utils/astar.js';
  *  - chat: say — reply to the directive sender.
  */
 
-// Safety net: a wedged navigation must never hang the ReAct loop forever.
-const COMMAND_TIMEOUT_MS = 60_000;
+// Safety net: a wedged navigation must never block the agent for long. The agent
+// is only "gated" (BDI paused) while a command actually runs, so keep this short.
+const COMMAND_TIMEOUT_MS = 30_000;
 // Cap on the wait tool so a bad number can't freeze the agent indefinitely.
 const MAX_WAIT_SECONDS = 30;
+// Cap on a single patrol so a runaway range can't sweep forever.
+const MAX_PATROL_TILES = 64;
 
 // ---- reasoning tools (copied from llmAgent/tools.js; that module must NOT be
 // imported because it opens a second socket via its own context.js) ------------
 
 function calculate(expression) {
-    const expr = String(expression ?? '').trim();
-    if (!/^[\d\s+\-*/().]+$/.test(expr))
-        return `Error: invalid expression '${expression}'. Only numbers and + - * / ( ) are allowed.`;
-    try {
-        const result = Function(`"use strict"; return (${expr});`)();
-        if (typeof result !== 'number' || !Number.isFinite(result))
-            return `Error: '${expr}' did not evaluate to a finite number.`;
-        return String(result);
-    } catch (err) {
-        return `Error: ${err.message}`;
+    // Strip surrounding quotes, then allow several comma-separated expressions in
+    // one call (e.g. "(0+18)/2, (0+19)/2" for a centre tile -> "9, 9.5").
+    const raw = String(expression ?? '').trim().replace(/^["']|["']$/g, '');
+    const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length === 0) return 'Error: empty expression.';
+    const results = [];
+    for (const expr of parts) {
+        if (!/^[\d\s+\-*/().]+$/.test(expr))
+            return `Error: invalid expression '${expr}'. Only numbers and + - * / ( ) are allowed.`;
+        try {
+            const result = Function(`"use strict"; return (${expr});`)();
+            if (typeof result !== 'number' || !Number.isFinite(result))
+                return `Error: '${expr}' did not evaluate to a finite number.`;
+            results.push(String(result));
+        } catch (err) {
+            return `Error: ${err.message}`;
+        }
     }
+    return results.join(', ');
 }
 
 function get_current_time(location) {
@@ -169,11 +180,21 @@ export function buildChatTools() {
 }
 
 export function buildTools(myAgent, replySender) {
-    // Push a BDI intention, await completion, return ok() string or a failure string.
-    const command = (predicate, ok) =>
-        withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0])
-            .then(() => ok())
-            .catch(err => describeFailure(err));
+    // Run a BDI command. The FIRST command takes control of the agent (gates the
+    // autonomous strategy); the gate is then HELD through the whole command
+    // sequence and released once, at the end of the directive (runDirective's
+    // finally). That stops the agent drifting between two commands — e.g. "go to X
+    // then freeze" freezes AT X, not where it wandered. The agent still does its
+    // own work during the LLM's INITIAL thinking, before any command runs.
+    const command = async (predicate, ok) => {
+        directive.active = true;                       // take / keep control
+        try {
+            await withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0]);
+            return ok();
+        } catch (err) {
+            return describeFailure(err);
+        }
+    };
 
     return {
         ...readTools(),
@@ -209,11 +230,44 @@ export function buildTools(myAgent, replySender) {
         async wait(input) {
             const n = String(input ?? '').match(/-?\d+(\.\d+)?/);
             const secs = Math.max(0, Math.min(MAX_WAIT_SECONDS, n ? parseFloat(n[0]) : 0));
-            // Halt any in-flight movement so the agent genuinely holds position
-            // (the autonomy gate only blocks NEW autonomous goals, not a running one).
+            directive.active = true;                   // hold still (gate held until directive ends)
             myAgent.haltCurrent();
             await new Promise(resolve => setTimeout(resolve, secs * 1000));
             return `Waited ${secs} second(s) holding position at (${me.x}, ${me.y}).`;
+        },
+        // Walk from (x1,y1) to (x2,y2) one tile at a time, pausing `wait_each`
+        // seconds at every tile — the WHOLE sweep runs in this single tool call, so
+        // there is no LLM round-trip per tile (fast) and no iteration-cap problem.
+        // Use this for "keep moving ... until you reach ..." / "sweep the row".
+        async patrol(input) {
+            const nums = String(input ?? '').match(/-?\d+(\.\d+)?/g);
+            if (!nums || nums.length < 4)
+                return 'Error: patrol needs "x1,y1,x2,y2[,wait_each]".';
+            const x1 = Math.round(+nums[0]), y1 = Math.round(+nums[1]);
+            const x2 = Math.round(+nums[2]), y2 = Math.round(+nums[3]);
+            const waitEach = Math.max(0, Math.min(MAX_WAIT_SECONDS, nums[4] != null ? +nums[4] : 0));
+
+            // Build the tile sequence (step along x toward x2, then y toward y2).
+            const tiles = [{ x: x1, y: y1 }];
+            let cx = x1, cy = y1;
+            while ((cx !== x2 || cy !== y2) && tiles.length < MAX_PATROL_TILES) {
+                if (cx !== x2) cx += cx < x2 ? 1 : -1;
+                else           cy += cy < y2 ? 1 : -1;
+                tiles.push({ x: cx, y: cy });
+            }
+
+            directive.active = true;                   // hold control for the whole sweep
+            let visited = 0;
+            for (const t of tiles) {
+                try {
+                    await withTimeout(myAgent.commandAndAwait(['go_to', t.x, t.y]), COMMAND_TIMEOUT_MS, 'go_to');
+                } catch (err) {
+                    return `Patrol stopped at (${me.x},${me.y}) after ${visited} tile(s): could not reach (${t.x},${t.y}) — ${describeFailure(err)}`;
+                }
+                visited++;
+                if (waitEach > 0) await new Promise(r => setTimeout(r, waitEach * 1000));
+            }
+            return `Patrolled ${visited} tile(s) from (${x1},${y1}) to (${me.x},${me.y}), waiting ${waitEach}s at each.`;
         },
 
         // chat

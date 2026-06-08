@@ -66,7 +66,7 @@ Five design decisions make this work:
 
 1. **Same program, same connection, shared knowledge.** The LLM layer imports the *same* `socket`, `me`, `parcels`, `deliveryTiles` the BDI agent already uses (`myAgent/context.js`). There is no second connection and no duplicate world-state.
 2. **One ReAct loop** per instruction (simple and predictable).
-3. **An "autonomy gate".** While the LLM is carrying out an instruction, the BDI agent's automatic decision-making is paused so the two don't fight over the player. It resumes the moment the instruction finishes.
+3. **An "autonomy gate" — off while thinking, held through the command sequence.** While the LLM is just *thinking* (reading the world, doing maths, deciding) the BDI agent keeps playing on its own — it never freezes waiting for the LLM to make up its mind. The **first command** an instruction issues takes control of the agent, and that control is **held until the instruction finishes**. This means a multi-step instruction like *"go to X, then freeze"* stays at X (the agent can't drift between the `go_to` and the `wait`). When the whole instruction is done, the agent goes back to its own work.
 4. **"Command-and-wait".** When the LLM issues `go_to(9,11)`, our code pushes that as a normal BDI goal and **waits** until the BDI agent (via A\*) actually arrives, then tells the LLM the result. This keeps the LLM in sync with reality.
 5. **A conversational fast-lane.** A message that is just a *question* ("can you hear me?", "where are you?") is answered **immediately and concurrently** with read-only tools — it never waits behind a long action like a 25-second wait (see §6).
 
@@ -111,26 +111,28 @@ The LLM is deliberately given only **high-level** tools — it can never move on
 
 | Kind | Tools | What it does |
 |---|---|---|
-| **Thinking** (no game effect) | `calculate(expression)`, `get_current_time(location)` | do maths; get the time in Rome |
+| **Thinking** (no game effect) | `calculate(expression)`, `get_current_time(location)` | do maths (accepts two comma-separated expressions, e.g. `"(0+18)/2, (0+19)/2"` → `"9, 9.5"`, so a centre tile is one call); get the time in Rome |
 | **Looking** | `get_my_position()`, `sense_parcels()`, `sense_delivery_tiles()`, `sense_spawn_tiles()`, `get_map_info()` | read the current world state: where parcels are, where the drop-off (delivery) tiles are, where the green spawn tiles are, and the map's reachable bounds/edges |
 | **Doing** | `go_to(x,y)`, `go_pickup(x,y)`, `deliver()` | hand a goal to the BDI agent and wait for it to finish |
 | **Waiting** | `wait(seconds)` | hold position without moving for N seconds (max 30) — for "stop/wait/don't move for N s". It really stops the agent (it doesn't just claim to). |
+| **Sweeping** | `patrol(x1,y1,x2,y2,wait_each)` | walk from one tile to another **one tile at a time**, pausing `wait_each` seconds at every tile — the whole sweep is ONE call. For "keep moving until you reach…" / "sweep the row". |
 | **Talking** | `say(message)` | send a chat message back to whoever gave the instruction |
 
-**Two things make these robust:**
+**Four things make these robust:**
 
 - **Reachable-only tiles.** `sense_spawn_tiles`, `sense_delivery_tiles` and `get_map_info` only report tiles the agent can actually get to (computed with `reachableFrom`). So when an admin says *"go to the leftmost tile"* it correctly means the leftmost **reachable** one — the admin never has to spell that out.
-- **Graceful failure + fallback.** If a "doing" tool fails (blocked, times out after ~60 s), it returns a clear message like *"Failed: target (3,9) is unreachable"*. Because this is a **shared** game (other players can block a path at any moment), the LLM is told to then try the next-best candidate from its list (e.g. the next-rightmost tile) instead of giving up.
+- **Graceful failure + a give-up budget.** If a "doing" tool fails (blocked, or times out after ~30 s), it returns a clear message like *"Failed: target (3,9) is unreachable"*. Because this is a **shared** game (other players can block a path), the LLM may try **one** alternative — but it must not keep trying many tiles, and after **3 failed commands** the directive is aborted automatically so the agent goes back to its own work. A directive never keeps the agent occupied indefinitely.
+- **Content-filter resilience.** `gpt-4o` is served through Azure, whose safety filter occasionally returns a *false-positive* "content policy" error on a perfectly benign instruction. The model wrapper (`llmClient.js`) **retries once** on that specific error (a re-send usually passes), then falls back to a second model if `LOCAL_MODEL_FALLBACK` is set. Connection/VPN errors are deliberately *not* retried, so a missing VPN stays obvious.
+- **Loops belong in code, not in the LLM.** The ReAct loop is capped (20 steps) so a confused instruction can't run forever — but a repetitive task ("step right and wait, repeat across the whole row") would blow that cap *and* be painfully slow, because **every tile would cost its own model round-trip**. The `patrol` tool exists exactly for this: it runs the whole repeat *in the runtime* (no model call per tile), so the sweep is fast, the waits are exact, and it can't hit the cap.
 
 ---
 
 ## 6. What happens, step by step, for one instruction
 
 1. **An instruction arrives** — from in-game chat (`socket.onMsg`) or typed in the terminal. We wait until the agent is actually connected, and we handle one instruction at a time.
-2. **Autonomy gate ON** — the BDI agent stops picking its own goals.
-3. **The ReAct loop runs** — the LLM reads the instruction + a short memory of the last few instructions + a snapshot of the world, replies with one action, we run the matching tool, we feed back the result, and repeat — until the LLM says `Final Answer:` (max 12 steps as a safety limit).
+2. **The ReAct loop runs** — the LLM reads the instruction + a short memory of the last few instructions + a snapshot of the world, replies with one action, we run the matching tool, we feed back the result, and repeat — until the LLM says `Final Answer:` (max 12 steps, and it gives up after 3 failed commands).
+3. **The agent keeps playing while the LLM thinks; then commits once it acts** — during the LLM's thinking/sensing the BDI agent keeps doing its own work. The moment the LLM fires its **first** command, the agent takes control and **holds it until the whole instruction finishes**, so the steps of one instruction don't drift apart (e.g. *"go to centre, then freeze"* freezes *at* the centre). When the instruction ends, the agent returns to its own work.
 4. **Reply** — the final answer is sent back in chat (or printed in the terminal), and the instruction + answer are saved to memory.
-5. **Autonomy gate OFF** — the BDI agent immediately goes back to playing on its own.
 
 **Conversation memory.** Each chat sender gets a short rolling memory (the last ~5 instructions + answers), so follow-ups like *"do the same but on a delivery tile"* or *"I said spawn, not delivery"* have context. Two special messages: **`/reset`** clears the memory, **`/memory`** prints it.
 
@@ -249,6 +251,44 @@ Instruction 1: *"wait where you are for 25 seconds."*  Instruction 2 (sent right
 ```
 **What this proves:** the question reply appears **before** the wait finishes — the agent answered concurrently instead of making the admin wait 25 seconds. Movement stays serialized; only the verbal reply runs in parallel.
 
+### Test G — keep playing while thinking, and give up a stuck directive
+We sent an impossible instruction (a tile off the map) and watched two things: the agent kept playing on its own, and it didn't keep retrying.
+
+Instruction: *"go to tile (99,99) and report when you arrive."*
+```
+[llm] directive from console: go to tile (99,99) and report when you arrive
+[agent] pursuing: go_pick_up 4 0 p546            ← agent keeps doing its OWN work while the LLM thinks
+[agent] pursuing: go_deliver 0 0                  ← (autonomous pickup + deliver continue)
+[llm tool] go_to(99,99) -> Failed: no plan applies to go_to 99 99.
+[llm] reply -> console: I attempted to go to tile (99,99), but it is not reachable.
+```
+**What this proves:** (a) the agent is **never idle waiting for the LLM** — it keeps picking up and delivering while the model thinks; (b) an impossible/failed instruction **doesn't loop forever** — it tried once, reported, and the agent carried on.
+
+### Test H — a multi-step instruction freezes exactly where told
+Instruction: *"go to the centre tile of the map, freeze for 4 seconds. Then, move one tile left and freeze for 2 seconds."*
+```
+[llm tool] get_map_info(none) -> {"bounds":{"minX":0,"maxX":18,"minY":0,"maxY":19}, ...}
+[llm tool] calculate("(0+18)/2, (0+19)/2") -> 9, 9.5      ← both coordinates in one call
+[llm tool] go_to(9,9) -> Arrived at (9, 9).
+[llm tool] wait(4)    -> Waited 4 second(s) holding position at (9, 9).   ← froze AT the centre
+[llm tool] go_to(8,9) -> Arrived at (8, 9).
+[llm tool] wait(2)    -> Waited 2 second(s) holding position at (8, 9).   ← froze AT the left tile
+[llm] reply -> Went to the center tile (9, 9), waited 4 s, moved one tile left to (8, 9), and waited 2 s.
+```
+**What this proves:** (a) `calculate` handles both coordinates at once; (b) once the first command fires the agent **holds control through the whole instruction**, so the freezes land exactly on (9,9) and (8,9) — it does **not** drift between the `go_to` and the `wait`. (An earlier version, which released control between every command, froze a few tiles away because the agent wandered in the gap.)
+
+### Test I — a repetitive sweep done in one call
+Instruction: *"go to the leftmost centre tile, wait 3 s, then move one tile right and wait 1 s, repeating until the rightmost centre tile."*
+
+The first attempt (before `patrol` existed) failed: the model did it one tile per round-trip — `go_to(1,9)`, `wait(1)`, `go_to(2,9)`, … — which was **slow** (each tile = ~2 model calls, seconds each) and **hit the 12-step cap at x=5**, replying *"Directive not completed within 12 iterations."* With the `patrol` tool:
+```
+[llm tool] go_to(0,9)        -> Arrived at (0, 9).
+[llm tool] wait(3)           -> Waited 3 second(s) holding position at (0, 9).
+[llm tool] patrol(0,9,18,9,1) -> Patrolled 19 tile(s) from (0,9) to (18,9), waiting 1s at each.
+[llm] reply -> Moved from the leftmost centre tile (0, 9) to the rightmost (18, 9), waiting 1 s at each.
+```
+**What this proves:** the entire 19-tile sweep runs in **one** tool call — no model round-trip per tile (so it's fast and the 1-second waits are exact), and it can't hit the iteration cap. The repetition lives in the runtime, where it belongs.
+
 ### What the tests also revealed (and we fixed)
 The first live runs of the *old* standalone prototype (§10) exposed two real bugs, which we fixed in the command layer:
 - The model sometimes writes `Action: go_to(5,3)` (function-call style). Our parser only accepted `go_to` + a separate input, so it failed with "unknown tool". **Fixed:** the parser now accepts both styles (visible in Test C — `calculate(13 + 2)` parsed fine).
@@ -260,8 +300,8 @@ The first live runs of the *old* standalone prototype (§10) exposed two real bu
 
 - **Needs the VPN / a reachable model.** The model lives behind the faculty proxy; without the university VPN the call fails with "Connection error". We deliberately do **not** auto-retry on this (it's an environment issue, not a bug) — connect the VPN and re-send.
 - **Model availability.** Only `gpt-4o` answers on the proxy right now; the assigned 70B model errors out. Smaller models also tend to drift from the strict reply format more than gpt-4o.
-- **It finishes its current action before obeying.** When an instruction arrives, the agent stops choosing *new* goals, but it lets the goal it's *already doing* finish first. So for ~1–2 seconds (while the model is "thinking") you may see it complete its previous move before switching to your instruction. (This is intentional; it can be changed to "stop instantly" if we prefer.)
-- **Shared-game reachability is dynamic.** We only offer the LLM tiles it can reach, but other players can block a path *after* a tile was chosen. That's why a `go_to` can still fail mid-way; the LLM then falls back to the next candidate. A static check can't fully predict a moving opponent.
+- **It plays on its own *before* it starts an instruction, not during.** The agent keeps doing BDI work only while the LLM is still *thinking* (before the first command). Once an instruction starts acting it holds control to the end, so a `wait` holds where you sent it — but if you send a `wait` with **no** preceding move (just *"freeze"*), it freezes wherever the agent happened to wander during the LLM's thinking, not where it was the instant you pressed enter.
+- **Shared-game reachability is dynamic.** We only offer the LLM tiles it can reach, but other players can block a path *after* a tile was chosen. That's why a `go_to` can still fail mid-way; the LLM may try one alternative, and after a few failures the directive is abandoned (so it never gets stuck). A static check can't fully predict a moving opponent.
 - **Vague wording is still interpreted.** With the glossary the agent now understands "spawn tile", "delivery tile", "leftmost/rightmost", etc. But genuinely ambiguous wording is still resolved by the model's judgement; precise instructions remove any guesswork.
 - **The ACTION-vs-CHAT split is a model call.** When a message arrives *while the agent is busy*, we spend one extra (cheap) model call to classify it. If it's unsure it defaults to ACTION (the safe side — it queues rather than risking a concurrent move). A genuinely mis-classified action would just be handled verbally ("I'll do that next") instead of moving — never a wrong move.
 
@@ -275,7 +315,6 @@ Before this, we built a **standalone** LLM agent (`llmAgent/`) that opened its *
 
 ## 11. Next steps
 
-1. Re-test on the assigned `llama-3.3-70b` model once the proxy is fixed; tune the prompt if it drifts from the format.
-2. Optionally add "stop instantly on instruction" behaviour.
-3. Optionally retire the old `llmAgent/` folder (keeping only `llmClient.js`).
-4. Add more tools (e.g. weather, web search per the lab tutorial) and coordination between two players.
+1. Re-test on the assigned `llama-3.3-70b` model once the proxy is fixed; tune the prompt if it drifts from the format. (It's also the natural `LOCAL_MODEL_FALLBACK` target for content-filter fallback.)
+2. Optionally retire the old `llmAgent/` folder (keeping only `llmClient.js`).
+3. Add more tools (e.g. weather, web search per the lab tutorial) and coordination between two players.
