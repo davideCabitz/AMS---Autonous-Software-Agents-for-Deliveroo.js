@@ -120,6 +120,18 @@ export class PddlMove extends PlanBase {
             const ty = Math.round(me.y) + dy;
 
             const fromX = Math.round(me.x), fromY = Math.round(me.y);
+
+            // Pre-step: if sensing added a crate to the next planned tile since this plan
+            // was built (happens when the crate was outside observation range at plan time),
+            // abort before moving and let execute() replan with the crate now in crateTiles.
+            // Skip push steps: for those, the crate at nextKey is expected and intended —
+            // the push action works by walking INTO the crate tile.
+            const nextKey = rawKey(tx, ty);
+            if (!isPush && crateTiles.some(c => rawKey(c.x, c.y) === nextKey)) {
+                console.log(`[pddl] crate now on planned tile ${nextKey} — replanning`);
+                return true;
+            }
+
             const tStep = Date.now();
             const r = await socket.emitMove(dir);
             if (!r) return true;
