@@ -26,7 +26,7 @@ export class StrategyNotTooGreedy extends Strategy {
         const worthwhileInRange = parcels.free()
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
-            .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)
+            .filter(({ p, value }) => value - this.bankFirstValue(p) >= MIN_DELIVERY_REWARD)
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {

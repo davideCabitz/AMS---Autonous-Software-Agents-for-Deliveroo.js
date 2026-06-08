@@ -178,6 +178,34 @@ export class Strategy {
         return (R + parcel.reward) - (n + 1) * this.decayRate() * (d1 + d2);
     }
 
+    /**
+     * Value of the bank-first alternative: deliver the current load immediately
+     * at the nearest delivery D, then pick up `parcel` as a solo trip.
+     *   A_first = (R − n·ρ·d0) + max(0, reward_p − ρ·(d0 + d3 + d4))
+     * d0 = A* dist(me → D)              [same as bankNow denominator]
+     * d3 = A* dist(D → parcel)          [extra call: cost of reaching parcel from D]
+     * d4 = A* dist(parcel → D')         [same as d2 in pickupValue]
+     *
+     * Multi-pickup is only justified when pickupValue(p) > bankFirstValue(p).
+     * Returns -Infinity when not carrying (comparison collapses to pickupValue > -Inf
+     * which is always true, but worthwhileInRange is only used when carrying > 0).
+     */
+    bankFirstValue(parcel) {
+        const carried = parcels.carriedBy(me.id);
+        if (carried.length === 0) return -Infinity;
+        const del = this.nearestDelivery();
+        if (!del) return -Infinity;
+        const d0   = this.pathLen(me, del);
+        const d3   = this.pathLen(del, parcel);
+        const del2 = this.nearestDelivery(parcel);
+        const d4   = del2 ? this.pathLen(parcel, del2) : Infinity;
+        const n    = carried.length;
+        const R    = carried.reduce((s, p) => s + p.reward, 0);
+        const bankNow    = R - n * this.decayRate() * d0;
+        const valueAfter = parcel.reward - this.decayRate() * (d0 + d3 + d4);
+        return bankNow + Math.max(0, valueAfter);
+    }
+
     /** Net gain of a pickup over delivering now: ΔB = B(p) − A. */
     pickupGain(parcel) {
         return this.pickupValue(parcel) - this.bankNowValue();
@@ -221,7 +249,7 @@ export class Strategy {
                 return null;
             }
 
-            if (intent === 'go_explore' && distance(me, { x: tx, y: ty }) > OBSERVATION_DISTANCE) {
+            if (intent === 'go_explore' && distance(me, { x: tx, y: ty }) >= OBSERVATION_DISTANCE) {
                 this.idleWaitStart = null;
                 return null;
             }

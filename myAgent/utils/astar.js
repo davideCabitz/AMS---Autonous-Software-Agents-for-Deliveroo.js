@@ -1,4 +1,4 @@
-import { me, socket, walkableTiles, crateTiles, crateSpawnerTiles, directionalTiles, otherAgents, moveTiming } from '../context.js';
+import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles } from '../context.js';
 import { canEnterDir } from './directions.js';
 
 const DIRS = [
