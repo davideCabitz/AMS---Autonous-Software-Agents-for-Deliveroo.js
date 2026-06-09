@@ -8,6 +8,10 @@ import { distance } from '../utils/distance.js';
 import { findRoute } from '../utils/astar.js';
 
 export const MIN_DELIVERY_REWARD = 5;
+// Max extra tiles tolerated when choosing an alternative to the excluded spawner.
+// If every alternative is farther than (prevLen + margin), the exclusion is skipped
+// so the agent doesn't waste time crossing the map to avoid a nearby tile.
+const EXPLORE_NEARBY_MARGIN = 4;
 // Gate for adding a second parcel while already carrying: trigger whenever
 // multi-pickup strictly beats bank-first. Intentionally lower than
 // MIN_DELIVERY_REWARD (which filters out near-worthless empty-hand pickups)
@@ -34,6 +38,13 @@ export const SWITCH_MARGIN       = 5;
 export class Strategy {
     /** Exploration wait timer (set while idling on a spawner tile). */
     idleWaitStart = null;
+
+    /** Key "x_y" of the spawner currently committed to via go_explore. */
+    _lastExploreKey = null;
+
+    /** Key "x_y" of the spawner committed to just before _lastExploreKey.
+     *  Hard-excluded on the next selection to prevent ping-pong. */
+    _prevExploreKey = null;
 
     /**
      * Re-deliberation cadence in ms, owned by the agent loop. 0 = no heartbeat
@@ -276,6 +287,10 @@ export class Strategy {
 
             if (intent === 'go_pick_up' || intent === 'go_deliver') {
                 this.idleWaitStart = null;
+                // Productive work started — reset explore history so the next
+                // exploration cycle has no stale exclusions.
+                this._lastExploreKey = null;
+                this._prevExploreKey = null;
                 return null;
             }
 
@@ -319,9 +334,43 @@ export class Strategy {
         const outOfRange = usable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
         const candidates = outOfRange.length > 0 ? outOfRange : usable;
 
-        const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
+        // Hard-exclude the spawner committed to just before the current one
+        // (_prevExploreKey) to break A→B→A ping-pong. The exclusion is skipped
+        // when every alternative would require travelling more than
+        // EXPLORE_NEARBY_MARGIN extra tiles — avoids sending the agent across
+        // the whole map just to avoid a nearby tile (e.g. only 1 nearby spawner
+        // or 2 nearby + 2 far).
+        let finalCandidates = candidates;
+        if (this._prevExploreKey) {
+            const without = candidates.filter(t => `${t.x}_${t.y}` !== this._prevExploreKey);
+            if (without.length === 0) {
+                console.log(`[explore] prev=${this._prevExploreKey} is only option — forced revisit`);
+            } else {
+                const prevTile    = candidates.find(t => `${t.x}_${t.y}` === this._prevExploreKey);
+                const prevLen     = prevTile ? this.pathLen(me, prevTile) : Infinity;
+                const nearestAlt  = Math.min(...without.map(t => this.pathLen(me, t)));
+                if (nearestAlt <= prevLen + EXPLORE_NEARBY_MARGIN) {
+                    finalCandidates = without;
+                } else {
+                    console.log(`[explore] skip-exclude ${this._prevExploreKey}: nearest alt ${nearestAlt} vs ${prevLen} (+${nearestAlt - prevLen} > margin ${EXPLORE_NEARBY_MARGIN})`);
+                }
+            }
+        }
+
+        const sorted = [...finalCandidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b));
+        const target = sorted[0];
         if (target) {
-            console.log(`[explore] → reachable spawner ${target.x},${target.y} pathLen:${this.pathLen(me, target)}`);
+            const key = `${target.x}_${target.y}`;
+            const shortestLen = this.pathLen(me, target);
+            const tied = sorted.filter(t => this.pathLen(me, t) === shortestLen);
+            if (tied.length > 1) {
+                const tiedStr = tied.map(t => `(${t.x},${t.y})`).join(', ');
+                console.log(`[explore] tie: ${tied.length} at pathLen=${shortestLen} — ${tiedStr} — picking (${target.x},${target.y}), prev-excluded=${this._prevExploreKey ?? 'none'}`);
+            }
+            console.log(`[explore] → spawner (${target.x},${target.y}) pathLen:${shortestLen} prev=${this._prevExploreKey ?? 'none'} last=${this._lastExploreKey ?? 'none'}`);
+            // Slide window: current becomes previous, new target becomes current.
+            this._prevExploreKey = this._lastExploreKey;
+            this._lastExploreKey = key;
             return ['go_explore', target.x, target.y];
         }
         return null;
