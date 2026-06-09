@@ -12,7 +12,7 @@ export const MIN_DELIVERY_REWARD = 5;
 // multi-pickup strictly beats bank-first. Intentionally lower than
 // MIN_DELIVERY_REWARD (which filters out near-worthless empty-hand pickups)
 // because here we're comparing two delivery trips, not pickup vs. nothing.
-export const MULTI_PICKUP_MIN = 1;
+export const MULTI_PICKUP_MIN = 0;
 export const IDLE_WAIT_MS        = 2000; // IDLE time the agent waits on a spawner hoping a parcel appears
 // A different pickup must beat the CURRENT target's value by at least this much to
 // justify abandoning the in-progress trip. Without it, parcels crossing in/out of

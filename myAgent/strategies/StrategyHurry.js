@@ -85,35 +85,39 @@ export class StrategyHurry extends StrategyGreedy {
         }
 
         // Pick the nearest spawner not yet observed this sweep (skip blacklisted /
-        // our tile). Only A*-reachable tiles are eligible — never commit to a
-        // frontier the agent can't actually path to (walls/crates/agents).
+        // our tile). Reachability is NOT checked per tile here — doing an A* search
+        // for each of the 895+ spawner tiles on a large map blocks the event loop
+        // for ~15 seconds and breaks navigation. Unreachable targets are handled by
+        // the stall detector (gives up after EXPLORE_STALL_MS and blacklists the tile).
         const pool = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
         const here = `${px}_${py}`;
         let candidates = pool.filter(t => {
             const k = `${t.x}_${t.y}`;
-            return !this.#visited.has(k) && !this.#blacklist.has(k) && k !== here
-                && this.isReachable(t);
+            return !this.#visited.has(k) && !this.#blacklist.has(k) && k !== here;
         });
 
-        // Whole reachable frontier observed → start a fresh sweep.
+        // Whole frontier observed → start a fresh sweep.
         if (candidates.length === 0) {
             this.#visited.clear();
             candidates = pool.filter(t => {
                 const k = `${t.x}_${t.y}`;
-                return !this.#blacklist.has(k) && k !== here && this.isReachable(t);
+                return !this.#blacklist.has(k) && k !== here;
             });
         }
 
         // Prefer frontier tiles in the sustainable-loop region (don't sweep into a
-        // one-way trap); fall back to all reachable candidates if none are safe.
+        // one-way trap); fall back to all candidates if none are safe.
         const safe = candidates.filter(t => this.inSafe(t));
         if (safe.length > 0) candidates = safe;
 
-        const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
+        // Sort by Manhattan distance (O(1) per comparison) rather than A* path length.
+        // Exact path cost is unnecessary here — closest unvisited tile is a good enough
+        // heuristic, and avoids the O(n²·A*) cost that stalls the event loop.
+        const target = [...candidates].sort((a, b) => distance(me, a) - distance(me, b))[0];
         if (target) {
             this.#commitKey   = `${target.x}_${target.y}`;
             this.#commitSince = now;
-            console.log(`[hurry] → go_explore ${target.x},${target.y} pathLen:${this.pathLen(me, target)}`);
+            console.log(`[hurry] → go_explore ${target.x},${target.y} dist:${distance(me, target).toFixed(1)}`);
             return ['go_explore', target.x, target.y];
         }
         return null;
