@@ -1,5 +1,5 @@
 import { Strategy, MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
-import { me, parcels, OBSERVATION_DISTANCE } from '../context.js';
+import { me, parcels, OBSERVATION_DISTANCE, missionConstraints } from '../context.js';
 import { distance } from '../utils/distance.js';
 
 /**
@@ -17,6 +17,7 @@ export class StrategyGreedy extends Strategy {
         // MIN_DELIVERY_REWARD over just delivering now (ΔB = B(p) − A). Unreachable
         // parcels are dropped so they can never be selected. Ranked by value B(p).
         const worthwhileInRange = parcels.free()
+            .filter(p => missionConstraints.maxParcelReward == null || p.reward <= missionConstraints.maxParcelReward)
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
             .filter(({ p, value }) => value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
@@ -36,18 +37,25 @@ export class StrategyGreedy extends Strategy {
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
-            const target = this.nearestEscapableDelivery();
-            if (target) {
-                console.log(`[greedy] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
-                return ['go_deliver', target.x, target.y];
+            const stackOk = missionConstraints.requiredStackSize == null
+                || carrying.length >= missionConstraints.requiredStackSize;
+            if (stackOk) {
+                const target = this.nearestEscapableDelivery();
+                if (target) {
+                    console.log(`[greedy] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
+                    return ['go_deliver', target.x, target.y];
+                }
+                // No delivery currently reachable (agents/crates wall every route). Fall
+                // through to explore/idle to reposition until a path opens, instead of
+                // committing to an unreachable delivery and spinning.
+                console.log('[greedy] no reachable delivery — repositioning');
+            } else {
+                console.log(`[greedy] stack ${carrying.length}/${missionConstraints.requiredStackSize} — need more parcels`);
             }
-            // No delivery currently reachable (agents/crates wall every route). Fall
-            // through to explore/idle to reposition until a path opens, instead of
-            // committing to an unreachable delivery and spinning.
-            console.log('[greedy] no reachable delivery — repositioning');
         }
 
         const best = parcels.free()
+            .filter(p => missionConstraints.maxParcelReward == null || p.reward <= missionConstraints.maxParcelReward)
             .filter(p => this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
             .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)

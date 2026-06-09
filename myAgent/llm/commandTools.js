@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive, missionConstraints } from '../context.js';
 import { reachableFrom } from '../utils/astar.js';
 
 /*
@@ -253,6 +253,107 @@ export function buildTools(myAgent, replySender) {
             const text = String(input ?? '');
             if (replySender) await socket.emitSay(replySender, text);
             return `Said to ${replySender ?? 'console'}: ${text}`;
+        },
+
+        // Level-2 persistent mission management
+        async apply_mission(input) {
+            let config;
+            try { config = JSON.parse(String(input ?? '{}')); }
+            catch { return `Error: expected JSON — e.g. {"requiredStackSize":3}. Got: ${input}`; }
+
+            const fieldsSet = [];
+            if (config.requiredStackSize != null) {
+                missionConstraints.requiredStackSize = Number(config.requiredStackSize);
+                fieldsSet.push('requiredStackSize');
+            }
+            if (config.allowedDeliveryTiles != null) {
+                missionConstraints.allowedDeliveryTiles = new Set(
+                    config.allowedDeliveryTiles.map(([x, y]) => `${x}_${y}`)
+                );
+                fieldsSet.push('allowedDeliveryTiles');
+            }
+            if (config.allowedSpawnerTiles != null) {
+                missionConstraints.allowedSpawnerTiles = new Set(
+                    config.allowedSpawnerTiles.map(([x, y]) => `${x}_${y}`)
+                );
+                fieldsSet.push('allowedSpawnerTiles');
+            }
+            if (Array.isArray(config.avoidTiles)) {
+                for (const [x, y] of config.avoidTiles) missionConstraints.avoidTiles.add(`${x}_${y}`);
+                fieldsSet.push('avoidTiles');
+            }
+            if (config.maxParcelReward != null) {
+                missionConstraints.maxParcelReward = Number(config.maxParcelReward);
+                fieldsSet.push('maxParcelReward');
+            }
+
+            // Tag the description with the field name(s) so the LLM can identify
+            // which dropMission(field) to call later ("drop this mission").
+            const baseDesc   = config.description || 'constraint applied';
+            const taggedDesc = fieldsSet.length > 0 ? `${baseDesc} [${fieldsSet.join(',')}]` : baseDesc;
+            missionConstraints.descriptions.push(taggedDesc);
+
+            const missionName = config.description || 'new constraint';
+            if (replySender) await socket.emitSay(replySender, `Mission accepted: ${missionName}`);
+            const active = missionConstraints.descriptions.join('; ');
+            return `Mission applied. Active missions: ${active}`;
+        },
+
+        async dropMissions() {
+            missionConstraints.requiredStackSize    = null;
+            missionConstraints.allowedDeliveryTiles = null;
+            missionConstraints.allowedSpawnerTiles  = null;
+            missionConstraints.avoidTiles.clear();
+            missionConstraints.maxParcelReward      = null;
+            missionConstraints.descriptions         = [];
+            if (replySender) await socket.emitSay(replySender, 'All missions aborted');
+            return 'All mission constraints cleared — agent restored to default behavior.';
+        },
+
+        async restrict_exploration(input) {
+            const zone = String(input ?? '').trim().toLowerCase();
+            if (!['left', 'right', 'top', 'bottom'].includes(zone))
+                return `Error: unknown zone '${zone}'. Use: left, right, top, bottom.`;
+            if (!spawnerTiles.length) return 'Error: spawner tiles not loaded yet.';
+            const xs  = walkableTiles.map(t => t.x), ys = walkableTiles.map(t => t.y);
+            const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+            const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+            const FILTERS = {
+                left:   t => t.x <= midX,
+                right:  t => t.x >  midX,
+                top:    t => t.y >  midY,
+                bottom: t => t.y <= midY,
+            };
+            const filtered = spawnerTiles.filter(FILTERS[zone]);
+            if (!filtered.length) return `Error: no spawner tiles found in the ${zone} half.`;
+            missionConstraints.allowedSpawnerTiles = new Set(filtered.map(t => `${t.x}_${t.y}`));
+            const desc = `explore only ${zone}-half spawners [allowedSpawnerTiles]`;
+            missionConstraints.descriptions.push(desc);
+            if (replySender) await socket.emitSay(replySender, `Mission accepted: explore only ${zone}-half spawners`);
+            return `Spawner zone restricted to ${zone} half (${filtered.length} spawners).`;
+        },
+
+        async dropMission(input) {
+            const raw = String(input ?? '').trim();
+            const key = raw.toLowerCase().replace(/[\s_-]/g, '');
+            // [label, camelCaseName, clearFn]
+            const MAP = {
+                requiredstacksize:    ['Stack size constraint',     'requiredStackSize',    () => { missionConstraints.requiredStackSize = null; }],
+                alloweddeliverytiles: ['Delivery tile constraint',  'allowedDeliveryTiles', () => { missionConstraints.allowedDeliveryTiles = null; }],
+                allowedspawnertiles:  ['Spawner zone constraint',   'allowedSpawnerTiles',  () => { missionConstraints.allowedSpawnerTiles = null; }],
+                avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
+                maxparcelreward:      ['Parcel reward ceiling',     'maxParcelReward',      () => { missionConstraints.maxParcelReward = null; }],
+            };
+            const entry = Object.entries(MAP).find(([k]) => k === key || k.startsWith(key) || key.startsWith(k));
+            if (!entry) return `Error: unknown field '${raw}'. Pass one of: requiredStackSize, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward.`;
+            const [, [label, camel, clear]] = entry;
+            clear();
+            // Remove descriptions that were tagged with this field.
+            missionConstraints.descriptions = missionConstraints.descriptions.filter(
+                d => !d.includes(camel)
+            );
+            if (replySender) await socket.emitSay(replySender, `${label} removed`);
+            return `${label} cleared.`;
         },
     };
 }

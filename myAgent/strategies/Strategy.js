@@ -2,7 +2,7 @@ import {
     me, parcels,
     deliveryTiles, spawnerTiles, walkableTiles, crateTiles,
     OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY,
-    usableDeliverySet, safeTargetSet
+    usableDeliverySet, safeTargetSet, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { findRoute } from '../utils/astar.js';
@@ -57,7 +57,12 @@ export class Strategy {
      * handle that instead of committing to an unreachable delivery and spinning.
      */
     nearestDelivery(from = me) {
-        return [...deliveryTiles]
+        let tiles = deliveryTiles;
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) tiles = f;
+        }
+        return [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
             .sort((a, b) => a.len - b.len)[0]?.d;
@@ -82,7 +87,12 @@ export class Strategy {
      * using nearestDelivery (nearest reachable) unchanged.
      */
     nearestEscapableDelivery(from = me) {
-        const reachable = [...deliveryTiles]
+        let tiles = deliveryTiles;
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) tiles = f;
+        }
+        const reachable = [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
             .sort((a, b) => a.len - b.len);
@@ -122,12 +132,15 @@ export class Strategy {
      * even ignoring crates (target is walled off entirely).
      */
     pathLen(from, to) {
+        const avoid = missionConstraints.avoidTiles.size > 0 ? missionConstraints.avoidTiles : null;
+
         if (crateTiles.length === 0) {
-            const route = findRoute(from, to);
+            const route = findRoute(from, to, avoid);
             return route ? route.length : Infinity;
         }
 
         const crateSet = new Set(crateTiles.map(c => `${Math.round(c.x)}_${Math.round(c.y)}`));
+        if (avoid) for (const k of avoid) crateSet.add(k);
 
         // Crate-free path: accurate — what A* navigation can actually walk.
         const freePath = findRoute(from, to, crateSet);
@@ -291,7 +304,12 @@ export class Strategy {
             t => Math.round(me.x) === t.x && Math.round(me.y) === t.y
         );
 
-        if (onSpawner && OBSERVATION_DISTANCE > 1) {
+        // When accumulating a required stack, don't idle on the current spawner —
+        // keep moving to find more parcels elsewhere.
+        const needMoreParcels = missionConstraints.requiredStackSize != null
+            && parcels.carriedBy(me.id).length < missionConstraints.requiredStackSize;
+
+        if (onSpawner && OBSERVATION_DISTANCE > 1 && !needMoreParcels) {
             if (this.idleWaitStart === null) {
                 this.idleWaitStart = Date.now();
                 console.log('[explore] on spawner — waiting 2 s for parcel to appear');
@@ -305,8 +323,15 @@ export class Strategy {
         // Only consider tiles the agent can actually A*-reach (walls/crates/agents
         // respected). Unreachable spawners are never targeted — that caused the
         // repeated re-selection of an out-of-reach tile and the back-and-forth.
-        const pool       = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
-        const reachable  = pool.filter(t => this.isReachable(t));
+        const rawPool = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
+        // Apply spawner zone constraint: if active, restrict exploration targets to
+        // the allowed set (e.g. left-half spawners only). Fall back to the full pool
+        // if none of the allowed tiles happen to be reachable.
+        const zonedPool = (missionConstraints.allowedSpawnerTiles?.size > 0 && spawnerTiles.length > 0)
+            ? spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`))
+            : rawPool;
+        const pool      = zonedPool.length > 0 ? zonedPool : rawPool;
+        const reachable = pool.filter(t => this.isReachable(t));
         if (reachable.length === 0) return null; // nothing reachable → stay idle
 
         // Prefer tiles in the sustainable-loop region (don't explore into a one-way
@@ -317,9 +342,17 @@ export class Strategy {
         // Prefer reachable tiles outside current sensing (new ground), else any
         // reachable tile; pick the nearest by real A* path length.
         const outOfRange = usable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
-        const candidates = outOfRange.length > 0 ? outOfRange : usable;
+        const pool2      = outOfRange.length > 0 ? outOfRange : usable;
 
-        const target = [...candidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
+        // When accumulating a stack: exclude the tile we're already on so we don't
+        // re-select the same spawner and stall in place.
+        const hereKey  = `${Math.round(me.x)}_${Math.round(me.y)}`;
+        const candidates = needMoreParcels
+            ? pool2.filter(t => `${t.x}_${t.y}` !== hereKey)
+            : pool2;
+        const pickFrom = candidates.length > 0 ? candidates : pool2;
+
+        const target = [...pickFrom].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b))[0];
         if (target) {
             console.log(`[explore] → reachable spawner ${target.x},${target.y} pathLen:${this.pathLen(me, target)}`);
             return ['go_explore', target.x, target.y];

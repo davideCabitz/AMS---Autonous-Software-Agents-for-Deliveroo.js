@@ -1,4 +1,4 @@
-import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles } from '../context.js';
+import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints } from '../context.js';
 import { canEnterDir } from './directions.js';
 
 const DIRS = [
@@ -235,6 +235,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
         const hereKey     = key(Math.round(me.x), Math.round(me.y));
         const crateSet    = new Set(crateTiles.map(c => key(Math.round(c.x), Math.round(c.y))));
         const blockSet    = new Set([...crateSet, ...agentKeys()]);
+        for (const k of missionConstraints.avoidTiles) blockSet.add(k);
         blockSet.delete(hereKey);
         const baseWalkable = blockSet.size > 0
             ? new Set([...getWalkable()].filter(k => !blockSet.has(k)))

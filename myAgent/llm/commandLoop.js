@@ -137,6 +137,7 @@ const CLASSIFY_PROMPT =
     'You route a chat message sent to a robot agent in a delivery game. ' +
     'Reply with EXACTLY one word:\n' +
     '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, stop, ' +
+    'apply or remove a mission/constraint, abort/cancel/drop/clear a mission, ' +
     'or otherwise DO something in the game world.\n' +
     '- CHAT    if it is only a question, greeting, or status request answerable with words ' +
     '(e.g. "can you hear me?", "where are you?", "what are you doing?").\n' +

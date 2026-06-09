@@ -55,6 +55,18 @@ export const pddl = { busy: false };
  * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
 export const directive = { active: false, aborted: false };
 
+/* Persistent Level-2 mission constraints. Updated by the LLM apply_mission tool;
+ * read by every strategy on each decide() call. All fields are null/empty by
+ * default (= no constraint). dropMissions() resets them all. */
+export const missionConstraints = {
+    requiredStackSize:    null,      // number | null — deliver only at this stack depth
+    allowedDeliveryTiles: null,      // Set<"x_y"> | null — null = all tiles allowed
+    allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
+    avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
+    maxParcelReward:      null,      // number | null — null = no ceiling
+    descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
+};
+
 /* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
 export let beliefset = new Beliefset();
 

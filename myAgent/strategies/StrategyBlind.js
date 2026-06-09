@@ -1,5 +1,5 @@
 import { Strategy, MIN_DELIVERY_REWARD } from './Strategy.js';
-import { me, parcels, spawnerTiles, walkableTiles } from '../context.js';
+import { me, parcels, spawnerTiles, walkableTiles, missionConstraints } from '../context.js';
 import { distance } from '../utils/distance.js';
 
 // Re-evaluate the explore target at least this often, even while committed.
@@ -65,6 +65,7 @@ export class StrategyBlind extends Strategy {
         // are scarce. Both branches reset the explore commitment.
         const onTileParcel = parcels.free()
             .filter(p => distance(me, p) === 0)
+            .filter(p => missionConstraints.maxParcelReward == null || p.reward <= missionConstraints.maxParcelReward)
             .map(p => ({ p, value: this.pickupValue(p), gain: this.pickupGain(p) }))
             .filter(({ gain }) => gain >= MIN_DELIVERY_REWARD)
             .sort((a, b) => b.value - a.value)[0];
