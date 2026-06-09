@@ -10,7 +10,6 @@ export class StrategySimple extends Strategy {
         const carrying = parcels.carriedBy(me.id);
 
         if (carrying.length > 0) {
-            this.idleWaitStart = null;
             const target = this.nearestDelivery();
             if (target) {
                 console.log(`[simple] → go_deliver to ${target.x},${target.y}`);
@@ -23,7 +22,6 @@ export class StrategySimple extends Strategy {
             .sort((a, b) => b.score - a.score)[0];
 
         if (best) {
-            this.idleWaitStart = null;
             console.log(`[simple] → go_pick_up ${best.id} score:${best.score.toFixed(2)}`);
             return ['go_pick_up', best.x, best.y, best.id];
         }

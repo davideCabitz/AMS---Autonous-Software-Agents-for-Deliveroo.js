@@ -31,7 +31,11 @@ export function waitForArrival(tx, ty) {
     // Use RAW coords: the move is only truly complete when the un-rounded position
     // reaches the integer target. Rounded `me.x/y` would report arrival at 60% of
     // the move (server jumps 0.6 immediately), making steps overlap → teleporting.
-    const arrived = () => me.rawX === tx && me.rawY === ty;
+    // Tolerance 0.1 instead of strict equality: the server's physics can produce
+    // values like 2.9999999 instead of exactly 3. Mid-transit positions are ~0.4
+    // from the target (the 0.6-jump), so 0.1 safely distinguishes arrival from
+    // in-transit without triggering on any legitimate intermediate position.
+    const arrived = () => Math.abs(me.rawX - tx) < 0.1 && Math.abs(me.rawY - ty) < 0.1;
     if (arrived()) return Promise.resolve(true);
 
     // Budget adapts to server speed; capped above the emitWithAck 1000ms ceiling.

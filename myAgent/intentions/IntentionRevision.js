@@ -40,7 +40,10 @@ export class IntentionRevision {
     #isValid(intention) {
         const [intent, , , id] = intention.predicate;
         if (intent === 'go_pick_up') {
-            const p = parcels.get(id);
+            // Fall back to memory when the parcel has left the sensing zone;
+            // getRemembered() returns null when memory is disabled (all existing
+            // strategies), so this ?? branch is a no-op for them.
+            const p = parcels.get(id) ?? parcels.getRemembered(id);
             return !!p && !p.carriedBy;
         }
         return true;
