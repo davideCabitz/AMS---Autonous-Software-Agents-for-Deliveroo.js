@@ -135,14 +135,13 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
             return;
         }
 
-        // Commands, and anything arriving while idle, just run on the action lane
-        // (it starts immediately — no need to spend a classifier call).
-        if (lower === '/reset' || lower === '/memory' || !busy) {
+        if (lower === '/reset' || lower === '/memory') {
             enqueue(text, sender);
             return;
         }
-        // An action directive is already running: classify so a question still gets
-        // answered concurrently instead of waiting behind it.
+        // Always classify: CHAT → fast-lane (reads history, sends reply, never moves
+        // the agent — safe to run concurrently even when idle).
+        // ACTION → action lane (queued; completion is silent by design).
         let kind = 'ACTION';
         try { kind = await classifyDirective(text); } catch { /* default ACTION */ }
         if (kind === 'CHAT') handleChat(text, sender);
