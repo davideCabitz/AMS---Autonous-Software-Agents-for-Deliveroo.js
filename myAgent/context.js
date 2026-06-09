@@ -53,7 +53,7 @@ export const pddl = { busy: false };
  * LLM pushed. Beliefs keep updating (parcels.sync still runs) — only autonomous
  * deciding/pushing is suspended. Cleared (and autonomy resumed) when the
  * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
-export const directive = { active: false };
+export const directive = { active: false, aborted: false };
 
 /* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
 export let beliefset = new Beliefset();
