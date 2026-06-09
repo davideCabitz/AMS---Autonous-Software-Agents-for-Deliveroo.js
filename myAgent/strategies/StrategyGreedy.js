@@ -23,7 +23,6 @@ export class StrategyGreedy extends Strategy {
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
-            this.idleWaitStart = null;
             // Hysteresis: while there's room, stick with the current pickup as long
             // as it's still valid and not clearly beaten — prevents flip-flopping
             // between pick-up and deliver each tick.
@@ -54,7 +53,6 @@ export class StrategyGreedy extends Strategy {
             .sort((a, b) => b.value - a.value)[0];
 
         if (best) {
-            this.idleWaitStart = null;
             // Hysteresis: keep heading to the current target unless clearly beaten.
             if (this.shouldKeepCurrentPickup(currentIntent, best)) return null;
             console.log(`[greedy] → go_pick_up ${this.pickupDebug(best.p)}`);

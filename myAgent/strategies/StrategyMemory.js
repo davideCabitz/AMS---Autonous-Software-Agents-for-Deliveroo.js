@@ -40,8 +40,6 @@ export class StrategyMemory extends StrategyGreedy {
         }
 
         if (carrying.length > 0) {
-            this.idleWaitStart = null;
-
             // Multi-pickup candidates from full pool — no OBSERVATION_DISTANCE cap.
             // pickupValue() naturally penalises far parcels through the decay term;
             // an artificial distance filter would exclude the remembered parcels we
@@ -77,7 +75,6 @@ export class StrategyMemory extends StrategyGreedy {
             .sort((a, b) => b.value - a.value)[0];
 
         if (best) {
-            this.idleWaitStart = null;
             if (this.#shouldKeepWithMemory(currentIntent, best)) return null;
             const tag = parcels.get(best.p.id) ? 'live' : 'remembered';
             console.log(`[memory] → go_pick_up (${tag}) ${this.pickupDebug(best.p)}`);
