@@ -1,4 +1,4 @@
-import { socket, me }    from '../context.js';
+import { socket, me, directive } from '../context.js';
 import { runDirective, runConversation, classifyDirective } from './commandLoop.js';
 
 /** Resolves once the agent is authenticated (id + position known), so a
@@ -25,6 +25,11 @@ function whenReady() {
 // last few turns so it never grows unbounded. /reset clears it, /memory prints it.
 const MAX_HISTORY_TURNS = 5;   // 1 turn = 1 user directive + 1 assistant answer
 
+const ABORT_KEYWORDS = new Set([
+    'exit', 'abort', 'abort directive', 'exit directive',
+    'back to bdi', 'go back to bdi',
+]);
+
 export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     let busy = false;                       // true while an ACTION directive runs
     const queue = [];
@@ -46,12 +51,24 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         histories.set(key, h);
     };
 
+    // --- abort: stop any running directive immediately and return to BDI ----------
+    function abortCurrent() {
+        directive.aborted = true;
+        directive.active  = false;
+        queue.length = 0;               // discard any queued directives
+        myAgent.haltCurrent();          // reject the pending commandAndAwait (if any)
+        resumeAutonomy?.();
+        // busy will fall to false on its own once runDirective's finally executes
+        return 'Aborted.';
+    }
+
     // --- serialized ACTION lane: one at a time; touches movement + the autonomy gate ---
     async function drain() {
         if (busy) return;
         busy = true;
         try {
             while (queue.length) {
+                directive.aborted = false;       // clear any previous abort before starting
                 const { objective, replySender } = queue.shift();
                 const key = replySender ?? 'console';
                 const cmd = objective.toLowerCase();
@@ -60,9 +77,11 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
                 if (cmd === '/reset') {
                     histories.delete(key);
                     answer = 'Conversation memory cleared.';
+                    await sendReply(key, replySender, answer);
                 } else if (cmd === '/memory') {
                     const h = histories.get(key) ?? [];
                     answer = h.length ? h.map(m => `${m.role}: ${m.content}`).join(' | ') : 'No memory yet.';
+                    await sendReply(key, replySender, answer);
                 } else {
                     await whenReady();         // don't act before beliefs are populated
                     console.log(`[llm] directive from ${key}: ${objective}`);
@@ -72,8 +91,8 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
                         answer = `Sorry, the directive failed: ${err?.message ?? err}`;
                     }
                     record(key, objective, answer);
+                    // no reply sent — directive confirmation is suppressed by design
                 }
-                await sendReply(key, replySender, answer);
             }
         } finally {
             busy = false;
@@ -105,6 +124,17 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         const text = String(rawText ?? '').trim();
         if (!text) return;
         const lower = text.toLowerCase();
+
+        // Abort keywords bypass the queue entirely and execute immediately so the
+        // operator never has to wait for the current directive to finish.
+        if (ABORT_KEYWORDS.has(lower)) {
+            const reply = abortCurrent();
+            const key = sender ?? 'console';
+            console.log(`[llm] abort triggered by ${key}`);
+            await sendReply(key, sender, reply);
+            return;
+        }
+
         // Commands, and anything arriving while idle, just run on the action lane
         // (it starts immediately — no need to spend a classifier call).
         if (lower === '/reset' || lower === '/memory' || !busy) {

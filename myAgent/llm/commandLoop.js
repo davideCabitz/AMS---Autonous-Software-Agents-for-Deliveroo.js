@@ -72,6 +72,9 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
 
     try {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
+            if (directive.aborted)
+                return 'Directive aborted by operator — agent back to autonomous BDI.';
+
             let out;
             try {
                 out = await callModel(messages, { temperature: 0 });
@@ -81,6 +84,10 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 console.error('[llm] callModel failed:', err?.message ?? err);
                 return `Could not complete the directive — LLM error: ${err?.message ?? err}`;
             }
+
+            if (directive.aborted)
+                return 'Directive aborted by operator — agent back to autonomous BDI.';
+
             messages.push({ role: 'assistant', content: out });
 
             const act   = extractAction(out);
@@ -93,6 +100,9 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                     ? await fn(act.input === 'none' ? undefined : act.input)
                     : `Error: unknown tool '${act.action}'. Available: ${Object.keys(tools).join(', ')}`;
                 console.log(`[llm tool] ${act.action}(${act.input}) -> ${obs}`);
+
+                if (directive.aborted)
+                    return 'Directive aborted by operator — agent back to autonomous BDI.';
 
                 // Failure budget: don't let the LLM keep retrying a stuck directive.
                 // After a few failed commands, give up and let the BDI agent carry on.

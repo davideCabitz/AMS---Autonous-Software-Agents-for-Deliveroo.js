@@ -19,8 +19,6 @@ import { reachableFrom } from '../utils/astar.js';
 const COMMAND_TIMEOUT_MS = 30_000;
 // Cap on the wait tool so a bad number can't freeze the agent indefinitely.
 const MAX_WAIT_SECONDS = 30;
-// Cap on a single patrol so a runaway range can't sweep forever.
-const MAX_PATROL_TILES = 64;
 
 // ---- reasoning tools (copied from llmAgent/tools.js; that module must NOT be
 // imported because it opens a second socket via its own context.js) ------------
@@ -88,6 +86,19 @@ function nearestDelivery() {
     return deliveryTiles
         .map(t => ({ t, d: Math.abs(t.x - me.x) + Math.abs(t.y - me.y) }))
         .sort((a, b) => a.d - b.d)[0].t;
+}
+
+/** Sleep for `ms` milliseconds, but resolve early if directive.aborted is set.
+ *  Returns how many ms actually elapsed. */
+function abortableDelay(ms) {
+    return new Promise(resolve => {
+        const start = Date.now();
+        const tick = () => {
+            if (directive.aborted || Date.now() >= start + ms) resolve(Date.now() - start);
+            else setTimeout(tick, 100);
+        };
+        setTimeout(tick, Math.min(100, ms));
+    });
 }
 
 function withTimeout(promise, ms, tag) {
@@ -232,44 +243,11 @@ export function buildTools(myAgent, replySender) {
             const secs = Math.max(0, Math.min(MAX_WAIT_SECONDS, n ? parseFloat(n[0]) : 0));
             directive.active = true;                   // hold still (gate held until directive ends)
             myAgent.haltCurrent();
-            await new Promise(resolve => setTimeout(resolve, secs * 1000));
+            const elapsed = await abortableDelay(secs * 1000);
+            if (directive.aborted)
+                return `Wait interrupted after ${(elapsed / 1000).toFixed(1)}s (directive aborted).`;
             return `Waited ${secs} second(s) holding position at (${me.x}, ${me.y}).`;
         },
-        // Walk from (x1,y1) to (x2,y2) one tile at a time, pausing `wait_each`
-        // seconds at every tile — the WHOLE sweep runs in this single tool call, so
-        // there is no LLM round-trip per tile (fast) and no iteration-cap problem.
-        // Use this for "keep moving ... until you reach ..." / "sweep the row".
-        async patrol(input) {
-            const nums = String(input ?? '').match(/-?\d+(\.\d+)?/g);
-            if (!nums || nums.length < 4)
-                return 'Error: patrol needs "x1,y1,x2,y2[,wait_each]".';
-            const x1 = Math.round(+nums[0]), y1 = Math.round(+nums[1]);
-            const x2 = Math.round(+nums[2]), y2 = Math.round(+nums[3]);
-            const waitEach = Math.max(0, Math.min(MAX_WAIT_SECONDS, nums[4] != null ? +nums[4] : 0));
-
-            // Build the tile sequence (step along x toward x2, then y toward y2).
-            const tiles = [{ x: x1, y: y1 }];
-            let cx = x1, cy = y1;
-            while ((cx !== x2 || cy !== y2) && tiles.length < MAX_PATROL_TILES) {
-                if (cx !== x2) cx += cx < x2 ? 1 : -1;
-                else           cy += cy < y2 ? 1 : -1;
-                tiles.push({ x: cx, y: cy });
-            }
-
-            directive.active = true;                   // hold control for the whole sweep
-            let visited = 0;
-            for (const t of tiles) {
-                try {
-                    await withTimeout(myAgent.commandAndAwait(['go_to', t.x, t.y]), COMMAND_TIMEOUT_MS, 'go_to');
-                } catch (err) {
-                    return `Patrol stopped at (${me.x},${me.y}) after ${visited} tile(s): could not reach (${t.x},${t.y}) — ${describeFailure(err)}`;
-                }
-                visited++;
-                if (waitEach > 0) await new Promise(r => setTimeout(r, waitEach * 1000));
-            }
-            return `Patrolled ${visited} tile(s) from (${x1},${y1}) to (${me.x},${me.y}), waiting ${waitEach}s at each.`;
-        },
-
         // chat
         async say(input) {
             const text = String(input ?? '');
