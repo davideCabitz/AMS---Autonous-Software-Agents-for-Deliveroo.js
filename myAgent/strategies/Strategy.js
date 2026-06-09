@@ -1,6 +1,6 @@
 import {
     me, parcels,
-    deliveryTiles, spawnerTiles, walkableTiles,
+    deliveryTiles, spawnerTiles, walkableTiles, crateTiles,
     OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY,
     usableDeliverySet, safeTargetSet
 } from '../context.js';
@@ -8,6 +8,11 @@ import { distance } from '../utils/distance.js';
 import { findRoute } from '../utils/astar.js';
 
 export const MIN_DELIVERY_REWARD = 5;
+// Gate for adding a second parcel while already carrying: trigger whenever
+// multi-pickup strictly beats bank-first. Intentionally lower than
+// MIN_DELIVERY_REWARD (which filters out near-worthless empty-hand pickups)
+// because here we're comparing two delivery trips, not pickup vs. nothing.
+export const MULTI_PICKUP_MIN = 1;
 export const IDLE_WAIT_MS        = 2000; // IDLE time the agent waits on a spawner hoping a parcel appears
 // A different pickup must beat the CURRENT target's value by at least this much to
 // justify abandoning the in-progress trip. Without it, parcels crossing in/out of
@@ -108,15 +113,40 @@ export class Strategy {
     }
 
     /**
-     * Travel cost in tiles between two points: the length of the A* route the
-     * agent would actually walk (direction-aware; walls, crates and other agents
-     * excluded). Returns Infinity when no A* route exists — Manhattan is NOT used
-     * as a fallback because it's unreliable for reachability and would make an
-     * unreachable target look cheap (the cause of the back-and-forth looping).
+     * Travel cost in tiles between two points, crate-aware.
+     *
+     * First tries a crate-free A* path (what navigateTo can actually walk).
+     * If crates block all routes, falls back to the crate-ignoring path length
+     * plus 2 extra steps per crate the path crosses — a rough estimate of the
+     * PDDL repositioning + push overhead. Returns Infinity when no route exists
+     * even ignoring crates (target is walled off entirely).
      */
     pathLen(from, to) {
+        if (crateTiles.length === 0) {
+            const route = findRoute(from, to);
+            return route ? route.length : Infinity;
+        }
+
+        const crateSet = new Set(crateTiles.map(c => `${Math.round(c.x)}_${Math.round(c.y)}`));
+
+        // Crate-free path: accurate — what A* navigation can actually walk.
+        const freePath = findRoute(from, to, crateSet);
+        if (freePath) return freePath.length;
+
+        // All routes blocked by crates — target needs PDDL. Estimate real cost:
+        // crate-ignoring path length + 2 steps per crate the path crosses
+        // (1 step to reposition to the push face + the push move itself).
         const route = findRoute(from, to);
-        return route ? route.length : Infinity;
+        if (!route) return Infinity;
+
+        const STEP = { right: [1, 0], left: [-1, 0], up: [0, 1], down: [0, -1] };
+        let x = Math.round(from.x), y = Math.round(from.y), pushes = 0;
+        for (const dir of route) {
+            const [dx, dy] = STEP[dir];
+            x += dx; y += dy;
+            if (crateSet.has(`${x}_${y}`)) pushes++;
+        }
+        return route.length + pushes * 2;
     }
 
     /** True when an A* route from the agent to `to` currently exists. */

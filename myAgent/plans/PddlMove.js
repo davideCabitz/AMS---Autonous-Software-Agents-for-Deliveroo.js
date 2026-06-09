@@ -5,7 +5,7 @@ import { onlineSolver }   from '@unitn-asa/pddl-client';
 
 import { PlanBase } from './PlanBase.js';
 import {
-    me, socket, beliefset, mapHasCrates, pddl, moveTiming,
+    me, socket, parcels, beliefset, mapHasCrates, pddl, moveTiming,
     crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
 } from '../context.js';
 import { findRoute, waitForArrival } from '../utils/astar.js';
@@ -159,6 +159,22 @@ export class PddlMove extends PlanBase {
                 if (!crateTiles.some(c => ck(c.x, c.y) === nk)) {
                     crateTiles.push(newCrateTile);
                     console.log(`[pddl] crate pushed to ${nk} — crateTiles: ${crateTiles.length}`);
+                }
+            }
+
+            // Opportunistic pickup: grab any free parcel sitting on this tile
+            // without deviating from the plan — costs only the pickup emit.
+            if (!this.stopped) {
+                const mx = Math.round(me.x), my = Math.round(me.y);
+                const here = parcels.free().filter(
+                    p => Math.round(p.x) === mx && Math.round(p.y) === my
+                );
+                if (here.length > 0) {
+                    const picked = await socket.emitPickup();
+                    if (picked?.length > 0) {
+                        for (const pp of picked) parcels.setCarriedBy(pp.id, me.id);
+                        console.log(`[pddl] opportunistic pickup [${picked.map(p => p.id).join(',')}] at ${movedKey}`);
+                    }
                 }
             }
 

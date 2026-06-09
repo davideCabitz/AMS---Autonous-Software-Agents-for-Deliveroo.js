@@ -86,18 +86,34 @@ Example (d0=20, d1=3, d2=18, reward_p=35, n=1, R=10, ρ=0.118):
 
 ## 4. Decision rule
 
+Two separate gates depending on whether the agent is empty-handed or already
+carrying.
+
+**Empty-hand pickup:**
 ```
-pick up p    ⇔   B(p) − A_first(p) ≥ MIN_DELIVERY_REWARD   AND   B(p) > 0
+pick up p    ⇔   B(p) − bankNow ≥ MIN_DELIVERY_REWARD (5)   AND   B(p) > 0
+```
+`MIN_DELIVERY_REWARD = 5` filters out near-worthless parcels when starting
+from scratch. The higher bar is appropriate because the agent has no load to
+lose: skipping a bad parcel costs nothing.
+
+**Multi-pickup (already carrying ≥ 1 parcel):**
+```
+pick up p    ⇔   B(p) − A_first(p) ≥ MULTI_PICKUP_MIN (1)   AND   B(p) > 0
 choose            argmax_p  B(p)
 ```
+`A_first` is the filter gate; `B(p)` is the ranking key. Both use the same
+crate-aware A\* distances so they can never disagree.
 
-`A_first` is the filter gate; `B(p)` is the ranking key. Both use the same A\*
-distances so they can never disagree.
+`MULTI_PICKUP_MIN = 1` is a 1-point noise floor — it suppresses numerical
+ties and rounding artefacts while triggering multi-pickup whenever it is
+genuinely better than bank-first. On compact maps with moderate decay (ρ ≈
+0.112, d0 ≈ 9), the margin B − A_first tops out around 2–3 points for any
+nearby parcel, so the old `MIN_DELIVERY_REWARD = 5` gate permanently blocked
+multi-pickup regardless of parcel position.
 
-`MIN_DELIVERY_REWARD = 5` is kept as hysteresis (open decision 2) to suppress
-dithering over near-zero gains. An additional `SWITCH_MARGIN = 5` is used in
-`shouldKeepCurrentPickup` to prevent flip-flopping between two pickup targets
-mid-trip.
+An additional `SWITCH_MARGIN = 5` is used in `shouldKeepCurrentPickup` to
+prevent flip-flopping between two pickup targets mid-trip.
 
 ---
 
@@ -119,9 +135,9 @@ mid-trip.
 
 | Location | Filter used |
 |----------|-------------|
-| `StrategyGreedy.decide()` — `worthwhileInRange` | `B(p) − A_first(p) ≥ MIN_DELIVERY_REWARD` |
-| `StrategyNotTooGreedy.decide()` — `worthwhileInRange` | same |
-| `StrategyGreedy.decide()` — global `best` (empty-hand) | `B(p) − 0 ≥ MIN_DELIVERY_REWARD` (A_first returns −∞, guard kicks in) |
+| `StrategyGreedy.decide()` — `worthwhileInRange` (carrying ≥ 1) | `B(p) − A_first(p) ≥ MULTI_PICKUP_MIN (1)` |
+| `StrategyNotTooGreedy.decide()` — `worthwhileInRange` (carrying ≥ 1) | same |
+| `StrategyGreedy.decide()` — global `best` (empty-hand) | `B(p) − bankNow ≥ MIN_DELIVERY_REWARD (5)` |
 | `StrategyBlind.decide()` | uses `pickupGain()` (unchanged — blind strategy has no delivery-zone concept) |
 
 `StrategyHurry` inherits `StrategyGreedy.decide()` and receives the fix automatically.
@@ -132,8 +148,9 @@ mid-trip.
 
 | # | Decision | Resolution |
 |---|----------|------------|
-| 1 | Distance metric | **Full A\* path length** (`findRoute().length`) for all scoring |
-| 2 | Threshold | **`MIN_DELIVERY_REWARD = 5`** kept as hysteresis margin |
+| 1 | Distance metric | **Crate-aware A\* path length** — crate-free route when possible, else crate-ignoring length + 2 steps per crate crossed (push overhead) |
+| 2 | Threshold (empty-hand) | **`MIN_DELIVERY_REWARD = 5`** — filters near-worthless pickups when not carrying |
+| 2b | Threshold (multi-pickup) | **`MULTI_PICKUP_MIN = 1`** — 1-point noise floor; triggers whenever multi-pickup genuinely beats bank-first on this map's geometry |
 | 3 | Carry capacity | **`atCapacity()` guard** — no pickup scored if already at server capacity |
 | 4 | Greedy vs. chained | **Greedy** — re-decide each tick, pick best single parcel |
 
@@ -144,3 +161,9 @@ mid-trip.
 `bankFirstValue(parcel)` adds one extra `findRoute` call per in-range parcel candidate
 (`dist(D_me, p)`). This runs only when `carrying.length > 0` and the parcel has
 already passed the `isReachable` filter. Typical count ≤ 3 parcels in sensing range.
+
+The crate-aware `pathLen` may issue **two** `findRoute` calls per distance query when
+crates are present (crate-free attempt first, then crate-ignoring fallback). This
+doubles the A\* cost for each path computed when `crateTiles.length > 0`. On maps
+without crates the fast path (`crateTiles.length === 0`) short-circuits to a single
+call, so there is no regression on crate-free maps.

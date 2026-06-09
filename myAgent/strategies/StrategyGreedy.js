@@ -1,4 +1,4 @@
-import { Strategy, MIN_DELIVERY_REWARD } from './Strategy.js';
+import { Strategy, MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
 import { me, parcels, OBSERVATION_DISTANCE } from '../context.js';
 import { distance } from '../utils/distance.js';
 
@@ -19,7 +19,7 @@ export class StrategyGreedy extends Strategy {
         const worthwhileInRange = parcels.free()
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
-            .filter(({ p, value }) => value - this.bankFirstValue(p) >= MIN_DELIVERY_REWARD)
+            .filter(({ p, value }) => value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
