@@ -3,11 +3,12 @@ import { StrategyGreedy } from './StrategyGreedy.js';
 import { StrategyBlind }  from './StrategyBlind.js';
 import { StrategyHurry }  from './StrategyHurry.js';
 import { StrategyMemory } from './StrategyMemory.js';
+import { StrategyLookAhead } from './StrategyLookAhead.js';
 
 // Other strategies are kept available for manual selection / future auto-rules.
 export { StrategySimple }       from './StrategySimple.js';
 export { StrategyNotTooGreedy } from './StrategyNotTooGreedy.js';
-export { StrategyGreedy, StrategyBlind, StrategyHurry, StrategyMemory };
+export { StrategyGreedy, StrategyBlind, StrategyHurry, StrategyMemory, StrategyLookAhead };
 
 // Fraction of walkable tiles that must be spawners to switch to StrategyHurry.
 const HURRY_SPAWNER_RATIO = 0.5;
@@ -41,8 +42,9 @@ export function selectStrategy() {
         return new StrategyHurry();
     }
 
-    // Enable parcel memory in the belief layer, then use the memory-aware strategy.
+    // Enable parcel memory in the belief layer, then use the memory-aware
+    // look-ahead strategy (StrategyMemory + 2-step chained pickup scoring).
     parcels.enableMemory(DECAY_INTERVAL_MS);
-    console.log(`[strategy] OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} spawnerRatio=${spawnerRatio.toFixed(2)} → StrategyMemory`);
-    return new StrategyMemory();
+    console.log(`[strategy] OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} spawnerRatio=${spawnerRatio.toFixed(2)} → StrategyLookAhead`);
+    return new StrategyLookAhead();
 }
