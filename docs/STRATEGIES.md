@@ -14,6 +14,9 @@ This document describes every strategy class used by the BDI agent, how each one
 6. [StrategyBlind](#6-strategyblind)
 7. [StrategyHurry](#7-strategyhurry)
 8. [StrategyMemory](#8-strategymemory)
+9. [StrategyLookAhead](#9-strategylookahead)
+10. [StrategyLookAheadStochastic](#10-strategylookaheadstochastic)
+11. [StrategySingleParcel](#11-strategysingleparcel)
 
 ---
 
@@ -23,13 +26,17 @@ This document describes every strategy class used by the BDI agent, how each one
 
 `selectStrategy()` is called once, after the server config (and therefore `OBSERVATION_DISTANCE`) has arrived. It inspects the map and returns the single strategy instance the agent will use for the whole game.
 
-| Condition | Strategy chosen |
-|---|---|
-| `OBSERVATION_DISTANCE` in `[-1, 1]` (agent senses only its own tile) | `StrategyBlind` |
-| Spawner tiles > 50 % of all walkable tiles | `StrategyHurry` |
-| Otherwise | `StrategyMemory` (also enables parcel memory in the belief layer) |
+| Priority | Condition | Strategy chosen |
+|---|---|---|
+| 1 | `OBSERVATION_DISTANCE` ∈ `[-1, 1]` (agent senses only its own tile) | `StrategyBlind` |
+| 2 | `spawnerTiles.length === 1` (single spawner) | `StrategySingleParcel` (also enables parcel memory) |
+| 3 | Spawner tiles > 50 % of all walkable tiles | `StrategyHurry` |
+| 4 | `EXPLORE_MODE=stochastic` env var **and** ≥ 3 spatial groups | `StrategyLookAheadStochastic` (also enables parcel memory) |
+| 5 | Otherwise (common case) | `StrategyLookAhead` (also enables parcel memory) |
 
-`StrategySimple`, `StrategyGreedy`, and `StrategyNotTooGreedy` are available but are not auto-selected; they can be set manually or used in experiments.
+`StrategySimple`, `StrategyGreedy`, `StrategyNotTooGreedy`, and `StrategyMemory` are available but not auto-selected — manual use or experiments only.
+
+**Benchmark toggle:** `EXPLORE_MODE=stochastic node myAgent/agent.js` activates `StrategyLookAheadStochastic` on maps with enough spatial groups (≥ 3) for the probabilistic exploration to be meaningful. On stripe/grid maps with fewer groups the fallback to `StrategyLookAhead` is automatic.
 
 ---
 
@@ -46,7 +53,6 @@ All strategies extend `Strategy`. It holds no game logic of its own (`decide()` 
 | `MIN_DELIVERY_REWARD` | 5 | Minimum net gain required to bother picking up an empty-hand parcel. |
 | `MULTI_PICKUP_MIN` | 0 | Minimum gain for a second pickup while already carrying (any positive gain counts). |
 | `SWITCH_MARGIN` | 5 | A competing pickup must beat the current target by at least this much to justify abandoning the in-progress trip. Prevents per-tick flip-flopping. |
-| `IDLE_WAIT_MS` | 2000 ms | How long the agent waits on a spawner tile before giving up and moving on. |
 | `EXPLORE_NEARBY_MARGIN` | 4 tiles | Maximum extra distance tolerated when the ping-pong exclusion forces an alternative spawner. If every alternative is farther than `prevLen + 4`, the exclusion is skipped. |
 
 ### 2.2 Value Functions
@@ -75,7 +81,6 @@ Alternative: deliver now, then come back for `p` as a solo trip. Multi-pickup is
 
 Used by all sensing-based strategies when idle (nothing to pick up or deliver). Key behaviours:
 
-- **Spawner wait:** When standing on a spawner, waits `IDLE_WAIT_MS` (2 s) for a parcel to appear before moving on.
 - **Candidate filtering:** Only A\*-reachable tiles are considered. Prefers tiles in the *safe* region (from which a delivery is still reachable, avoiding one-way traps). Prefers tiles outside current sensing range (new ground).
 - **Ping-pong prevention (sliding window):** Maintains two keys:
   - `_lastExploreKey` — the spawner currently committed to.
@@ -257,3 +262,128 @@ carrying == 0:
 - **No sensing-range cap:** The pool is not limited to `OBSERVATION_DISTANCE`. A remembered parcel at the far end of the map can still be targeted; `pickupValue` naturally penalises far targets through the decay term.
 - **Capacity pre-filter:** When carrying capacity is finite, the pool is pre-screened to the top-`N` parcels by raw reward (where `N = CARRYING_CAPACITY`) before the expensive A\*-based scoring runs. This keeps the O(n · A\*) cost bounded.
 - **Extended hysteresis — `#shouldKeepWithMemory`:** Overrides the base hysteresis to also check remembered parcels. The base `shouldKeepCurrentPickup` only checks the live map; a remembered target would be dropped, losing the `SWITCH_MARGIN` protection.
+
+---
+
+## 9. StrategyLookAhead
+
+**File:** `myAgent/strategies/StrategyLookAhead.js`  
+**Extends:** `StrategyMemory`  
+**Selected when:** common case (default strategy)
+
+Extends `StrategyMemory` with a **2-step look-ahead** on pickup selection. `StrategyMemory` scores each parcel in isolation — a high-reward distant parcel always wins even when a decent parcel sits almost on the route. `StrategyLookAhead` corrects this by considering pairs.
+
+### Decision flow
+
+```
+carrying > 0:
+  │ worthwhile multi-pickup (live + remembered pool) → #chooseTarget → go_pick_up
+  │ else → go_deliver to nearest escapable delivery
+  └ no delivery reachable → exploreIfIdle
+
+carrying == 0:
+  │ best from merged pool, scored then look-ahead promoted → go_pick_up
+  └ else → exploreIfIdle
+```
+
+### Look-ahead mechanics
+
+After picking the greedy winner **G** from the standard cost-function ranking, `#chooseTarget` finds the best complementary parcel **C** and scores both visit orders as complete tours:
+
+```
+me → C → G → delivery    value_CG = (R + r_C + r_G) − (n+2)·ρ·(d1+d2+d3)
+me → G → C → delivery    value_GC = (R + r_C + r_G) − (n+2)·ρ·(d1'+d2'+d3')
+```
+
+The agent detours to **C first** (returning C instead of G) when:
+1. The pair beats taking **G** solo by ≥ `LOOKAHEAD_MARGIN` (1 pt) — worthless second parcels are never chased.
+2. The C-first order wins by value (≥ `LOOKAHEAD_MARGIN`), **or** both orders are within the margin and C-first has the shorter total tour.
+
+There is no geometric "on the way" gate. Under decay the longer-travel order is already the lower-value one, so an opposite-direction parcel is grabbed first only when it genuinely shortens the trip.
+
+### Hysteresis
+
+`#shouldKeep` extends `StrategyMemory`'s hysteresis to handle remembered targets and one look-ahead edge case: when the chained plan's **second** stop is the current target, switching to the near parcel is a re-ordering of the same trip and is always allowed without the `SWITCH_MARGIN` cost.
+
+---
+
+## 10. StrategyLookAheadStochastic
+
+**File:** `myAgent/strategies/StrategyLookAheadStochastic.js`  
+**Extends:** `StrategyLookAhead`  
+**Selected when:** `EXPLORE_MODE=stochastic` env var **and** ≥ 3 spatial groups
+
+Identical to `StrategyLookAhead` in all pickup, delivery, memory and look-ahead logic. Only `exploreIfIdle()` is overridden with **probabilistic group-based exploration** to break the deterministic ping-pong loop that forms on maps with many spatially separate spawner clusters.
+
+### Group formation
+
+Spawner tiles are clustered once (lazily on the first explore call) using **union-find** with Euclidean threshold `D_CLUSTER = 2` tiles. Two spawners ≤ 2 tiles apart end up in the same group (transitively). Groups are static — computed once from the immutable `spawnerTiles` list.
+
+### Probabilistic group selection
+
+```
+weight(G) = 1 / (1 + α·normDist(G) + β·recentCount(G))
+P(G)      = weight(G) / Σ weight(all active groups)
+```
+
+| Parameter | Value | Effect |
+|---|---|---|
+| `α` | 1.5 | Distance penalty — farthest group gets ≈ 0.4× the weight of the nearest |
+| `β` | 3.0 | Recency penalty — one recent choice roughly halves the weight |
+| `WINDOW_SIZE` | 5 | Decisions remembered for recency; older choices have zero penalty |
+
+`normDist` is the A\* distance to the nearest reachable spawner in the group, normalised to [0, 1] across all active groups. `recentCount` is how many of the last `WINDOW_SIZE` choices targeted that group.
+
+**Properties:**
+- No starvation — every group always has a positive weight.
+- A group not chosen for ≥ 5 decisions has zero recency penalty and recovers to its natural distance-based weight.
+- Normalised distance means the farthest group is penalised *relative to* the nearest, not zeroed out absolutely.
+
+### Coverage-maximising target
+
+Within the chosen group, the agent navigates to the tile that **covers the most group spawners** within `OBSERVATION_DISTANCE` (Euclidean), not simply the nearest spawner:
+
+- **Fast path:** if the nearest eligible spawner already covers all group members, go there.
+- **Slow path:** score every walkable tile in the group's bounding box expanded by `OBSERVATION_DISTANCE` by covered-spawner count, break ties by Euclidean distance to agent. Run A\* reachability only on the top-10 geometrically best candidates.
+
+### Edge cases
+
+| Situation | Behaviour |
+|---|---|
+| 0 or 1 group | Falls back to `super.exploreIfIdle()` (deterministic LookAhead logic) |
+| All groups unreachable | Falls back to parent |
+| Mission zone constraint (`allowedSpawnerTiles`) | Applied before group filtering |
+| Stack-accumulation mission (`requiredStackSize`) | Current tile excluded from candidates |
+
+### Benchmark usage
+
+```
+EXPLORE_MODE=stochastic node myAgent/agent.js   # stochastic exploration
+node myAgent/agent.js                            # deterministic LookAhead
+```
+
+On maps where `buildSpawnerGroups` returns < 3 groups (stripe maps, grid maps with aligned rows), `selectStrategy` falls back to `StrategyLookAhead` automatically regardless of `EXPLORE_MODE`.
+
+---
+
+## 11. StrategySingleParcel
+
+**File:** `myAgent/strategies/StrategySingleParcel.js`  
+**Extends:** `StrategyLookAhead`  
+**Selected when:** `spawnerTiles.length === 1`
+
+On maps with exactly one parcel spawner the only sensible idle behaviour is to **camp on that spawner** and react the instant a parcel appears. All pickup, delivery, memory and look-ahead logic is inherited from `StrategyLookAhead` unchanged — only `exploreIfIdle()` is overridden.
+
+### Decision flow (exploreIfIdle only)
+
+```
+intent == go_pick_up | go_deliver  →  nothing to do (productive work in progress)
+intent == go_explore               →  nothing to do (already en route to spawner)
+already on spawnerTiles[0]         →  nothing to do (camp and wait)
+spawner unreachable                →  null (give up)
+else                               →  go_explore to spawnerTiles[0]
+```
+
+### Why no timer
+
+No `tickIntervalMs` heartbeat is needed. The server fires `onSensing` the moment a parcel spawns on the agent's tile, which immediately triggers `optionsGeneration()` and the inherited `decide()` issues `go_pick_up`. The agent never misses a spawn event while camped.

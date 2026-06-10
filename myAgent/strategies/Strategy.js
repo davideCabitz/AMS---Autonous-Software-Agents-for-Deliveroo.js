@@ -21,8 +21,7 @@ export const MULTI_PICKUP_MIN = 0;
 // justify abandoning the in-progress trip. Without it, parcels crossing in/out of
 // the worthwhile set each tick (decay/distance/sensing shifts) make the agent
 // flip between "pick up" and "deliver" every tick → physical back-and-forth.
-export const SWITCH_MARGIN       = 5;
-const IDLE_WAIT_MS               = 2000; // ms to wait on a spawner hoping a parcel appears
+export const SWITCH_MARGIN = 5;
 
 /**
  * Base class for option-generation strategies.
@@ -36,9 +35,6 @@ const IDLE_WAIT_MS               = 2000; // ms to wait on a spawner hoping a par
  * switching strategy at runtime can never leak state between them.
  */
 export class Strategy {
-    /** Exploration wait timer (set while idling on a spawner tile). */
-    idleWaitStart = null;
-
     /** Key "x_y" of the spawner currently committed to via go_explore. */
     _lastExploreKey = null;
 
@@ -311,27 +307,9 @@ export class Strategy {
             }
         }
 
-        // On a spawner tile — wait IDLE_WAIT_MS for a parcel to potentially spawn.
-        // Skip the wait entirely when the sensing area is too small to ever detect a parcel.
-        const onSpawner = spawnerTiles.some(
-            t => Math.round(me.x) === t.x && Math.round(me.y) === t.y
-        );
-
-        // When accumulating a required stack, don't idle on the current spawner —
-        // keep moving to find more parcels elsewhere.
         const needMoreParcels = missionConstraints.requiredStackSize != null
             && parcels.carriedBy(me.id).length < missionConstraints.requiredStackSize;
 
-        if (onSpawner && OBSERVATION_DISTANCE > 1 && !needMoreParcels) {
-            if (this.idleWaitStart === null) {
-                this.idleWaitStart = Date.now();
-                console.log('[explore] on spawner — waiting 2 s for parcel to appear');
-                return null;
-            }
-            if (Date.now() - this.idleWaitStart < IDLE_WAIT_MS) return null;
-        }
-
-        this.idleWaitStart = null;
         // Only consider tiles the agent can actually A*-reach (walls/crates/agents
         // respected). Unreachable spawners are never targeted — that caused the
         // repeated re-selection of an out-of-reach tile and the back-and-forth.
