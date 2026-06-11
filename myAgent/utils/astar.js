@@ -148,6 +148,83 @@ export function findRoute(start, goal, blockedKeys = null) {
 }
 
 /**
+ * Push-aware route cost from `from` to `to`: A* where a tile occupied by a
+ * crate is enterable ONLY via a legal push in the entry direction — the tile
+ * one beyond the crate (same direction) must be a crate-zone tile
+ * (crateSpawnerTiles: '5' free zones and '5!' spawners, matching the PDDL
+ * (pushable t) model), walkable, crate-free and arrow-legal. Such an edge
+ * costs 3 (step + reposition + push) instead of 1.
+ *
+ * Push legality is direction-specific, so this finds routes a ban-list never
+ * could: approaching the same crate from the one side where the push lands in
+ * a free zone (e.g. circling a pocket to push a corridor crate upward).
+ * Optimistic about the pushed crate's new position (it isn't re-added as an
+ * obstacle), mirroring pathLen's role as an estimate — PddlMove plans the
+ * exact pushes.
+ *
+ * Returns the total cost in steps, or Infinity when no push-feasible route
+ * exists. `blockedKeys` are extra impassable tiles (mission avoid set).
+ */
+export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
+    const s = { x: Math.round(from.x), y: Math.round(from.y) };
+    const goalKey = key(Math.round(to.x), Math.round(to.y));
+    const startKey = key(s.x, s.y);
+
+    const walkable = getWalkable();
+    const zones   = new Set(crateSpawnerTiles.map(t => key(t.x, t.y)));
+    const crates  = new Set(crateKeys);
+    const blocked = agentKeys();
+    if (blockedKeys) for (const k of blockedKeys) blocked.add(k);
+    blocked.delete(startKey);
+
+    const passable = k => walkable.has(k) && !blocked.has(k);
+
+    const gScore = new Map([[startKey, 0]]);
+    const fScore = new Map([[startKey, h(s.x, s.y, Math.round(to.x), Math.round(to.y))]]);
+    const open   = new Map([[startKey, s]]);
+    const closed = new Set();
+
+    while (open.size > 0) {
+        let currentKey = null, lowestF = Infinity;
+        for (const k of open.keys()) {
+            const f = fScore.get(k) ?? Infinity;
+            if (f < lowestF) { lowestF = f; currentKey = k; }
+        }
+
+        if (currentKey === goalKey) return gScore.get(currentKey);
+
+        const cur = open.get(currentKey);
+        open.delete(currentKey);
+        closed.add(currentKey);
+        const g = gScore.get(currentKey);
+
+        for (const { dx, dy } of DIRS) {
+            const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
+            if (closed.has(nk) || !passable(nk)) continue;
+            if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
+
+            let stepCost = 1;
+            if (crates.has(nk)) {
+                // Entering a crate tile = pushing the crate one tile onward.
+                const px = nx + dx, py = ny + dy, pk = key(px, py);
+                if (!zones.has(pk) || !passable(pk) || crates.has(pk)
+                    || !canEnterDir(directionalTiles.get(pk), nx, ny, px, py))
+                    continue; // push impossible from this side
+                stepCost = 3;
+            }
+
+            const tentativeG = g + stepCost;
+            if (tentativeG < (gScore.get(nk) ?? Infinity)) {
+                gScore.set(nk, tentativeG);
+                fScore.set(nk, tentativeG + h(nx, ny, Math.round(to.x), Math.round(to.y)));
+                if (!open.has(nk)) open.set(nk, { x: nx, y: ny });
+            }
+        }
+    }
+    return Infinity;
+}
+
+/**
  * Set of "x_y" tiles from which AT LEAST ONE of `goals` is reachable, honouring
  * arrow constraints on the *reversed* edges. Structure-only: considers walls and
  * directional tiles, but NOT other agents or crates — the verdict is stable map
@@ -266,6 +343,16 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
             const { dx: sdx, dy: sdy } = DIRS.find(d => d.dir === dir);
             const tx = Math.round(me.x) + sdx;
             const ty = Math.round(me.y) + sdy;
+
+            // A crate sensed AFTER this path was computed may now sit on the
+            // planned step. Walking into it would push it (game physics) without
+            // PDDL planning — never do that: break to recompute, and if crates
+            // now wall off the goal the 'no path to' throw hands over to PddlMove.
+            const stepKey = key(tx, ty);
+            if (crateTiles.some(c => key(Math.round(c.x), Math.round(c.y)) === stepKey)) {
+                console.log(`[nav] crate sensed on planned step ${stepKey} — recomputing`);
+                break;
+            }
 
             const fromX = Math.round(me.x), fromY = Math.round(me.y);
             const tStep  = Date.now();

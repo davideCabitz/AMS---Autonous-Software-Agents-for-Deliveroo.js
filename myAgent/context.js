@@ -163,6 +163,19 @@ socket.onMap((_w, _h, tiles) => {
     mapHasCrates = crateSpawnerTiles.length > 0;
     console.log(`[map] mapHasCrates=${mapHasCrates} (${crateSpawnerTiles.length} crate tiles)`);
 
+    // Seed live crate positions from the '5!' spawner tiles: they start the game
+    // with a crate on them. Without this the agent believes far-away spawner
+    // tiles are free, A* plans a "crate-free" route through them, and PDDL only
+    // engages after a wasted detour. A stale seed (spawner without a crate) is
+    // self-correcting: sensing, 'crate' dispose events and walk-through cleanup
+    // all remove it on first contact.
+    crateTiles.length = 0;
+    crateTiles.push(...crateSpawnerTiles
+        .filter(t => t.crateSpawner || t.type === '5!')
+        .map(t => ({ x: t.x, y: t.y })));
+    if (crateTiles.length > 0)
+        console.log(`[map] seeded ${crateTiles.length} crates from '5!' spawners: [${crateTiles.map(c => `${c.x}_${c.y}`).join(', ')}]`);
+
     walkableTiles.length = 0;
     walkableTiles.push(...tiles.filter(t => {
         if (t.type === '0' || t.type === 0) return false;           // wall — always exclude

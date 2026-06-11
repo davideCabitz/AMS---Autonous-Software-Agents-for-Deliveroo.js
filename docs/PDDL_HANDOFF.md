@@ -1,10 +1,11 @@
 # PDDL Crate-Pushing — Project Context & Handoff Notes
 
 > Purpose of this file: a self-contained brief you can paste into a future Claude
-> session so it has the full picture of the project, the current PDDL bug, the
-> open design questions, and the agreed direction — without re-reading every file.
+> session so it has the full picture of the project, the PDDL crate subsystem,
+> the design decisions taken, and the remaining open questions — without
+> re-reading every file.
 >
-> Last updated: 2026-05-29.
+> Last updated: 2026-06-11.
 
 ---
 
@@ -161,32 +162,30 @@ graph the planner walks.
 
 ---
 
-## 6. THE BUG: PDDL never runs (observed 2026-05-29)
+## 6. Crate tracking — current state (RESOLVED, was "PDDL never runs")
 
-### Symptom
+The original 2026-05 bug (PddlMove never selected because it was gated on
+empty `sensing.crates`, while A* looped into unsensed crates) is fixed.
+`crateTiles` (live crate positions) is now maintained from **three sources**:
 
-Console shows the agent trying to reach a spawner (e.g. `0,5`), A* repeatedly
-hitting `[nav] blocked at 4_5` and `[nav] blocked at 7_2`, recomputing, and
-looping forever. **No PDDL log line ever appears.** `plan failed AStarMove
-['stopped']` and `no plan for go_to ...` show up as the strategy churns.
+1. **Sensing events** — `sensing.crates` within `observation_distance`
+   (log: `[sensing] crates in range: [...]`), handled in `context.js`.
+2. **Inference on block** — if a move fails onto a tile that is a known crate
+   zone (`crateSpawnerTiles`), `navigateTo` infers an unsensed crate there
+   ([astar.js](myAgent/utils/astar.js), log: `[nav] inferred crate at ...`).
+   Non-zone blocks (other agents) are NOT added — only transient `agentBlocked`.
+3. **Cleanup** — walking onto a tile listed in `crateTiles` removes the stale
+   entry (`[nav] walked through ... removed stale crate entry`); PddlMove clears
+   a crate's old tile after a successful push (`[pddl] cleared old crate`).
 
-### Root cause chain
+`crateSpawnerTiles` (static, from map load) holds **both** tile types `'5'`
+(free crate zone) and `'5!'` (crate spawner) — this is the set of tiles a crate
+can ever sit on, and matches the PDDL `(pushable t)` facts exactly.
 
-1. **PddlMove is gated behind *sensed* crates.** `isApplicableTo` bails on
-   `crateTiles.length === 0` ([PddlMove.js:45](myAgent/plans/PddlMove.js#L45)).
-2. **`crateTiles` is only filled from `sensing.crates`** ([context.js:104](myAgent/context.js#L104)),
-   which is empty in this run (no `[sensing] crates detected` line). So PddlMove
-   is *never selected*; deliberation falls straight to AStarMove.
-3. **A* treats crate tiles as walkable.** `walkableTiles` keeps everything except
-   type `'0'` ([context.js:67-69](myAgent/context.js#L67-L69)), so the 4 crate
-   tiles (`'5'`/`'5!'`) are in the walkable set. `navigateTo` routes through them,
-   the server rejects the move, and it recomputes against the *same* set → the
-   `blocked → recompute` infinite loop.
-
-> Note: the map *did* detect crates — `[map] mapHasCrates=true (4 crate tiles)`.
-> So `crateSpawnerTiles` (static) is correct; only the *sensed* `crateTiles` is
-> empty. **This is the key realization: we already know where the crates are from
-> the static map; we don't need sensing at all.**
+Known residual limit: a crate outside sensing range is invisible to scoring and
+navigation until sensed or inferred-by-collision; A* may initially route
+"through" it and only learn the truth on arrival (this is by design — see the
+2026-06-11 stuck-explore episode in §11).
 
 ---
 
@@ -209,91 +208,92 @@ infrastructure exists on the map.
 
 ---
 
-## 8. Proposed direction (agreed with user)
+## 8. Push-aware scoring (`pathLen`) — added 2026-06-11
 
-User's framing, verbatim intent:
+The strategy layer prices every option (pickup, delivery, explore target) with
+`Strategy.pathLen(from, to)` ([Strategy.js](myAgent/strategies/Strategy.js)).
+On crate maps this MUST agree with the physics PDDL plans against, or the
+strategy commits to goals the planner can't (or shouldn't) reach. Two failure
+modes were hit and fixed on 2026-06-11:
 
-> "PDDL should be the priority strategy if even a single crateTile exists. If the
-> agent is blocked near a crateTile, it's highly likely that a crate is blocking
-> the agent, which should try to move it — or find a near path that puts the agent
-> in a better position to push the crate and free the path."
+- **Too optimistic** (original): when crates blocked all routes, the estimate
+  was "crate-ignoring route + 2 steps per crate crossed", assuming every crate
+  is always pushable. On `crates_one_way` this made the agent pick delivery
+  `(4,9)` reachable only by shoving a crate into a wall, instead of the
+  delivery just past the feasible bottom-right corridor.
+- **Too pessimistic** (first fix attempt): simulating pushes along the shortest
+  route and *banning the crate tile* on failure. Push legality is
+  direction-specific — banning the tile also killed routes that circle a
+  pocket and push the same crate from the legal side, so reachable spawners
+  were priced `Infinity` and exploration froze.
 
-Concretely, the changes to design/implement:
+Current model — `pushAwareCost(from, to, crateKeys, blockedKeys)` in
+[astar.js](myAgent/utils/astar.js):
 
-1. **Seed crates from the static map, not sensing.** Either populate `crateTiles`
-   from `crateSpawnerTiles` at map load, or change `PddlMove` to use
-   `crateSpawnerTiles` as the crate set. (Caveat: `'5'`/`'5!'` are *tiles*, not
-   guaranteed to currently hold a crate — see open questions.)
+- A* where an edge **into a tile occupied by a crate** is legal only if the
+  tile one beyond it (same direction) is a crate-zone tile
+  (`crateSpawnerTiles`), walkable, crate-free, and arrow-legal — the same rule
+  as the PDDL `push*` actions (`(free dest) ∧ (pushable dest)`).
+- Such an edge costs **3** (step + reposition + push) instead of 1.
+- Optimistic about the pushed crate's NEW position (not re-added as an
+  obstacle): `pathLen` is a scoring estimate, the exact push sequence is
+  PddlMove's job. Consequence: a cost can be slightly underestimated, but a
+  push-feasible target is never priced `Infinity`.
 
-2. **Make A* avoid crate tiles** so it stops looping into them, OR let the
-   "no crate-free route" condition flip control to PDDL. Today `walkableTiles`
-   includes crate tiles, which is what causes the infinite block loop. Options:
-   - Exclude crate tiles from the A* walkable set, so when a crate blocks the only
-     path, A* returns "no path" and PDDL takes over.
-   - Or detect "blocked at a known crate tile" inside `navigateTo` and hand off.
-
-3. **Gate PddlMove on map crates, not sensed crates:** change the
-   `crateTiles.length === 0` guard to `crateSpawnerTiles.length === 0`
-   (i.e. `!mapHasCrates`), and compute `findRoute`'s blocked set from the static
-   crate tiles.
-
-4. **Push behavior:** when the only route to the goal is blocked by a crate, the
-   PDDL plan should push it onto an adjacent `pushable` crate-zone tile to open the
-   path. This already works *if* the problem is built with correct crate + free +
-   pushable facts.
-
----
-
-## 9. Open questions & doubts (resolve these next session)
-
-1. **Do `'5'`/`'5!'` tiles always have a crate on them?** If a `'5'` sliding tile
-   can be empty, modeling every crate tile as `(crate ...)` will produce wrong
-   plans. Need to confirm by logging actual crate positions (subscribe to the
-   `'crate'` event, or print `sensing.crates` once the agent is adjacent).
-
-2. **Are the 4 crate tiles adjacent (a pushable line) or isolated?** A crate can
-   only be pushed onto an *adjacent crate-zone* tile (`pushable` = crate-zone). If
-   crate tiles are isolated, there's nowhere legal to push → solver returns no
-   plan. Need the actual coordinates of all `'5'`/`'5!'` tiles and the geometry.
-   (Failing targets touched `4_5` and `7_2`.)
-
-3. **Should crates be pushable onto plain walkable tiles too?** Current domain
-   restricts `pushable` to crate-zone tiles only (game physics assumption). Verify
-   this matches the real server: can you push a crate onto a normal `'3'` tile?
-   If yes, `pushable` should include plain walkable tiles and the model loosens.
-
-4. **What does `emitMove` return when pushing a crate vs. when blocked?** PddlMove
-   assumes a push is just a successful directional move. If the server returns a
-   distinct signal (or moves you differently), `#runPlan` needs adjusting.
-
-5. **Does the active server build emit crates in `sensing` at all, or only via the
-   `'crate'` event?** Not critical given the static-tile approach, but determines
-   whether we can ever track crates that move during play.
-
-6. **Should A* permanently avoid crate tiles, or only when blocked?** Permanently
-   avoiding them is simpler and safe, but may make some shortcuts unavailable when
-   a crate tile is actually empty/passable.
+`pathLen` flow: crate-free `findRoute` first (exact, what AStarMove walks);
+if crates block everything, `pushAwareCost` (log: `[pathlen] ... push-aware
+cost=N`); `Infinity` only when no push-feasible route exists at all.
+`nearestEscapableDelivery` logs the full ranked candidate list
+(`[delivery] candidates from (x,y): ...`) whenever crates are present.
 
 ---
 
-## 10. Concrete next steps (suggested TODO)
+## 9. Answered questions (were open, resolved by testing)
 
-- [ ] Log ground truth: subscribe to `socket` `'crate'` events and print
-      `sensing.crates`; confirm whether crate tiles hold crates and where.
-- [ ] Print the coordinates of all `crateSpawnerTiles` and map them out (geometry
-      check for question #2).
-- [ ] Change `PddlMove.isApplicableTo` to gate on `mapHasCrates` /
-      `crateSpawnerTiles`, and build the crate/blocked set from static tiles.
-- [ ] Decide A* policy: exclude crate tiles from `walkableTiles` (or from the A*
-      set) so the block loop can't happen and PDDL gets control.
-- [ ] Re-run; confirm a `[pddl]` plan is produced and the agent pushes a crate to
-      free the path to `0,5`.
-- [ ] Revisit `pushable` semantics once question #3 is answered.
+1. **Do `'5'`/`'5!'` tiles always hold a crate?** No. `'5!'` spawns with a
+   crate; `'5'` is a free sliding zone. Live occupancy comes from
+   `crateTiles` (sensing + inference), never assumed from the map.
+2. **Push destination rule (confirmed on `crates_one_way`):** a crate can be
+   pushed ONLY onto an adjacent free crate-zone tile (`'5'` or `'5!'`), never
+   onto plain `'3'` tiles. This is what makes one-way passages possible, and
+   both the PDDL domain and `pushAwareCost` encode it.
+3. **Sensing:** the server does emit `sensing.crates` within
+   `observation_distance`. Crates outside range are handled by inference (§6).
+4. **Pushing via `emitMove`:** confirmed — a push is a normal successful
+   directional move; PddlMove's `#runPlan` needs no special casing.
+5. **A* crate policy:** `navigateTo` treats current `crateTiles` as walls and
+   recomputes per step; when they wall off the goal, control flips to PddlMove
+   via its `isApplicableTo` (crate-free route absent, crate-ignoring route
+   present).
+
+---
+
+## 10. Remaining open questions
+
+1. **Pushed-crate occupancy in scoring:** `pushAwareCost` doesn't model the
+   pushed crate's new position as an obstacle for the rest of the same route.
+   Fine as an estimate; revisit only if a map shows systematic underpricing.
+2. **`'crate'` socket event** (`'create' | 'dispose'`): still not subscribed.
+   Would give ground-truth crate lifecycle beyond sensing range if ever needed.
+3. **One-way pockets and strategy:** on `crates_one_way` the agent can enter a
+   region whose return passage requires a specific push approach. Scoring now
+   prices this correctly, but no strategy-level guard prevents entering a
+   pocket whose exit cost is very high (cf. `safeTargetSet` for directional
+   mazes — a crate-aware analogue may be worth it).
 
 ---
 
 ## 11. Recent change log (so future sessions aren't surprised)
 
+- **2026-06-11:** `pathLen` fallback rewritten twice (see §8): first to a
+  simulate-and-ban scheme (reverted — direction-blind banning froze exploration
+  on `crates_one_way`), then to the current push-aware A* (`pushAwareCost` in
+  `astar.js`, edge cost 3 for legal pushes onto free crate-zone tiles).
+  `simulatePushes` (intermediate helper) removed. Added `[pathlen]` and
+  `[delivery]` debug logs.
+- **2026-06-11:** Confirmed on map `crates_one_way` that crates are pushable
+  only onto free crate-zone tiles (`'5'`/`'5!'`), and that `crateSpawnerTiles`
+  + PDDL `(pushable)` + `pushAwareCost` all share that one zone set.
 - **2026-05-29:** `problem-deliveroo.pddl` introduced as a placeholder *template*;
   `PddlMove.#buildProblem` switched from inline string building to template
   substitution.

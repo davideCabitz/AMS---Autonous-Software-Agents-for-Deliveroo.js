@@ -5,7 +5,7 @@ import {
     usableDeliverySet, safeTargetSet, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
-import { findRoute } from '../utils/astar.js';
+import { findRoute, pushAwareCost } from '../utils/astar.js';
 
 export const MIN_DELIVERY_REWARD = 5;
 // Max extra tiles tolerated when choosing an alternative to the excluded spawner.
@@ -103,6 +103,9 @@ export class Strategy {
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
             .sort((a, b) => a.len - b.len);
+        if (crateTiles.length > 0)
+            console.log(`[delivery] candidates from (${Math.round(from.x)},${Math.round(from.y)}): `
+                + reachable.map(({ d, len }) => `(${d.x},${d.y})=${len}${usableDeliverySet.has(`${d.x}_${d.y}`) ? '' : '·unusable'}`).join(' '));
         if (reachable.length === 0) return undefined;
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
         return (usable[0] ?? reachable[0]).d;
@@ -133,10 +136,14 @@ export class Strategy {
      * Travel cost in tiles between two points, crate-aware.
      *
      * First tries a crate-free A* path (what navigateTo can actually walk).
-     * If crates block all routes, falls back to the crate-ignoring path length
-     * plus 2 extra steps per crate the path crosses — a rough estimate of the
-     * PDDL repositioning + push overhead. Returns Infinity when no route exists
-     * even ignoring crates (target is walled off entirely).
+     * If crates block all routes, falls back to a push-aware A*
+     * (pushAwareCost): entering a crate tile is allowed only via a legal push
+     * (destination must be a free crate-zone tile, matching the PDDL model)
+     * and costs 3 instead of 1. Push legality is direction-specific, so a
+     * crate approachable from the wrong side doesn't poison routes that circle
+     * around and push it from the right one. Returns Infinity when no
+     * push-feasible route exists — targets behind a dead-end push are never
+     * selected as nearest.
      */
     pathLen(from, to) {
         const avoid = missionConstraints.avoidTiles.size > 0 ? missionConstraints.avoidTiles : null;
@@ -147,26 +154,16 @@ export class Strategy {
         }
 
         const crateSet = new Set(crateTiles.map(c => `${Math.round(c.x)}_${Math.round(c.y)}`));
-        if (avoid) for (const k of avoid) crateSet.add(k);
+        const crateBlocked = avoid ? new Set([...crateSet, ...avoid]) : crateSet;
 
         // Crate-free path: accurate — what A* navigation can actually walk.
-        const freePath = findRoute(from, to, crateSet);
+        const freePath = findRoute(from, to, crateBlocked);
         if (freePath) return freePath.length;
 
-        // All routes blocked by crates — target needs PDDL. Estimate real cost:
-        // crate-ignoring path length + 2 steps per crate the path crosses
-        // (1 step to reposition to the push face + the push move itself).
-        const route = findRoute(from, to);
-        if (!route) return Infinity;
-
-        const STEP = { right: [1, 0], left: [-1, 0], up: [0, 1], down: [0, -1] };
-        let x = Math.round(from.x), y = Math.round(from.y), pushes = 0;
-        for (const dir of route) {
-            const [dx, dy] = STEP[dir];
-            x += dx; y += dy;
-            if (crateSet.has(`${x}_${y}`)) pushes++;
-        }
-        return route.length + pushes * 2;
+        // All routes blocked by crates — target needs PDDL. Push-aware cost.
+        const cost = pushAwareCost(from, to, crateSet, avoid);
+        console.log(`[pathlen] (${Math.round(from.x)},${Math.round(from.y)})→(${Math.round(to.x)},${Math.round(to.y)}) push-aware cost=${cost}`);
+        return cost;
     }
 
     /** True when an A* route from the agent to `to` currently exists. */
