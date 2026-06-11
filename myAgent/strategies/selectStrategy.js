@@ -57,12 +57,10 @@ export function selectStrategy() {
     // when the map has enough distinct spatial groups to make sampling worthwhile.
     // With < 4 groups the agent would just oscillate between 2-3 large clusters —
     // no real diversity gain over the deterministic _prevExploreKey mechanism.
-    if (process.env.EXPLORE_MODE === 'stochastic') {
         const groups = buildSpawnerGroups(spawnerTiles, 2);
         if (groups.length >= 3) {
             log(`EXPLORE_MODE=stochastic, ${groups.length} groups → StrategyLookAheadStochastic`);
             return new StrategyLookAheadStochastic();
-        }
         log(`EXPLORE_MODE=stochastic but only ${groups.length} group(s) — falling back to StrategyLookAhead`);
     }
 
