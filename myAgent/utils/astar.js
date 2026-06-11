@@ -1,5 +1,9 @@
 import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints } from '../context.js';
 import { canEnterDir } from './directions.js';
+import { createLogger } from './logger.js';
+
+const navLog  = createLogger('nav');
+const moveLog = createLogger('move');
 
 const DIRS = [
     { dx:  1, dy:  0, dir: 'right' },
@@ -350,7 +354,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
             // now wall off the goal the 'no path to' throw hands over to PddlMove.
             const stepKey = key(tx, ty);
             if (crateTiles.some(c => key(Math.round(c.x), Math.round(c.y)) === stepKey)) {
-                console.log(`[nav] crate sensed on planned step ${stepKey} — recomputing`);
+                navLog(`crate sensed on planned step ${stepKey} — recomputing`);
                 break;
             }
 
@@ -364,7 +368,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                 // `me` is updated (rounded) by the authoritative onYou event.
                 const ok = await waitForArrival(tx, ty);
                 const took = Date.now() - tStep;
-                console.log(`[move] ${dir} (${fromX},${fromY})→(${tx},${ty}) `
+                moveLog(`${dir} (${fromX},${fromY})→(${tx},${ty}) `
                     + `${ok ? 'arrived' : 'TIMEOUT'} in ${took}ms `
                     + `now raw=(${me.rawX},${me.rawY}) tile=(${me.x},${me.y})`);
 
@@ -376,7 +380,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                 const staleIdx = crateTiles.findIndex(c => key(Math.round(c.x), Math.round(c.y)) === movedKey);
                 if (staleIdx !== -1) {
                     crateTiles.splice(staleIdx, 1);
-                    console.log(`[nav] walked through ${movedKey} — removed stale crate entry`);
+                    navLog(`walked through ${movedKey} — removed stale crate entry`);
                 }
                 // Measure the real wall-clock cost of one successful tile, now
                 // including the arrival wait, so the scoring's decay rate reflects
@@ -391,7 +395,7 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                     goalBlockedCount++;
                     if (goalBlockedCount >= GOAL_BLOCKED_MAX_WAIT)
                         throw ['goal blocked', goal.x, goal.y];
-                    console.log(`[nav] goal ${bk} blocked — waiting (${goalBlockedCount}/${GOAL_BLOCKED_MAX_WAIT})`);
+                    navLog(`goal ${bk} blocked — waiting (${goalBlockedCount}/${GOAL_BLOCKED_MAX_WAIT})`);
                     await new Promise(r => setTimeout(r, GOAL_BLOCKED_WAIT_MS));
                 } else {
                     agentBlocked.add(bk);
@@ -403,9 +407,9 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                     if (isKnownCrateZone && !crateTiles.some(c => key(Math.round(c.x), Math.round(c.y)) === bk)) {
                         const [bx, by] = bk.split('_').map(Number);
                         crateTiles.push({ x: bx, y: by });
-                        console.log(`[nav] inferred crate at ${bk} — crateTiles: ${crateTiles.length}`);
+                        navLog(`inferred crate at ${bk} — crateTiles: ${crateTiles.length}`);
                     } else {
-                        console.log(`[nav] blocked at ${bk} — recomputing path`);
+                        navLog(`blocked at ${bk} — recomputing path`);
                     }
                 }
                 break;

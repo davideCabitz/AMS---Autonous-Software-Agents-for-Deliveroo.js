@@ -7,6 +7,9 @@ import { StrategyLookAhead }           from './StrategyLookAhead.js';
 import { StrategyLookAheadStochastic } from './StrategyLookAheadStochastic.js';
 import { StrategySingleParcel }        from './StrategySingleParcel.js';
 import { buildSpawnerGroups }          from '../beliefs/SpawnerGroups.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('strategy');
 
 // Other strategies are kept available for manual selection / future auto-rules.
 export { StrategySimple }       from './StrategySimple.js';
@@ -30,20 +33,20 @@ const HURRY_SPAWNER_RATIO = 0.5;
 export function selectStrategy() {
     const blind = OBSERVATION_DISTANCE >= -1 && OBSERVATION_DISTANCE <= 1;
     if (blind) {
-        console.log(`[strategy] OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} → StrategyBlind`);
+        log(`OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} → StrategyBlind`);
         return new StrategyBlind();
     }
 
     // Single spawner: camp on it and react instantly when a parcel appears.
     if (spawnerTiles.length === 1) {
         parcels.enableMemory(DECAY_INTERVAL_MS);
-        console.log(`[strategy] single spawner → StrategySingleParcel`);
+        log(`single spawner → StrategySingleParcel`);
         return new StrategySingleParcel();
     }
 
     const spawnerRatio = walkableTiles.length > 0 ? spawnerTiles.length / walkableTiles.length : 0;
     if (spawnerRatio > HURRY_SPAWNER_RATIO) {
-        console.log(`[strategy] spawnerRatio=${spawnerRatio.toFixed(2)} > ${HURRY_SPAWNER_RATIO} → StrategyHurry`);
+        log(`spawnerRatio=${spawnerRatio.toFixed(2)} > ${HURRY_SPAWNER_RATIO} → StrategyHurry`);
         return new StrategyHurry();
     }
 
@@ -57,12 +60,12 @@ export function selectStrategy() {
     if (process.env.EXPLORE_MODE === 'stochastic') {
         const groups = buildSpawnerGroups(spawnerTiles, 2);
         if (groups.length >= 3) {
-            console.log(`[strategy] EXPLORE_MODE=stochastic, ${groups.length} groups → StrategyLookAheadStochastic`);
+            log(`EXPLORE_MODE=stochastic, ${groups.length} groups → StrategyLookAheadStochastic`);
             return new StrategyLookAheadStochastic();
         }
-        console.log(`[strategy] EXPLORE_MODE=stochastic but only ${groups.length} group(s) — falling back to StrategyLookAhead`);
+        log(`EXPLORE_MODE=stochastic but only ${groups.length} group(s) — falling back to StrategyLookAhead`);
     }
 
-    console.log(`[strategy] OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} spawnerRatio=${spawnerRatio.toFixed(2)} → StrategyLookAhead`);
+    log(`OBSERVATION_DISTANCE=${OBSERVATION_DISTANCE} spawnerRatio=${spawnerRatio.toFixed(2)} → StrategyLookAhead`);
     return new StrategyLookAhead();
 }

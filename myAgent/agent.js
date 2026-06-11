@@ -2,6 +2,9 @@ import { socket, me, parcels, directive } from './context.js';
 import { IntentionRevisionReplace }   from './intentions/IntentionRevisionReplace.js';
 import { selectStrategy }             from './strategies/selectStrategy.js';
 import { registerLlm }                from './llm/index.js';
+import { createLogger } from './utils/logger.js';
+
+const log = createLogger('llm');
 
 const myAgent = new IntentionRevisionReplace();
 
@@ -44,7 +47,7 @@ socket.onSensing(sensing => {
 if (process.env.LITELLM_API_KEY) {
     registerLlm(myAgent, { resumeAutonomy: optionsGeneration });
 } else {
-    console.log('[llm] LITELLM_API_KEY not set — running BDI only, no chat command layer.');
+    log('LITELLM_API_KEY not set — running BDI only, no chat command layer.');
 }
 
 myAgent.loop();

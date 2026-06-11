@@ -1,4 +1,8 @@
 import { socket, me, directive } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log     = createLogger('llm');
+const chatLog = createLogger('llm:chat');
 import { runDirective, runConversation, classifyDirective } from './commandLoop.js';
 
 /** Resolves once the agent is authenticated (id + position known), so a
@@ -36,10 +40,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     const histories = new Map();            // sender key -> [{role,content}, ...]
 
     const sendReply = async (key, sender, answer) => {
-        console.log(`[llm] reply -> ${key}: ${answer}`);
+        log(`reply -> ${key}: ${answer}`);
         if (sender) {
             try { await socket.emitSay(sender, answer); }
-            catch (err) { console.error('[llm] emitSay failed:', err?.message ?? err); }
+            catch (err) { log.error('emitSay failed:', err?.message ?? err); }
         }
     };
 
@@ -84,7 +88,7 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
                     await sendReply(key, replySender, answer);
                 } else {
                     await whenReady();         // don't act before beliefs are populated
-                    console.log(`[llm] directive from ${key}: ${objective}`);
+                    log(`directive from ${key}: ${objective}`);
                     try {
                         answer = await runDirective(objective, myAgent, replySender, resumeAutonomy, histories.get(key) ?? []);
                     } catch (err) {
@@ -108,7 +112,7 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     //     CONCURRENTLY with an action directive (answers questions without waiting). ---
     async function handleChat(text, sender) {
         const key = sender ?? 'console';
-        console.log(`[llm:chat] message from ${key}: ${text}`);
+        chatLog(`message from ${key}: ${text}`);
         let answer;
         try {
             answer = await runConversation(text, histories.get(key) ?? []);
@@ -130,7 +134,7 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         if (ABORT_KEYWORDS.has(lower)) {
             const reply = abortCurrent();
             const key = sender ?? 'console';
-            console.log(`[llm] abort triggered by ${key}`);
+            log(`abort triggered by ${key}`);
             await sendReply(key, sender, reply);
             return;
         }
@@ -160,5 +164,5 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     process.stdin.on('data', chunk => {
         for (const line of String(chunk).split('\n')) route(line, null);
     });
-    console.log(`[llm] command layer ready — ${process.stdin.isTTY ? 'type a directive and press enter' : 'pipe a directive via stdin'} (or message the agent in chat).`);
+    log(`command layer ready — ${process.stdin.isTTY ? 'type a directive and press enter' : 'pipe a directive via stdin'} (or message the agent in chat).`);
 }

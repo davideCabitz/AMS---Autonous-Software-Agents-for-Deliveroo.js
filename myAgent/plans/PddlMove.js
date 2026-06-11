@@ -4,6 +4,10 @@ import { fileURLToPath } from 'url';
 import { onlineSolver }   from '@unitn-asa/pddl-client';
 
 import { PlanBase } from './PlanBase.js';
+import { createLogger } from '../utils/logger.js';
+
+const log     = createLogger('pddl');
+const moveLog = createLogger('move:pddl');
 import {
     me, socket, parcels, beliefset, mapHasCrates, pddl, moveTiming,
     crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
@@ -83,7 +87,7 @@ export class PddlMove extends PlanBase {
 
             if (!blocked) throw ['pddl-plan-incomplete'];
 
-            console.log('[pddl] route blocked mid-plan — replanning from current state');
+            log('route blocked mid-plan — replanning from current state');
         }
 
         throw ['pddl-too-many-replans'];
@@ -128,7 +132,7 @@ export class PddlMove extends PlanBase {
             // the push action works by walking INTO the crate tile.
             const nextKey = rawKey(tx, ty);
             if (!isPush && crateTiles.some(c => rawKey(c.x, c.y) === nextKey)) {
-                console.log(`[pddl] crate now on planned tile ${nextKey} — replanning`);
+                log(`crate now on planned tile ${nextKey} — replanning`);
                 return true;
             }
 
@@ -140,7 +144,7 @@ export class PddlMove extends PlanBase {
             // ack fires mid-transition, so continuing immediately overlaps moves
             // and drifts diagonally. `me` is updated (rounded) by onYou.
             const ok = await waitForArrival(tx, ty);
-            console.log(`[move:pddl] ${dir}${isPush ? '(push)' : ''} `
+            moveLog(`${dir}${isPush ? '(push)' : ''} `
                 + `(${fromX},${fromY})→(${tx},${ty}) ${ok ? 'arrived' : 'TIMEOUT'} `
                 + `in ${Date.now() - tStep}ms now raw=(${me.rawX},${me.rawY}) tile=(${me.x},${me.y})`);
 
@@ -150,7 +154,7 @@ export class PddlMove extends PlanBase {
             const staleIdx = crateTiles.findIndex(c => ck(c.x, c.y) === movedKey);
             if (staleIdx !== -1) {
                 crateTiles.splice(staleIdx, 1);
-                console.log(`[pddl] cleared old crate at ${movedKey}`);
+                log(`cleared old crate at ${movedKey}`);
             }
 
             // Track where the crate landed after a push.
@@ -158,7 +162,7 @@ export class PddlMove extends PlanBase {
                 const nk = ck(newCrateTile.x, newCrateTile.y);
                 if (!crateTiles.some(c => ck(c.x, c.y) === nk)) {
                     crateTiles.push(newCrateTile);
-                    console.log(`[pddl] crate pushed to ${nk} — crateTiles: ${crateTiles.length}`);
+                    log(`crate pushed to ${nk} — crateTiles: ${crateTiles.length}`);
                 }
             }
 
@@ -173,7 +177,7 @@ export class PddlMove extends PlanBase {
                     const picked = await socket.emitPickup();
                     if (picked?.length > 0) {
                         for (const pp of picked) parcels.setCarriedBy(pp.id, me.id);
-                        console.log(`[pddl] opportunistic pickup [${picked.map(p => p.id).join(',')}] at ${movedKey}`);
+                        log(`opportunistic pickup [${picked.map(p => p.id).join(',')}] at ${movedKey}`);
                     }
                 }
             }
@@ -214,10 +218,10 @@ export class PddlMove extends PlanBase {
         }
 
         const freePushable = [...crateZoneSet].filter(k => !crateSet.has(k));
-        console.log(`[pddl] crates: [${[...crateSet].join(', ')}]`);
-        console.log(`[pddl] crate zones (pushable): [${[...crateZoneSet].join(', ')}]`);
-        console.log(`[pddl] free pushable targets: [${freePushable.join(', ')}]`);
-        console.log(`[pddl] goal: ${goalTile} | me: ${myTile}`);
+        log(`crates: [${[...crateSet].join(', ')}]`);
+        log(`crate zones (pushable): [${[...crateZoneSet].join(', ')}]`);
+        log(`free pushable targets: [${freePushable.join(', ')}]`);
+        log(`goal: ${goalTile} | me: ${myTile}`);
 
         const objects = `me ${crateObjects.join(' ')} ${beliefset.objects.join(' ')}`.trim();
         const init = [

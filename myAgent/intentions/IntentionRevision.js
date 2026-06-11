@@ -1,11 +1,14 @@
 import { parcels } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('agent');
 
 export class IntentionRevision {
     #queue = [];
 
     get intention_queue() { return this.#queue; }
 
-    log(...args) { console.log('[agent]', ...args); }
+    log(...args) { log(...args); }
 
     async loop() {
         while (true) {

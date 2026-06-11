@@ -1,5 +1,8 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
 import { me, spawnerTiles } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('single-parcel');
 
 /**
  * Strategy for maps with exactly one parcel spawner.
@@ -39,7 +42,7 @@ export class StrategySingleParcel extends StrategyLookAhead {
             return null;
         }
 
-        console.log(`[single-parcel] → heading to spawner (${spawner.x},${spawner.y})`);
+        log(`→ heading to spawner (${spawner.x},${spawner.y})`);
         return ['go_explore', spawner.x, spawner.y];
     }
 }

@@ -1,6 +1,9 @@
 import { StrategyGreedy } from './StrategyGreedy.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
 import { me, parcels, CARRYING_CAPACITY } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('memory');
 
 /**
  * Extends StrategyGreedy with a persistent parcel memory: high-value parcels that
@@ -55,7 +58,7 @@ export class StrategyMemory extends StrategyGreedy {
             if (!this.atCapacity() && worthwhile.length > 0) {
                 const { p } = worthwhile[0];
                 const tag = parcels.get(p.id) ? 'live' : 'remembered';
-                console.log(`[memory] → multi-pickup (${tag}) ${this.pickupDebug(p)}`);
+                log(`→ multi-pickup (${tag}) ${this.pickupDebug(p)}`);
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
@@ -64,10 +67,10 @@ export class StrategyMemory extends StrategyGreedy {
                 return null;
             const target = this.nearestEscapableDelivery();
             if (target) {
-                console.log(`[memory] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
+                log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
-            console.log('[memory] no reachable delivery — repositioning');
+            log('no reachable delivery — repositioning');
         }
 
         // Empty-hand: best from full merged pool.
@@ -80,7 +83,7 @@ export class StrategyMemory extends StrategyGreedy {
         if (best) {
             if (this.#shouldKeepWithMemory(currentIntent, best)) return null;
             const tag = parcels.get(best.p.id) ? 'live' : 'remembered';
-            console.log(`[memory] → go_pick_up (${tag}) ${this.pickupDebug(best.p)}`);
+            log(`→ go_pick_up (${tag}) ${this.pickupDebug(best.p)}`);
             return ['go_pick_up', best.p.x, best.p.y, best.p.id];
         }
 

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
+import { createLogger } from '../utils/logger.js';
 
 /*
  * Thin wrapper over the OpenAI-compatible LiteLLM endpoint (faculty proxy).
@@ -15,6 +16,7 @@ export const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 const FALLBACK_MODEL = process.env.LOCAL_MODEL_FALLBACK || '';
 
 const client = new OpenAI({ baseURL, apiKey });
+const log = createLogger('llm');
 
 /** True for Azure OpenAI's content-management-policy 400 (a flaky false-positive,
  *  NOT a connection/VPN error — those are left to surface unchanged). */
@@ -40,13 +42,13 @@ export async function callModel(messages, { temperature = 0 } = {}) {
         return await complete(MODEL);
     } catch (err) {
         if (!isContentPolicy(err)) throw err;
-        console.warn('[llm] content-policy 400 — retrying once...');
+        log.warn('content-policy 400 — retrying once...');
         try {
             return await complete(MODEL);
         } catch (err2) {
             if (!isContentPolicy(err2)) throw err2;
             if (FALLBACK_MODEL && FALLBACK_MODEL !== MODEL) {
-                console.warn(`[llm] content-policy persisted — falling back to ${FALLBACK_MODEL}`);
+                log.warn(`content-policy persisted — falling back to ${FALLBACK_MODEL}`);
                 return await complete(FALLBACK_MODEL);
             }
             throw err2;

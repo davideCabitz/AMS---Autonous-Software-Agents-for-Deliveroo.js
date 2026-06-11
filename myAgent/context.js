@@ -5,6 +5,12 @@ import { Me }          from './beliefs/Me.js';
 import { Parcels }     from './beliefs/Parcels.js';
 import { isDirectional } from './utils/directions.js';
 import { tilesThatReach } from './utils/astar.js';
+import { createLogger } from './utils/logger.js';
+
+const configLog  = createLogger('config');
+const mapLog     = createLogger('map');
+const crateLog   = createLogger('crate');
+const sensingLog = createLogger('sensing');
 
 export const socket  = DjsConnect();
 export const me      = new Me();
@@ -116,7 +122,7 @@ export const moveTiming = {
 
 socket.onConfig(config => {
     // Dump the raw config once so the exact runtime shape is visible in the log.
-    console.log('[config] raw:', JSON.stringify(config));
+    configLog('raw:', JSON.stringify(config));
 
     // The config has been seen in two shapes depending on SDK/server version:
     // nested under GAME (config.GAME.player.*) or flat at the root (config.player.*).
@@ -138,11 +144,11 @@ socket.onConfig(config => {
     // changes; it re-converges to the real per-tile cost as the agent moves.
     moveTiming.msPerTile   = MOVEMENT_DURATION;
 
-    console.log(`[config] obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY}`);
+    configLog(`obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY}`);
 });
 
 socket.onMap((_w, _h, tiles) => {
-    console.log('[map] sample tile:', JSON.stringify(tiles[0]));
+    mapLog('sample tile:', JSON.stringify(tiles[0]));
 
     deliveryTiles.length = 0;
     deliveryTiles.push(...tiles.filter(t =>
@@ -161,7 +167,7 @@ socket.onMap((_w, _h, tiles) => {
         t.crateSpawner || t.type === '5!' || t.type === '5' || t.type === 5
     ));
     mapHasCrates = crateSpawnerTiles.length > 0;
-    console.log(`[map] mapHasCrates=${mapHasCrates} (${crateSpawnerTiles.length} crate tiles)`);
+    mapLog(`mapHasCrates=${mapHasCrates} (${crateSpawnerTiles.length} crate tiles)`);
 
     // Seed live crate positions from the '5!' spawner tiles: they start the game
     // with a crate on them. Without this the agent believes far-away spawner
@@ -174,7 +180,7 @@ socket.onMap((_w, _h, tiles) => {
         .filter(t => t.crateSpawner || t.type === '5!')
         .map(t => ({ x: t.x, y: t.y })));
     if (crateTiles.length > 0)
-        console.log(`[map] seeded ${crateTiles.length} crates from '5!' spawners: [${crateTiles.map(c => `${c.x}_${c.y}`).join(', ')}]`);
+        mapLog(`seeded ${crateTiles.length} crates from '5!' spawners: [${crateTiles.map(c => `${c.x}_${c.y}`).join(', ')}]`);
 
     walkableTiles.length = 0;
     walkableTiles.push(...tiles.filter(t => {
@@ -189,7 +195,7 @@ socket.onMap((_w, _h, tiles) => {
     for (const t of walkableTiles)
         if (isDirectional(t.type)) directionalTiles.set(`${t.x}_${t.y}`, t.type);
 
-    console.log(`[map] delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length} | directional: ${directionalTiles.size}`);
+    mapLog(`delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length} | directional: ${directionalTiles.size}`);
 
     // We build the beliefeset for the PDDL solver for now. Must be updated on each map event since the solver doesn't have direct access to the map data structure.
     beliefset = new Beliefset();
@@ -208,7 +214,7 @@ socket.onMap((_w, _h, tiles) => {
         if (walkSet.has(`${x}_${y - 1}`))         beliefset.declare(`down ${t} t${x}_${y - 1}`);
     }
 
-    console.log(`[map] beliefset: ${beliefset.objects.length} objects`);
+    mapLog(`beliefset: ${beliefset.objects.length} objects`);
 
     // Trap avoidance (directional mazes): find the sustainable pick-up→deliver
     // region via a greatest fixpoint — keep only deliveries that can still reach a
@@ -240,11 +246,11 @@ socket.on('crate', (action, { x, y }) => {
     if (action === 'create') {
         if (!crateTiles.some(c => Math.round(c.x) === rx && Math.round(c.y) === ry))
             crateTiles.push({ x: rx, y: ry });
-        console.log(`[crate] appeared at ${rx}_${ry} | total: ${crateTiles.length}`);
+        crateLog(`appeared at ${rx}_${ry} | total: ${crateTiles.length}`);
     } else if (action === 'dispose') {
         const idx = crateTiles.findIndex(c => Math.round(c.x) === rx && Math.round(c.y) === ry);
         if (idx !== -1) crateTiles.splice(idx, 1);
-        console.log(`[crate] removed at ${rx}_${ry} | total: ${crateTiles.length}`);
+        crateLog(`removed at ${rx}_${ry} | total: ${crateTiles.length}`);
     }
 });
 
@@ -258,13 +264,13 @@ socket.onSensing(sensing => {
         otherAgents.push({ x: Math.round(a.x), y: Math.round(a.y) });
     }
     if (otherAgents.length)
-        console.log(`[sensing] agents: ${otherAgents.length} at [${otherAgents.map(a => `${a.x},${a.y}`).join(' ')}]`);
+        sensingLog(`agents: ${otherAgents.length} at [${otherAgents.map(a => `${a.x},${a.y}`).join(' ')}]`);
 
-    if (sensing.crates?.length) console.log('[sensing] crates in range:', JSON.stringify(sensing.crates));
+    if (sensing.crates?.length) sensingLog('crates in range:', JSON.stringify(sensing.crates));
     if (!mapHasCrates) {
         if (sensing.crates?.length > 0) {
             mapHasCrates = true;
-            console.log('[sensing] crates detected via sensing — enabling crate mode');
+            sensingLog('crates detected via sensing — enabling crate mode');
         } else return;
     }
     if (!sensing.crates?.length) return;

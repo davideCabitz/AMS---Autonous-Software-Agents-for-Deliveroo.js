@@ -1,5 +1,8 @@
 import { Strategy } from './Strategy.js';
 import { me, parcels } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('simple');
 
 /**
  * Simple strategy: deliver as soon as carrying anything; otherwise pick the best
@@ -12,7 +15,7 @@ export class StrategySimple extends Strategy {
         if (carrying.length > 0) {
             const target = this.nearestDelivery();
             if (target) {
-                console.log(`[simple] → go_deliver to ${target.x},${target.y}`);
+                log(`→ go_deliver to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
         }
@@ -22,7 +25,7 @@ export class StrategySimple extends Strategy {
             .sort((a, b) => b.score - a.score)[0];
 
         if (best) {
-            console.log(`[simple] → go_pick_up ${best.id} score:${best.score.toFixed(2)}`);
+            log(`→ go_pick_up ${best.id} score:${best.score.toFixed(2)}`);
             return ['go_pick_up', best.x, best.y, best.id];
         }
 

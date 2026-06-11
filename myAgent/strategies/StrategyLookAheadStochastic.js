@@ -5,6 +5,9 @@ import {
     OBSERVATION_DISTANCE, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('stochastic');
 
 // Max Euclidean distance (tiles) for two spawners to be considered neighbours.
 // 1 = only directly adjacent (touching) spawners merge — prevents false chaining
@@ -59,8 +62,8 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
         if (this.#groups !== null) return;
         if (spawnerTiles.length === 0) { this.#groups = []; return; }
         this.#groups = buildSpawnerGroups(spawnerTiles, D_CLUSTER);
-        console.log(
-            `[stochastic] built ${this.#groups.length} group(s) from ` +
+        log(
+            `built ${this.#groups.length} group(s) from ` +
             `${spawnerTiles.length} spawner tiles: ` +
             this.#groups
                 .map((g, i) => `G${i}[${g.map(t => `${t.x},${t.y}`).join(' ')}]`)
@@ -147,7 +150,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
         if (activeGroups.length === 1) {
             const target = this.#bestCoverageTarget(activeGroups[0]);
             this.#commitTarget(target);
-            console.log(`[stochastic] single active group → (${target.x},${target.y})`);
+            log(`single active group → (${target.x},${target.y})`);
             return ['go_explore', target.x, target.y];
         }
 
@@ -177,7 +180,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
             const recentCount = this.#recentChoices.filter(i => i === g.idx).length;
             return `G${g.idx}(d=${g.dist} r=${recentCount} p=${(weights[j] / totalWeight * 100).toFixed(1)}%)`;
         }).join(' ');
-        console.log(`[stochastic] ${diag} → G${chosen.idx} coverage=(${target.x},${target.y})`);
+        log(`${diag} → G${chosen.idx} coverage=(${target.x},${target.y})`);
 
         this.#commitTarget(target);
         this.#recentChoices.push(chosen.idx);
@@ -242,7 +245,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
         for (const { t, covered } of scored.slice(0, TOP_K)) {
             if (this.isReachable(t)) {
                 if (covered < spawners.length) {
-                    console.log(`[stochastic] partial coverage: ${covered}/${spawners.length} spawners from (${t.x},${t.y})`);
+                    log(`partial coverage: ${covered}/${spawners.length} spawners from (${t.x},${t.y})`);
                 }
                 return t;
             }

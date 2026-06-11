@@ -1,6 +1,9 @@
 import { StrategyMemory } from './StrategyMemory.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
 import { me, parcels, CARRYING_CAPACITY } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('lookahead');
 
 // Value band for the look-ahead decisions, in reward points:
 //  - the paired tour must beat taking the greedy parcel solo by ≥ this to bother
@@ -83,10 +86,10 @@ export class StrategyLookAhead extends StrategyMemory {
                 return null;
             const target = this.nearestEscapableDelivery();
             if (target) {
-                console.log(`[lookahead] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
+                log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
-            console.log('[lookahead] no reachable delivery — repositioning');
+            log('no reachable delivery — repositioning');
         }
 
         // Empty-hand: rank by the standard cost function, then look ahead.
@@ -205,13 +208,13 @@ export class StrategyLookAhead extends StrategyMemory {
     #logChoice(label, choice) {
         if (choice.via === 'lookahead') {
             const { d1, d2, d3 } = choice.legs;
-            console.log(`[lookahead] → ${label} detour first=${choice.p.id} (r=${choice.p.reward}) `
+            log(`→ ${label} detour first=${choice.p.id} (r=${choice.p.reward}) `
                 + `then=${choice.second.id} (r=${choice.second.reward}) `
                 + `d(me→near)=${d1} d(near→greedy)=${d2} d(greedy→delivery)=${d3} `
                 + `chainValue=${choice.value.toFixed(1)}`);
         } else {
             const tag = parcels.get(choice.p.id) ? 'live' : 'remembered';
-            console.log(`[lookahead] → ${label} (${tag}) ${this.pickupDebug(choice.p)}`);
+            log(`→ ${label} (${tag}) ${this.pickupDebug(choice.p)}`);
         }
     }
 }

@@ -1,6 +1,9 @@
 import { Strategy, MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
 import { me, parcels, spawnerTiles, OBSERVATION_DISTANCE } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('not-too-greedy');
 
 // extra tiles beyond OBSERVATION_DISTANCE within which a nearby unseen spawner triggers a detour
 const DETOUR_SPAWNER_MAX_DIST = 5;
@@ -37,7 +40,7 @@ export class StrategyNotTooGreedy extends Strategy {
             // Only consider another pickup if there's still room to carry it.
             if (!this.atCapacity() && worthwhileInRange.length > 0) {
                 const { p } = worthwhileInRange[0];
-                console.log(`[not-too-greedy] → multi-pickup ${this.pickupDebug(p)}`);
+                log(`→ multi-pickup ${this.pickupDebug(p)}`);
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
@@ -53,7 +56,7 @@ export class StrategyNotTooGreedy extends Strategy {
 
                 if (nearbyUnseenSpawner) {
                     this.#detourDone = true;
-                    console.log(`[not-too-greedy] → detour to nearby spawner ${nearbyUnseenSpawner.x},${nearbyUnseenSpawner.y} dist:${distance(me, nearbyUnseenSpawner).toFixed(1)}`);
+                    log(`→ detour to nearby spawner ${nearbyUnseenSpawner.x},${nearbyUnseenSpawner.y} dist:${distance(me, nearbyUnseenSpawner).toFixed(1)}`);
                     return ['go_explore', nearbyUnseenSpawner.x, nearbyUnseenSpawner.y];
                 }
             }
@@ -63,12 +66,12 @@ export class StrategyNotTooGreedy extends Strategy {
 
             const target = this.nearestEscapableDelivery();
             if (target) {
-                console.log(`[not-too-greedy] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
+                log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
             // No delivery currently reachable — fall through to explore/idle to
             // reposition until a path opens, instead of spinning on a blocked tile.
-            console.log('[not-too-greedy] no reachable delivery — repositioning');
+            log('no reachable delivery — repositioning');
         }
 
         const best = parcels.free()
@@ -80,7 +83,7 @@ export class StrategyNotTooGreedy extends Strategy {
         if (best) {
             // Hysteresis: keep heading to the current target unless clearly beaten.
             if (this.shouldKeepCurrentPickup(currentIntent, best)) return null;
-            console.log(`[not-too-greedy] → go_pick_up ${this.pickupDebug(best.p)}`);
+            log(`→ go_pick_up ${this.pickupDebug(best.p)}`);
             return ['go_pick_up', best.p.x, best.p.y, best.p.id];
         }
 

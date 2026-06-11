@@ -6,6 +6,11 @@ import {
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { findRoute, pushAwareCost } from '../utils/astar.js';
+import { createLogger } from '../utils/logger.js';
+
+const exploreLog  = createLogger('explore');
+const deliveryLog = createLogger('delivery');
+const pathlenLog  = createLogger('pathlen');
 
 export const MIN_DELIVERY_REWARD = 5;
 // Max extra tiles tolerated when choosing an alternative to the excluded spawner.
@@ -104,7 +109,7 @@ export class Strategy {
             .filter(({ len }) => Number.isFinite(len))
             .sort((a, b) => a.len - b.len);
         if (crateTiles.length > 0)
-            console.log(`[delivery] candidates from (${Math.round(from.x)},${Math.round(from.y)}): `
+            deliveryLog(`candidates from (${Math.round(from.x)},${Math.round(from.y)}): `
                 + reachable.map(({ d, len }) => `(${d.x},${d.y})=${len}${usableDeliverySet.has(`${d.x}_${d.y}`) ? '' : '·unusable'}`).join(' '));
         if (reachable.length === 0) return undefined;
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
@@ -162,7 +167,7 @@ export class Strategy {
 
         // All routes blocked by crates — target needs PDDL. Push-aware cost.
         const cost = pushAwareCost(from, to, crateSet, avoid);
-        console.log(`[pathlen] (${Math.round(from.x)},${Math.round(from.y)})→(${Math.round(to.x)},${Math.round(to.y)}) push-aware cost=${cost}`);
+        pathlenLog(`(${Math.round(from.x)},${Math.round(from.y)})→(${Math.round(to.x)},${Math.round(to.y)}) push-aware cost=${cost}`);
         return cost;
     }
 
@@ -348,7 +353,7 @@ export class Strategy {
         if (this._prevExploreKey) {
             const without = baseCandidates.filter(t => `${t.x}_${t.y}` !== this._prevExploreKey);
             if (without.length === 0) {
-                console.log(`[explore] prev=${this._prevExploreKey} is only option — forced revisit`);
+                exploreLog(`prev=${this._prevExploreKey} is only option — forced revisit`);
             } else {
                 const prevTile    = baseCandidates.find(t => `${t.x}_${t.y}` === this._prevExploreKey);
                 const prevLen     = prevTile ? this.pathLen(me, prevTile) : Infinity;
@@ -356,7 +361,7 @@ export class Strategy {
                 if (nearestAlt <= prevLen + EXPLORE_NEARBY_MARGIN) {
                     finalCandidates = without;
                 } else {
-                    console.log(`[explore] skip-exclude ${this._prevExploreKey}: nearest alt ${nearestAlt} vs ${prevLen} (+${nearestAlt - prevLen} > margin ${EXPLORE_NEARBY_MARGIN})`);
+                    exploreLog(`skip-exclude ${this._prevExploreKey}: nearest alt ${nearestAlt} vs ${prevLen} (+${nearestAlt - prevLen} > margin ${EXPLORE_NEARBY_MARGIN})`);
                 }
             }
         }
@@ -369,9 +374,9 @@ export class Strategy {
             const tied = sorted.filter(t => this.pathLen(me, t) === shortestLen);
             if (tied.length > 1) {
                 const tiedStr = tied.map(t => `(${t.x},${t.y})`).join(', ');
-                console.log(`[explore] tie: ${tied.length} at pathLen=${shortestLen} — ${tiedStr} — picking (${target.x},${target.y}), prev-excluded=${this._prevExploreKey ?? 'none'}`);
+                exploreLog(`tie: ${tied.length} at pathLen=${shortestLen} — ${tiedStr} — picking (${target.x},${target.y}), prev-excluded=${this._prevExploreKey ?? 'none'}`);
             }
-            console.log(`[explore] → spawner (${target.x},${target.y}) pathLen:${shortestLen} prev=${this._prevExploreKey ?? 'none'} last=${this._lastExploreKey ?? 'none'}`);
+            exploreLog(`→ spawner (${target.x},${target.y}) pathLen:${shortestLen} prev=${this._prevExploreKey ?? 'none'} last=${this._lastExploreKey ?? 'none'}`);
             // Slide window: current becomes previous, new target becomes current.
             this._prevExploreKey = this._lastExploreKey;
             this._lastExploreKey = key;

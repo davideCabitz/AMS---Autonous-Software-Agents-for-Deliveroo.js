@@ -1,6 +1,9 @@
 import { StrategyGreedy } from './StrategyGreedy.js';
 import { me, spawnerTiles, walkableTiles, OBSERVATION_DISTANCE } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('hurry');
 
 // Give up the current frontier target if no progress for this long (blocked).
 const EXPLORE_STALL_MS     = 1500;
@@ -78,7 +81,7 @@ export class StrategyHurry extends StrategyGreedy {
             if (!observed && !stalled && !timedOut) return null; // keep heading to it
 
             if (stalled || timedOut) {
-                console.log(`[hurry] giving up target ${key} (${stalled ? 'stalled' : 'timeout'}) — re-selecting`);
+                log(`giving up target ${key} (${stalled ? 'stalled' : 'timeout'}) — re-selecting`);
                 this.#blacklist.set(key, now + EXPLORE_BLACKLIST_MS);
             }
             this.#commitKey = null;
@@ -117,7 +120,7 @@ export class StrategyHurry extends StrategyGreedy {
         if (target) {
             this.#commitKey   = `${target.x}_${target.y}`;
             this.#commitSince = now;
-            console.log(`[hurry] → go_explore ${target.x},${target.y} dist:${distance(me, target).toFixed(1)}`);
+            log(`→ go_explore ${target.x},${target.y} dist:${distance(me, target).toFixed(1)}`);
             return ['go_explore', target.x, target.y];
         }
         return null;

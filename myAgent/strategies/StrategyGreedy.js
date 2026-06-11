@@ -1,6 +1,9 @@
 import { Strategy, MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
 import { me, parcels, OBSERVATION_DISTANCE, missionConstraints } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('greedy');
 
 /**
  * Accumulate parcels still worth picking up within sensing range, then deliver
@@ -32,7 +35,7 @@ export class StrategyGreedy extends Strategy {
             // Only consider another pickup if there's still room to carry it.
             if (!this.atCapacity() && worthwhileInRange.length > 0) {
                 const { p } = worthwhileInRange[0];
-                console.log(`[greedy] → multi-pickup ${this.pickupDebug(p)}`);
+                log(`→ multi-pickup ${this.pickupDebug(p)}`);
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
@@ -46,15 +49,15 @@ export class StrategyGreedy extends Strategy {
                     return null;
                 const target = this.nearestEscapableDelivery();
                 if (target) {
-                    console.log(`[greedy] → go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
+                    log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                     return ['go_deliver', target.x, target.y];
                 }
                 // No delivery currently reachable (agents/crates wall every route). Fall
                 // through to explore/idle to reposition until a path opens, instead of
                 // committing to an unreachable delivery and spinning.
-                console.log('[greedy] no reachable delivery — repositioning');
+                log('no reachable delivery — repositioning');
             } else {
-                console.log(`[greedy] stack ${carrying.length}/${missionConstraints.requiredStackSize} — need more parcels`);
+                log(`stack ${carrying.length}/${missionConstraints.requiredStackSize} — need more parcels`);
             }
         }
 
@@ -68,7 +71,7 @@ export class StrategyGreedy extends Strategy {
         if (best) {
             // Hysteresis: keep heading to the current target unless clearly beaten.
             if (this.shouldKeepCurrentPickup(currentIntent, best)) return null;
-            console.log(`[greedy] → go_pick_up ${this.pickupDebug(best.p)}`);
+            log(`→ go_pick_up ${this.pickupDebug(best.p)}`);
             return ['go_pick_up', best.p.x, best.p.y, best.p.id];
         }
 

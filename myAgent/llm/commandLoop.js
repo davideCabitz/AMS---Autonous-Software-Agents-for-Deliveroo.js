@@ -2,6 +2,10 @@ import { callModel }                    from './llmClient.js';
 import { buildSystemPrompt, buildChatPrompt } from './prompt.js';
 import { buildTools, buildChatTools }   from './commandTools.js';
 import { directive }                    from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log     = createLogger('llm');
+const toolLog = createLogger('llm:tool');
 
 /*
  * Single ReAct execution loop for one chat directive (Step-7 style: one model
@@ -81,7 +85,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
             } catch (err) {
                 // A single API error (400 content filter, 500, network) must not
                 // crash the BDI agent — report it and end the directive.
-                console.error('[llm] callModel failed:', err?.message ?? err);
+                log.error('callModel failed:', err?.message ?? err);
                 return `Could not complete the directive — LLM error: ${err?.message ?? err}`;
             }
 
@@ -99,7 +103,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 const obs = fn
                     ? await fn(act.input === 'none' ? undefined : act.input)
                     : `Error: unknown tool '${act.action}'. Available: ${Object.keys(tools).join(', ')}`;
-                console.log(`[llm tool] ${act.action}(${act.input}) -> ${obs}`);
+                toolLog(`${act.action}(${act.input}) -> ${obs}`);
 
                 if (directive.aborted)
                     return 'Directive aborted by operator — agent back to autonomous BDI.';
@@ -193,7 +197,7 @@ export async function runConversation(message, history = []) {
             const obs = fn
                 ? await fn(act.input === 'none' ? undefined : act.input)
                 : `Error: '${act.action}' is not available here (this is a conversation — read-only). Available: ${Object.keys(tools).join(', ')}`;
-            console.log(`[llm:chat tool] ${act.action}(${act.input}) -> ${obs}`);
+            toolLog(`${act.action}(${act.input}) -> ${obs}`);
             messages.push({ role: 'user', content: `Observation: ${obs}\nNow answer with a Final Answer.` });
             continue;
         }

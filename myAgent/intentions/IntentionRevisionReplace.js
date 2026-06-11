@@ -1,6 +1,9 @@
 import { IntentionRevision } from './IntentionRevision.js';
 import { IntentionDeliberation } from './IntentionDeliberation.js';
 import { pddl } from '../context.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('intention');
 
 export class IntentionRevisionReplace extends IntentionRevision {
     async push(predicate) {
@@ -13,7 +16,7 @@ export class IntentionRevisionReplace extends IntentionRevision {
         // plan and the agent is executing it (pddl.busy), any new intention is queued
         // but the current plan runs to completion first.
         if (pddl.busy) {
-            console.log(`[intention] PDDL plan in progress — deferring: ${predicate.join(' ')}`);
+            log(`PDDL plan in progress — deferring: ${predicate.join(' ')}`);
             return;
         }
 

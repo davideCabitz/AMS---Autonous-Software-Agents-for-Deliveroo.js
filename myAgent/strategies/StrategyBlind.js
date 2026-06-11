@@ -1,6 +1,9 @@
 import { Strategy, MIN_DELIVERY_REWARD } from './Strategy.js';
 import { me, parcels, spawnerTiles, walkableTiles, missionConstraints } from '../context.js';
 import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('blind');
 
 // Re-evaluate the explore target at least this often, even while committed.
 const EXPLORE_COMMIT_MS    = 4000;
@@ -71,7 +74,7 @@ export class StrategyBlind extends Strategy {
             .sort((a, b) => b.value - a.value)[0];
         if (onTileParcel) {
             this.#commitKey = null;
-            console.log(`[blind] → go_pick_up ${onTileParcel.p.id} value:${onTileParcel.value.toFixed(1)} gain:${onTileParcel.gain.toFixed(1)}`);
+            log(`→ go_pick_up ${onTileParcel.p.id} value:${onTileParcel.value.toFixed(1)} gain:${onTileParcel.gain.toFixed(1)}`);
             return ['go_pick_up', onTileParcel.p.x, onTileParcel.p.y, onTileParcel.p.id];
         }
 
@@ -79,7 +82,7 @@ export class StrategyBlind extends Strategy {
             const target = this.nearestDelivery();
             if (target) {
                 this.#commitKey = null;
-                console.log(`[blind] → go_deliver to ${target.x},${target.y}`);
+                log(`→ go_deliver to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
         }
@@ -105,7 +108,7 @@ export class StrategyBlind extends Strategy {
                 const stalled  = now - this.#lastMoved   >= EXPLORE_STALL_MS;
                 if (!timedOut && !stalled) return null; // keep going
 
-                console.log(`[blind] giving up target ${key} (${stalled ? 'stalled' : 'timeout'}) — re-selecting`);
+                log(`giving up target ${key} (${stalled ? 'stalled' : 'timeout'}) — re-selecting`);
                 this.#blacklist.set(key, now + EXPLORE_BLACKLIST_MS);
                 this.#commitKey = null;
             }
@@ -125,7 +128,7 @@ export class StrategyBlind extends Strategy {
         if (target) {
             this.#commitKey   = `${target.x}_${target.y}`;
             this.#commitSince = now;
-            console.log(`[blind] → go_explore ${target.x},${target.y} dist:${distance(me, target)}`);
+            log(`→ go_explore ${target.x},${target.y} dist:${distance(me, target)}`);
             return ['go_explore', target.x, target.y];
         }
         return null;
