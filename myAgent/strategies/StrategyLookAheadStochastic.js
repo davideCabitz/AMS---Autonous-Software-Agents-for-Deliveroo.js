@@ -9,9 +9,7 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('stochastic');
 
-// Max Euclidean distance (tiles) for two spawners to be considered neighbours.
-// 1 = only directly adjacent (touching) spawners merge — prevents false chaining
-// on grid maps where spawners are 2 tiles apart in rows/columns.
+// Max walkable-path steps for two spawners to be considered neighbours.
 const D_CLUSTER  = 2;
 // Sliding window: how many past group choices to remember.
 const WINDOW_SIZE = 5;
@@ -61,7 +59,8 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
     #initGroups() {
         if (this.#groups !== null) return;
         if (spawnerTiles.length === 0) { this.#groups = []; return; }
-        this.#groups = buildSpawnerGroups(spawnerTiles, D_CLUSTER);
+        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+        this.#groups = buildSpawnerGroups(spawnerTiles, walkableSet, D_CLUSTER);
         log(
             `built ${this.#groups.length} group(s) from ` +
             `${spawnerTiles.length} spawner tiles: ` +

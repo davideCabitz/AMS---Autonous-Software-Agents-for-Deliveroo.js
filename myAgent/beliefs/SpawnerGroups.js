@@ -1,13 +1,17 @@
 /**
  * Spatial clustering of spawner tiles into groups.
  *
- * Two spawners belong to the same group when their Euclidean distance is
- * at or below dCluster. Transitive connections form the final groups, so a
- * "line" of adjacent spawners (each 1 tile from the next) becomes one group.
+ * Two spawners belong to the same group when there exists a walkable path of at
+ * most maxPathLen steps connecting them. Tiles separated only by a wall therefore
+ * end up in distinct groups even if their Euclidean distance is ≤ maxPathLen.
  *
  * Built once at map-load time — spawner positions are static.
+ *
+ * @param {Array<{x:number,y:number}>} tiles      - spawner tile list
+ * @param {Set<string>}               walkableSet - set of "x_y" walkable tile keys
+ * @param {number}                    maxPathLen  - max walkable steps to merge two spawners (default 2)
  */
-export function buildSpawnerGroups(tiles, dCluster = 2) {
+export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
     if (tiles.length === 0) return [];
 
     // Union-Find with path compression and union by rank.
@@ -27,11 +31,32 @@ export function buildSpawnerGroups(tiles, dCluster = 2) {
         else { parent[rb] = ra; rank[ra]++; }
     }
 
+    const DIRS = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
+
+    // BFS from tile t, expanding through walkableSet up to maxPathLen steps.
+    // Returns a Set of "x_y" keys reachable within that depth.
+    function reachableWithin(t) {
+        const seen  = new Map([[`${t.x}_${t.y}`, 0]]);
+        const queue = [{ x: t.x, y: t.y, d: 0 }];
+        let head = 0;
+        while (head < queue.length) {
+            const { x, y, d } = queue[head++];
+            if (d >= maxPathLen) continue;
+            for (const { dx, dy } of DIRS) {
+                const nx = x + dx, ny = y + dy, nk = `${nx}_${ny}`;
+                if (!seen.has(nk) && walkableSet.has(nk)) {
+                    seen.set(nk, d + 1);
+                    queue.push({ x: nx, y: ny, d: d + 1 });
+                }
+            }
+        }
+        return seen;
+    }
+
     for (let i = 0; i < tiles.length; i++) {
+        const reachable = reachableWithin(tiles[i]);
         for (let j = i + 1; j < tiles.length; j++) {
-            const dx = tiles[i].x - tiles[j].x;
-            const dy = tiles[i].y - tiles[j].y;
-            if (Math.sqrt(dx * dx + dy * dy) <= dCluster) union(i, j);
+            if (reachable.has(`${tiles[j].x}_${tiles[j].y}`)) union(i, j);
         }
     }
 

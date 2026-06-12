@@ -1,7 +1,7 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
 import {
-    me, parcels, spawnerTiles, deliveryTiles,
+    me, parcels, spawnerTiles, walkableTiles, deliveryTiles,
     OBSERVATION_DISTANCE, CARRYING_CAPACITY, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
@@ -9,7 +9,7 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('highcap');
 
-// Max Euclidean distance for two spawners to merge into one group (same value
+// Max walkable-path steps for two spawners to merge into one group (same value
 // the stochastic strategy uses, so group shapes match across strategies).
 const D_CLUSTER = 2;
 // Dry-spell timeout: with no eligible parcel sensed for this long, the agent
@@ -212,7 +212,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
             if (f.length > 0) pool = f;
         }
-        this.#groups = buildSpawnerGroups(pool, D_CLUSTER);
+        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+        this.#groups = buildSpawnerGroups(pool, walkableSet, D_CLUSTER);
         log(`built ${this.#groups.length} group(s) from ${pool.length} spawner tiles: `
             + this.#groups.map((g, i) => `G${i}(n=${g.length})`).join(' '));
     }

@@ -17,6 +17,8 @@ This document describes every strategy class used by the BDI agent, how each one
 9. [StrategyLookAhead](#9-strategylookahead)
 10. [StrategyLookAheadStochastic](#10-strategylookaheadstochastic)
 11. [StrategySingleParcel](#11-strategysingleparcel)
+12. [StrategyHighCapacity](#12-strategyhighcapacity)
+13. [StrategyHighCapacityRush](#13-strategyhighcapacityrush)
 
 ---
 
@@ -31,12 +33,16 @@ This document describes every strategy class used by the BDI agent, how each one
 | 1 | `OBSERVATION_DISTANCE` ∈ `[-1, 1]` (agent senses only its own tile) | `StrategyBlind` |
 | 2 | `spawnerTiles.length === 1` (single spawner) | `StrategySingleParcel` (also enables parcel memory) |
 | 3 | Spawner tiles > 50 % of all walkable tiles | `StrategyHurry` |
-| 4 | `EXPLORE_MODE=stochastic` env var **and** ≥ 3 spatial groups | `StrategyLookAheadStochastic` (also enables parcel memory) |
-| 5 | Otherwise (common case) | `StrategyLookAhead` (also enables parcel memory) |
+| 4 | `CARRYING_CAPACITY > 5` **and** `PARCEL_GENERATION_MS ≤ 1000` **and** `PARCELS_MAX ≥ 15` **and** largest group ≥ 5 spawners | `StrategyHighCapacityRush` (also enables parcel memory) |
+| 5 | `CARRYING_CAPACITY > 5` (finite) **and** largest group ≥ 3 spawners | `StrategyHighCapacity` (also enables parcel memory) |
+| 6 | ≥ 3 path-based spatial groups | `StrategyLookAheadStochastic` (also enables parcel memory) |
+| 7 | Otherwise (common case) | `StrategyLookAhead` (also enables parcel memory) |
 
 `StrategySimple`, `StrategyGreedy`, `StrategyNotTooGreedy`, and `StrategyMemory` are available but not auto-selected — manual use or experiments only.
 
-**Benchmark toggle:** `EXPLORE_MODE=stochastic node myAgent/agent.js` activates `StrategyLookAheadStochastic` on maps with enough spatial groups (≥ 3) for the probabilistic exploration to be meaningful. On stripe/grid maps with fewer groups the fallback to `StrategyLookAhead` is automatic.
+**Group density gates:** High-capacity strategies require the densest spawner cluster to meet a minimum size. If `maxGroupSize < 3` (all groups have 1–2 spawners) even a high-capacity agent falls through to stochastic/LookAhead, where probabilistic or deterministic exploration is more efficient than trying to farm a tiny cluster. The thresholds are `RUSH_MIN_GROUP_SIZE = 5` and `HC_MIN_GROUP_SIZE = 3`.
+
+**Path-based grouping:** Spawner groups are computed with BFS on the walkable grid (max 2 steps). Two spawners separated only by a wall are **never** merged even if their Euclidean distance is ≤ 2.
 
 ---
 
@@ -311,13 +317,13 @@ There is no geometric "on the way" gate. Under decay the longer-travel order is 
 
 **File:** `myAgent/strategies/StrategyLookAheadStochastic.js`  
 **Extends:** `StrategyLookAhead`  
-**Selected when:** `EXPLORE_MODE=stochastic` env var **and** ≥ 3 spatial groups
+**Selected when:** ≥ 3 path-based spatial groups (and no high-capacity condition applies)
 
 Identical to `StrategyLookAhead` in all pickup, delivery, memory and look-ahead logic. Only `exploreIfIdle()` is overridden with **probabilistic group-based exploration** to break the deterministic ping-pong loop that forms on maps with many spatially separate spawner clusters.
 
 ### Group formation
 
-Spawner tiles are clustered once (lazily on the first explore call) using **union-find** with Euclidean threshold `D_CLUSTER = 2` tiles. Two spawners ≤ 2 tiles apart end up in the same group (transitively). Groups are static — computed once from the immutable `spawnerTiles` list.
+Spawner tiles are clustered once (lazily on the first explore call) using **union-find** with walkable-path distance `D_CLUSTER = 2` steps. Two spawners reachable from each other in ≤ 2 walkable steps end up in the same group (transitively). Spawners separated only by a wall are never merged. Groups are static — computed once from the immutable `spawnerTiles` list.
 
 ### Probabilistic group selection
 
@@ -355,14 +361,9 @@ Within the chosen group, the agent navigates to the tile that **covers the most 
 | Mission zone constraint (`allowedSpawnerTiles`) | Applied before group filtering |
 | Stack-accumulation mission (`requiredStackSize`) | Current tile excluded from candidates |
 
-### Benchmark usage
+### Auto-selection note
 
-```
-EXPLORE_MODE=stochastic node myAgent/agent.js   # stochastic exploration
-node myAgent/agent.js                            # deterministic LookAhead
-```
-
-On maps where `buildSpawnerGroups` returns < 3 groups (stripe maps, grid maps with aligned rows), `selectStrategy` falls back to `StrategyLookAhead` automatically regardless of `EXPLORE_MODE`.
+`selectStrategy` chooses this strategy automatically when ≥ 3 path-based groups are found and no high-capacity condition applies. On maps with fewer groups (stripe maps, single dense cluster), it falls back to `StrategyLookAhead` automatically.
 
 ---
 
@@ -387,3 +388,97 @@ else                               →  go_explore to spawnerTiles[0]
 ### Why no timer
 
 No `tickIntervalMs` heartbeat is needed. The server fires `onSensing` the moment a parcel spawns on the agent's tile, which immediately triggers `optionsGeneration()` and the inherited `decide()` issues `go_pick_up`. The agent never misses a spawn event while camped.
+
+---
+
+## 12. StrategyHighCapacity
+
+**File:** `myAgent/strategies/StrategyHighCapacity.js`  
+**Extends:** `StrategyLookAhead`  
+**Selected when:** `CARRYING_CAPACITY > 5` (finite) **and** largest spawner group ≥ 3 cells
+
+Designed for maps where the agent can carry many parcels at once. Instead of delivering after every pickup, the agent farms a dense spawner cluster until its hold is full (or patience runs out), then banks everything in one trip. All pickup, delivery, memory and look-ahead logic is inherited from `StrategyLookAhead`; this strategy only overrides the top-level `decide()` and provides hook methods for the Rush subclass.
+
+### Phases
+
+The strategy cycles through three phases:
+
+| Phase | Trigger | Behaviour |
+|---|---|---|
+| `FARM` | On start, after delivery, after hop | Patrol waypoints of the selected group, picking up every positive-value parcel. |
+| `HOP` | `PATIENCE_MS` (3 s) with no eligible parcel sensed | Travel to the nearest reachable tile of the best neighbouring group, then return to FARM. |
+| `DELIVER` | Hold full (`_deliveryCap`) **or** parcel TTL risk | Navigate to nearest delivery tile. En-route detours allowed (see below). |
+
+### Group selection
+
+Groups are built once from `spawnerTiles` using path-based union-find (`D_CLUSTER = 2` walkable steps). The initial farm group is picked by `#selectFarmGroup()`: the group with the most spawner cells, breaking ties by A\* distance to the agent.
+
+### Patrol waypoints
+
+Within the farm group, the agent does not camp on a single tile. `#buildPatrol(group)` generates a cyclic waypoint loop around the group centroid, sorting candidate tiles by angle so the agent sweeps the whole cluster systematically. This ensures every spawner in the group gets observed on each pass.
+
+### Patience and hopping
+
+If `PATIENCE_MS` (3 000 ms) elapses with no parcel spawning in the current group, `#bestNeighbourGroup()` finds the next group ordered by spawner count (most cells first), weighted by A\* distance. The agent hops there and resumes farming. This prevents the agent from idling indefinitely on a dry cluster.
+
+### En-route detours during delivery
+
+While navigating to a delivery tile, the agent checks for two kinds of worthwhile detours if it still has spare capacity:
+
+1. **Parcel detour:** A live parcel within `DETOUR_MAX_TILES = 5` extra A\* steps and whose pickup gain exceeds the delivery opportunity cost.
+2. **Speculative group visit:** An unvisited spawner group within `DETOUR_MAX_TILES` extra steps that likely has parcels (visited within `GROUP_VISIT_TTL_MS = 30 s`).
+
+Detours are disabled when `_detoursEnabled = false` (overridden by Rush).
+
+### Hook methods (overridable by subclasses)
+
+| Hook | Default | Purpose |
+|---|---|---|
+| `_deliveryCap` | `CARRYING_CAPACITY` | Parcel count that triggers DELIVER phase. |
+| `_detoursEnabled` | `true` | Whether en-route detours are allowed. |
+| `_pickFarmTarget(groups)` | largest group by cell count | Choose the initial farm group. |
+| `_countsForPatience(parcel)` | any positive-value parcel | Whether a sensed parcel resets the patience timer. |
+
+`tickIntervalMs = 500` drives the patience timer between sensing events.
+
+### Edge-case handling
+
+| Situation | Behaviour |
+|---|---|
+| No reachable group | Falls back to `super.decide()` (LookAhead logic) |
+| All parcels in group below value threshold | Patience timer fires, agent hops |
+| Single group on map | No hopping; agent farms and delivers in place |
+| Mission zone constraint | `allowedSpawnerTiles` applied when building pool before grouping |
+
+---
+
+## 13. StrategyHighCapacityRush
+
+**File:** `myAgent/strategies/StrategyHighCapacityRush.js`  
+**Extends:** `StrategyHighCapacity`  
+**Selected when:** `CARRYING_CAPACITY > 5` **and** `PARCEL_GENERATION_MS ≤ 1000` **and** `PARCELS_MAX ≥ 15` **and** largest group ≥ 5 cells
+
+Optimised for **abundance maps**: high spawn rate, high population cap, large hold. On such maps parcels respawn so fast that detour overhead and partial deliveries reduce total score. The strategy fills the hold completely, then banks in a straight line with no detours.
+
+### Differences from StrategyHighCapacity
+
+| Aspect | StrategyHighCapacity | StrategyHighCapacityRush |
+|---|---|---|
+| `_deliveryCap` | `CARRYING_CAPACITY` | `Infinity` (fill completely; infinite capacity caps at 10) |
+| `_detoursEnabled` | `true` | `false` (no en-route detours, straight to delivery) |
+| `_pickFarmTarget` | largest group | same, but also checks abundance-map heuristics |
+| `_countsForPatience` | any positive parcel | only parcels meeting the quality bar (reward ≥ avg − margin) |
+
+### Quality bar
+
+On abundance maps parcels are plentiful, so the agent can afford to be selective. A parcel counts toward patience (keeping the agent on-farm) only when:
+
+```
+reward ≥ PARCEL_REWARD_AVG − RUSH_REWARD_MARGIN
+```
+
+If `PARCEL_REWARD_AVG > 30`, the minimum is raised to 20 regardless of the margin. This prevents low-value stragglers from delaying departure to a full-load bank run.
+
+### When to prefer StrategyHighCapacity instead
+
+`selectStrategy` prefers Rush only when the largest group has ≥ 5 spawner cells. On maps where all groups are small (2–4 cells), the hold can never be filled efficiently at one cluster, so the agent falls back to `StrategyHighCapacity` which uses patience-based delivery and inter-group hopping.
