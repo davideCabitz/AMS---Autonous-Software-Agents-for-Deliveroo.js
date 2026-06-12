@@ -75,6 +75,9 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     #wasAtFarm = false;
     /** Group indices already speculatively visited during the current delivery trip. */
     #visitedDetours = new Set();
+    /** Signature of the allowedSpawnerTiles constraint the groups were built
+     *  under — a restrict_exploration mission applied mid-run rebuilds them. */
+    #groupsSig = null;
 
     decide(currentIntent) {
         this.#initGroups();
@@ -95,13 +98,22 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const eligible = this.#eligibleParcels();
         if (eligible.some(p => this._countsForPatience(p))) this.#lastParcelTs = now;
 
-        if (carrying.length >= this._deliveryCap()) {
+        // Mission gates (LLM layer): maxBundleValue → single-parcel trips, so the
+        // hold is "full" at 1; requiredStackSize → never enter DELIVER before the
+        // stack is complete (stackReady), exactly like the other strategies.
+        const effectiveCap = this.singleParcelBundles() ? 1 : this._deliveryCap();
+        if (carrying.length >= effectiveCap && this.stackReady(carrying)) {
             this.#phase = 'deliver';
             return this.#deliver(currentIntent, false, false, eligible);
         }
 
         if (this.#phase === 'deliver')
-            return this.#deliver(currentIntent, this._opportunisticPickupEnabled(), this._detoursEnabled(), eligible);
+            return this.#deliver(
+                currentIntent,
+                this._opportunisticPickupEnabled() && !this.singleParcelBundles(),
+                this._detoursEnabled(),
+                eligible,
+            );
 
         // ── FARM: grab the next parcel (selection policy is a subclass hook) ──
         if (eligible.length > 0) {
@@ -185,7 +197,16 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── groups ───────────────────────────────────────────────────────────────
 
     #initGroups() {
-        if (this.#groups !== null) return;
+        // Rebuild whenever the allowedSpawnerTiles mission constraint changes
+        // (restrict_exploration can arrive mid-run), not just on first use.
+        const sig = missionConstraints.allowedSpawnerTiles?.size > 0
+            ? [...missionConstraints.allowedSpawnerTiles].sort().join('|')
+            : '';
+        if (this.#groups !== null && sig === this.#groupsSig) return;
+        this.#groupsSig = sig;
+        this.#farmIdx = null;
+        this.#patrolGroupIdx = null;
+        this.#visitedDetours.clear();
         let pool = spawnerTiles;
         if (missionConstraints.allowedSpawnerTiles?.size > 0) {
             const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
@@ -229,8 +250,14 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     #enRouteDelivery(farmTarget) {
         const directDist = this.pathLen(me, farmTarget);
         if (!Number.isFinite(directDist)) return null;
+        // allowedDeliveryTiles mission: only constraint-approved tiles qualify.
+        let tiles = deliveryTiles;
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) tiles = f;
+        }
         const candidates = [];
-        for (const d of deliveryTiles) {
+        for (const d of tiles) {
             const toD   = this.pathLen(me, d);
             const dFarm = this.pathLen(d, farmTarget);
             if (Number.isFinite(toD) && Number.isFinite(dFarm)
@@ -287,7 +314,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
                 // ≤ ENROUTE_DELIVERY_SLACK extra tiles off the path to the farm
                 // waypoint, stop and deliver now — the farm group index is kept
                 // so the agent resumes the same group after banking.
-                if (parcels.carriedBy(me.id).length > 0) {
+                const carried = parcels.carriedBy(me.id);
+                if (carried.length > 0 && this.stackReady(carried)) {
                     const deliver = this.#enRouteDelivery(target);
                     if (deliver) {
                         log(`FARM en-route delivery to (${deliver.x},${deliver.y}) before G${idx}`);
@@ -357,13 +385,22 @@ export class StrategyHighCapacity extends StrategyLookAhead {
                 return this.#goFarm(currentIntent);
             }
         }
-        if (carrying.length > 0) {
+        // stackReady (LLM layer): a requiredStackSize mission forbids banking a
+        // short stack — keep hunting parcels instead of delivering early.
+        if (carrying.length > 0 && this.stackReady(carrying)) {
             this.#phase = 'deliver';
             // The current group is dry — don't speculatively revisit it en route.
             if (this.#farmIdx !== null) this.#visitedDetours.add(this.#farmIdx);
             log(`patience expired with ${carrying.length}/${cap} carried → DELIVER`);
-            return this.#deliver(currentIntent, this._opportunisticPickupEnabled(), this._detoursEnabled(), []);
+            return this.#deliver(
+                currentIntent,
+                this._opportunisticPickupEnabled() && !this.singleParcelBundles(),
+                this._detoursEnabled(),
+                [],
+            );
         }
+        if (this.mustStack(carrying))
+            log(`stack ${carrying.length}/${missionConstraints.requiredStackSize} — patience expired but mission forbids banking; exploring on`);
         return this.exploreIfIdle(currentIntent);
     }
 
@@ -443,6 +480,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             ...parcels.free(),
             ...remembered.filter(r => !parcels.get(r.id)),
         ];
-        return all.filter(p => this.isReachable(p) && this.inSafe(p));
+        // missionPickupOk (LLM layer): maxParcelReward / maxBundleValue ceilings.
+        return all.filter(p => this.missionPickupOk(p) && this.isReachable(p) && this.inSafe(p));
     }
 }

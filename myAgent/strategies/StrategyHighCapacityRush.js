@@ -32,8 +32,12 @@ export const RUSH_HIGH_AVG_FLOOR  = 20;
  * bank fallback (so a dried-up map can't deadlock the agent) are all inherited.
  */
 export class StrategyHighCapacityRush extends StrategyHighCapacity {
-    /** Minimum reward a parcel must currently have to be worth picking up. */
+    /** Minimum reward a parcel must currently have to be worth picking up.
+     *  mustStack (LLM layer): while a requiredStackSize mission still needs
+     *  parcels, the bar is dropped — a mandated stack must be filled even
+     *  with parcels the quality filter would normally discard. */
     _rewardBar() {
+        if (this.mustStack(parcels.carriedBy(me.id))) return -Infinity;
         return PARCEL_REWARD_AVG > 30
             ? RUSH_HIGH_AVG_FLOOR
             : PARCEL_REWARD_AVG - RUSH_REWARD_MARGIN;
