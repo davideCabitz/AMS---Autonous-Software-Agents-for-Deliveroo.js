@@ -6,11 +6,14 @@
   "main": "myAgent/agent.js",
   "scripts": {
     "start": "node myAgent/agent.js",
+    "start:coordinator": "node myAgent/launch.js coordinator",
+    "start:worker": "node myAgent/launch.js worker",
     "llm": "node llmAgent/llmAgent.js"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "*",
     "@unitn-asa/pddl-client": "^1.7.7",
+    "argparse": "^2.0.1",
     "dotenv": "^16.6.1",
     "openai": "^6.42.0"
   }

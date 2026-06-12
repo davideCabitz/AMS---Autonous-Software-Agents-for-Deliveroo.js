@@ -23,6 +23,7 @@ export class IntentionRevision {
 
             if (!this.#isValid(intention)) {
                 this.log('dropping stale intention:', intention.predicate.join(' '));
+                intention.cancel();   // settle its completion — awaiters must not hang
                 this.#queue.shift();
                 continue;
             }

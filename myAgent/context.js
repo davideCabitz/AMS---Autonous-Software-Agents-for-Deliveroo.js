@@ -14,6 +14,27 @@ const sensingLog = createLogger('sensing');
 
 export const socket  = DjsConnect();
 export const me      = new Me();
+
+/* Resilience: socket.io auto-reconnects after transport errors, but NOT after a
+ * server-initiated disconnect ('io server disconnect' — observed live: the server
+ * bounced the worker mid-game and the process became a zombie). Reconnect
+ * manually; the same token re-authenticates as the same agent, onMap/onConfig
+ * re-fire, and the worker's hello keepalive re-registers with the coordinator. */
+socket.on('disconnect', (reason) => {
+    console.warn(`[socket] disconnected (${reason})`);
+    if (reason === 'io server disconnect') {
+        setTimeout(() => {
+            console.warn('[socket] reconnecting...');
+            socket.connect();
+        }, 1000);
+    }
+});
+
+/* Which of the two challenge-2 processes this is. Set by myAgent/launch.js before
+ * this module loads. 'coordinator' runs the LLM command layer and orders the
+ * worker around; 'worker' runs plain BDI plus the partner-order handler. A direct
+ * `node myAgent/agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
+export const role = process.env.AGENT_ROLE ?? 'coordinator';
 export const parcels = new Parcels();
 export const deliveryTiles = [];
 export const spawnerTiles  = [];
@@ -61,6 +82,18 @@ export const pddl = { busy: false };
  * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
 export const directive = { active: false, aborted: false };
 
+/* Red-light/green-light state ("red light, green light" mission). Set by a
+ * keyword fast-path on incoming chat (NOT by the LLM — a 20s light cycle can't
+ * afford model latency). While red: optionsGeneration stands down, LLM commands
+ * are refused, and worker orders are refused — every movement costs points. */
+export const trafficLight = { red: false };
+
+/* Indefinite position hold, set by the LLM hold() tool (e.g. "move there and
+ * wait for each other"). Unlike directive.active — which is released when the
+ * directive ends — this gate persists across directives until release_hold().
+ * Checked by optionsGeneration alongside the other gates. */
+export const manualHold = { active: false };
+
 /* Persistent Level-2 mission constraints. Updated by the LLM apply_mission tool;
  * read by every strategy on each decide() call. All fields are null/empty by
  * default (= no constraint). dropMissions() resets them all. */
@@ -70,6 +103,7 @@ export const missionConstraints = {
     allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
     maxParcelReward:      null,      // number | null — null = no ceiling
+    maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 

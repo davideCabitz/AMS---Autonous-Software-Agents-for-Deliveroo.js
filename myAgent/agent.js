@@ -1,7 +1,8 @@
-import { socket, me, parcels, directive } from './context.js';
+import { socket, me, parcels, directive, trafficLight, manualHold, role } from './context.js';
 import { IntentionRevisionReplace }   from './intentions/IntentionRevisionReplace.js';
 import { selectStrategy }             from './strategies/selectStrategy.js';
 import { registerLlm }                from './llm/index.js';
+import { registerWorker }             from './partnerWorker.js';
 import { createLogger } from './utils/logger.js';
 
 const log = createLogger('llm');
@@ -13,6 +14,10 @@ let strategy = null;
 
 function optionsGeneration() {
     if (!me.isReady) return;
+    // RED LIGHT: every movement is penalized — no new intentions until green.
+    if (trafficLight.red) return;
+    // Operator-requested indefinite hold (LLM hold() tool) — stand down until released.
+    if (manualHold.active) return;
     // The LLM command layer is driving the agent: stand down so the autonomous
     // strategy doesn't clobber the intention it pushed. Beliefs still update
     // (parcels.sync in onSensing runs regardless) — only deciding/pushing pauses.
@@ -41,10 +46,12 @@ socket.onSensing(sensing => {
     optionsGeneration();
 });
 
-// LLM command layer: listens to chat directives and commands this same agent.
-// Enabled only when an LLM key is configured, so the BDI agent runs standalone
-// without it. resumeAutonomy lets a finished directive re-deliberate immediately.
-if (process.env.LITELLM_API_KEY) {
+// Role split (see launch.js): the coordinator runs the LLM command layer; the
+// worker runs plain BDI plus the partner-order handler that lets the coordinator
+// command it over chat. resumeAutonomy lets either re-deliberate immediately.
+if (role === 'worker') {
+    registerWorker(myAgent, { resumeAutonomy: optionsGeneration });
+} else if (process.env.LITELLM_API_KEY) {
     registerLlm(myAgent, { resumeAutonomy: optionsGeneration });
 } else {
     log('LITELLM_API_KEY not set — running BDI only, no chat command layer.');

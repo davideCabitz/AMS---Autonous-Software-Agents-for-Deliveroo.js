@@ -34,6 +34,14 @@ export class IntentionDeliberation {
         this.#current_plan?.stop();
     }
 
+    /** Drop an intention that will never be achieved (stale-validity check in
+     *  the loop). Settles the completion promise so a commandAndAwait awaiter
+     *  (LLM tool, partner order, handoff cycle) is never left hanging forever. */
+    cancel() {
+        this.#stopped = true;
+        this.#rejectDone(['stopped', ...this.#predicate]);
+    }
+
     log(...args) {
         this.#parent?.log?.('\t', ...args);
     }
@@ -41,6 +49,9 @@ export class IntentionDeliberation {
     async achieve() {
         if (this.#started) return false;
         this.#started = true;
+
+        let firstError = null;
+        let wasStopped = false;
 
         for (const PlanClass of planLibrary) {
             if (this.#stopped) { const e = ['stopped', ...this.#predicate]; this.#rejectDone(e); throw e; }
@@ -53,11 +64,20 @@ export class IntentionDeliberation {
                     return result;
                 } catch (err) {
                     this.log('plan failed', PlanClass.name, err);
+                    const tag = Array.isArray(err) ? err[0] : err;
+                    if (tag === 'stopped')   wasStopped = true;
+                    else if (!firstError)    firstError = err;
                 }
             }
         }
 
-        const e = ['no plan for', ...this.#predicate];
+        // Reject with the most meaningful tag. A 'stopped' plan means the
+        // intention was superseded — keep that signal (the loop silences it).
+        // Otherwise relay the first real plan failure (e.g. ['no path to',x,y])
+        // instead of masking everything as 'no plan for': the LLM command path
+        // turns these tags into observations the model can actually act on.
+        const e = wasStopped ? ['stopped', ...this.#predicate]
+                : firstError ?? ['no plan for', ...this.#predicate];
         this.#rejectDone(e);
         throw e;
     }

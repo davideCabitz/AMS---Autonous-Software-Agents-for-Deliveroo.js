@@ -19,11 +19,15 @@ export class StrategyGreedy extends Strategy {
         // Free parcels in sensing range, A*-reachable, whose pickup nets at least
         // MIN_DELIVERY_REWARD over just delivering now (ΔB = B(p) − A). Unreachable
         // parcels are dropped so they can never be selected. Ranked by value B(p).
-        const worthwhileInRange = parcels.free()
-            .filter(p => missionConstraints.maxParcelReward == null || p.reward <= missionConstraints.maxParcelReward)
+        // maxBundleValue missions forbid a second parcel — each delivery must be a
+        // single cheap parcel so its total stays under the threshold.
+        const worthwhileInRange = this.singleParcelBundles() && carrying.length > 0 ? [] : parcels.free()
+            .filter(p => this.missionPickupOk(p))
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
-            .filter(({ p, value }) => value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
+            // A mandated stack (requiredStackSize) must be filled even when the
+            // marginal parcel isn't "worth it" by the decay model alone.
+            .filter(({ p, value }) => this.mustStack(carrying) || value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
@@ -39,8 +43,7 @@ export class StrategyGreedy extends Strategy {
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
-            const stackOk = missionConstraints.requiredStackSize == null
-                || carrying.length >= missionConstraints.requiredStackSize;
+            const stackOk = this.stackReady(carrying);
             if (stackOk) {
                 // Hysteresis: keep heading to the current delivery tile as long as it
                 // is still reachable. Only recompute when agents/crates block it.
@@ -62,7 +65,7 @@ export class StrategyGreedy extends Strategy {
         }
 
         const best = parcels.free()
-            .filter(p => missionConstraints.maxParcelReward == null || p.reward <= missionConstraints.maxParcelReward)
+            .filter(p => this.missionPickupOk(p))
             .filter(p => this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
             .filter(({ value }) => value - bankNow >= MIN_DELIVERY_REWARD)

@@ -15,7 +15,9 @@ export const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 // (e.g. a non-Azure model that isn't behind gpt-4o's content policy).
 const FALLBACK_MODEL = process.env.LOCAL_MODEL_FALLBACK || '';
 
-const client = new OpenAI({ baseURL, apiKey });
+// Bound every request: the default SDK timeout is 10 minutes, and one stalled
+// proxy call would wedge the serialized ACTION directive lane for that long.
+const client = new OpenAI({ baseURL, apiKey, timeout: 90_000, maxRetries: 1 });
 const log = createLogger('llm');
 
 /** True for Azure OpenAI's content-management-policy 400 (a flaky false-positive,

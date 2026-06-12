@@ -1,7 +1,8 @@
 import { callModel }                    from './llmClient.js';
 import { buildSystemPrompt, buildChatPrompt } from './prompt.js';
 import { buildTools, buildChatTools }   from './commandTools.js';
-import { directive }                    from '../context.js';
+import { directive, me, parcels }      from '../context.js';
+import { handoffRunning }               from './handoff.js';
 import { createLogger } from '../utils/logger.js';
 
 const log     = createLogger('llm');
@@ -19,7 +20,9 @@ const toolLog = createLogger('llm:tool');
  * directive doesn't drift between commands.
  */
 
-const MAX_ITERATIONS = 20;
+// Two-agent directives (order partner + own commands) use more steps than the
+// original single-agent ceiling allowed.
+const MAX_ITERATIONS = 30;
 // Give up a stuck directive after this many failed command attempts, so the LLM
 // can't keep the agent occupied indefinitely — it returns to autonomous BDI work.
 const MAX_TOOL_FAILURES = 3;
@@ -50,6 +53,12 @@ function extractFinal(text) {
     return m ? m[1].trim() : null;
 }
 
+/** "End" on its own line marks the accompanying Action as the directive's last
+ *  step: the directive terminates the moment that action completes. */
+function hasEndMarker(text) {
+    return /^End\.?\s*$/im.test(text);
+}
+
 /**
  * Run one chat directive to completion.
  * @param {string} objective   the directive text
@@ -65,7 +74,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
     // control (see commandTools) and the gate is HELD through the command sequence,
     // then released once here in finally — so a multi-step directive like "go to X
     // then freeze" stays at X instead of drifting between the two commands.
-    const tools = buildTools(myAgent, replySender);
+    const tools = buildTools(myAgent, replySender, resumeAutonomy);
     const messages = [
         { role: 'system', content: buildSystemPrompt(objective) },
         ...history,                                // earlier directives + answers (context)
@@ -77,27 +86,34 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
     try {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
             if (directive.aborted)
-                return 'Directive aborted by operator — agent back to autonomous BDI.';
+                return null; // aborted: the abort handler already replied — stay silent
 
             let out;
             try {
                 out = await callModel(messages, { temperature: 0 });
             } catch (err) {
                 // A single API error (400 content filter, 500, network) must not
-                // crash the BDI agent — report it and end the directive.
+                // crash the BDI agent — report it and end the directive. Chat gets
+                // only a short tag; the full message goes to the log.
                 log.error('callModel failed:', err?.message ?? err);
-                return `Could not complete the directive — LLM error: ${err?.message ?? err}`;
+                const brief = String(err?.message ?? err).split(/[\n.]/)[0].slice(0, 80);
+                return `Failure: LLM error — ${brief}`;
             }
 
             if (directive.aborted)
-                return 'Directive aborted by operator — agent back to autonomous BDI.';
+                return null; // aborted: the abort handler already replied — stay silent
 
+            log(`iter ${i + 1}: ${out.replace(/\s+/g, ' ').slice(0, 160)}`);
             messages.push({ role: 'assistant', content: out });
 
             const act   = extractAction(out);
             const final = extractFinal(out);
 
-            // If both appear, run the Action first (never trust a premature Final).
+            // Bare "End" with no Action: the model declares the directive already
+            // complete — terminate silently (no chat reply for action directives).
+            if (!act && hasEndMarker(out)) return null;
+
+            // If both appear, run the Action first.
             if (act) {
                 const fn = tools[act.action];
                 const obs = fn
@@ -106,7 +122,12 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 toolLog(`${act.action}(${act.input}) -> ${obs}`);
 
                 if (directive.aborted)
-                    return 'Directive aborted by operator — agent back to autonomous BDI.';
+                    return null; // aborted: the abort handler already replied — stay silent
+
+                // "End" marker with the Action = "this is my last step": the
+                // directive ends the INSTANT the action completes — no confirmation
+                // round-trip, no chat reply (success or failure is observed in-game).
+                if ((hasEndMarker(out) || final) && fn) return null;
 
                 // Failure budget: don't let the LLM keep retrying a stuck directive.
                 // After a few failed commands, give up and let the BDI agent carry on.
@@ -114,9 +135,13 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                     return `Could not complete the directive after ${failures} failed attempts; resuming autonomous work.`;
                 }
 
+                // Live state with every observation: the system-prompt snapshot is
+                // stale after the first command, and the model must never act on a
+                // remembered position/cargo (e.g. "drop" while carrying nothing).
+                const state = `[Your live state: at (${me.x},${me.y}), carrying ${parcels.carriedBy(me.id).length} parcel(s)]`;
                 messages.push({
                     role: 'user',
-                    content: `Observation: ${obs}\nContinue, or give the Final Answer if the directive is done.`,
+                    content: `Observation: ${obs}\n${state}\nContinue with the next Action (append "End" to the last one). If the directive is already complete, output ONLY the single line "End" — do NOT write a Final Answer or any confirmation.`,
                 });
                 continue;
             }
@@ -125,15 +150,19 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
 
             messages.push({
                 role: 'user',
-                content: 'Observation: invalid format. Output exactly one Action (with Action Input) OR one Final Answer.',
+                content: 'Observation: invalid format. Output exactly one Action (with Action Input), the single line "End" if the directive is already complete, or one Final Answer (word-only directives and mission offers only).',
             });
         }
         return `Directive not completed within ${MAX_ITERATIONS} iterations.`;
     } finally {
         // Defensive: make sure the gate is released and BDI is kicked even if a
-        // command threw before its own finally could run.
-        directive.active = false;
-        resumeAutonomy?.();
+        // command threw before its own finally could run. EXCEPT while the handoff
+        // routine runs: it outlives the directive that started it and owns the
+        // gate until stop_handoff (or abort) ends it.
+        if (!handoffRunning()) {
+            directive.active = false;
+            resumeAutonomy?.();
+        }
     }
 }
 
@@ -142,7 +171,9 @@ const CLASSIFY_PROMPT =
     'Reply with EXACTLY one word:\n' +
     '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, stop, ' +
     'apply or remove a mission/constraint, abort/cancel/drop/clear a mission, ' +
-    'or otherwise DO something in the game world.\n' +
+    'or otherwise DO something in the game world. ALSO any mission offer or challenge ' +
+    '(mentions a bonus/penalty/points, or asks to calculate/answer something for a reward) — ' +
+    'those must be handled with full mission tools, not as small talk.\n' +
     '- CHAT    if it is only a question, greeting, or status request answerable with words ' +
     '(e.g. "can you hear me?", "where are you?", "what are you doing?").\n' +
     'Reply ACTION or CHAT only.';

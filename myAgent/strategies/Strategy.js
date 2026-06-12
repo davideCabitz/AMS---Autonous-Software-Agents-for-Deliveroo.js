@@ -126,6 +126,47 @@ export class Strategy {
         return parcels.carriedBy(me.id).length >= CARRYING_CAPACITY;
     }
 
+    // ─── mission-constraint gates (Level-2 persistent missions) ──────────────
+    // Shared here so EVERY strategy enforces them — previously only Greedy/Blind
+    // filtered maxParcelReward and only Greedy gated requiredStackSize, so the
+    // default LookAhead/Memory strategies silently ignored those missions.
+
+    /** False when a mission excludes picking `parcel` up: reward above the
+     *  maxParcelReward ceiling, or above maxBundleValue (a parcel that can never
+     *  be part of a qualifying ≤-threshold delivery must not be collected). */
+    missionPickupOk(parcel) {
+        if (missionConstraints.maxParcelReward != null
+            && parcel.reward > missionConstraints.maxParcelReward) return false;
+        if (missionConstraints.maxBundleValue != null
+            && parcel.reward > missionConstraints.maxBundleValue) return false;
+        return true;
+    }
+
+    /** Delivery gate. maxBundleValue → deliver one cheap parcel at a time (the
+     *  sum of a single filtered parcel is always ≤ the threshold, so every
+     *  delivery earns the bonus). requiredStackSize → only deliver once the
+     *  stack is complete. Otherwise deliver whenever it's worthwhile. */
+    stackReady(carrying) {
+        if (missionConstraints.maxBundleValue != null) return carrying.length >= 1;
+        if (missionConstraints.requiredStackSize != null)
+            return carrying.length >= missionConstraints.requiredStackSize;
+        return true;
+    }
+
+    /** True while a requiredStackSize mission still needs more parcels — used to
+     *  relax the value-based multi-pickup gates (a mandated stack must be filled
+     *  even when the marginal parcel isn't "worth it" by the decay model). */
+    mustStack(carrying) {
+        return missionConstraints.requiredStackSize != null
+            && carrying.length < missionConstraints.requiredStackSize;
+    }
+
+    /** True when a maxBundleValue mission forbids carrying a second parcel
+     *  (multi-pickup could push the bundle total over the threshold). */
+    singleParcelBundles() {
+        return missionConstraints.maxBundleValue != null;
+    }
+
     /**
      * Reward lost per parcel per tile travelled (0 when parcels never decay).
      * Derived from the *measured* real time per tile, not the optimistic
@@ -296,7 +337,13 @@ export class Strategy {
         if (currentIntent) {
             const [intent, tx, ty] = currentIntent;
 
-            if (intent === 'go_pick_up' || intent === 'go_deliver') {
+            // A go_deliver that was already in flight when a requiredStackSize
+            // mission arrived must NOT run to completion with a short stack:
+            // fall through and pick an explore target that replaces it.
+            const prematureDelivery = intent === 'go_deliver'
+                && this.mustStack(parcels.carriedBy(me.id));
+
+            if ((intent === 'go_pick_up' || intent === 'go_deliver') && !prematureDelivery) {
                 // Productive work started — reset explore history so the next
                 // exploration cycle has no stale exclusions.
                 this._lastExploreKey = null;

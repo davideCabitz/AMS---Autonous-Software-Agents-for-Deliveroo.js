@@ -57,7 +57,7 @@ export class StrategyLookAhead extends StrategyMemory {
         let allFree = [
             ...parcels.free(),
             ...remembered.filter(r => !parcels.get(r.id)),
-        ];
+        ].filter(p => this.missionPickupOk(p));   // mission gates: maxParcelReward / maxBundleValue
         if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
             allFree = allFree
                 .sort((a, b) => b.reward - a.reward)
@@ -66,9 +66,12 @@ export class StrategyLookAhead extends StrategyMemory {
         const eligible = allFree.filter(p => this.isReachable(p) && this.inSafe(p));
 
         if (carrying.length > 0) {
-            const worthwhile = eligible
+            // maxBundleValue missions skip multi-pickup entirely (single-parcel
+            // bundles); a mandated requiredStackSize relaxes the value gate (the
+            // stack must be filled even at marginal value).
+            const worthwhile = this.singleParcelBundles() ? [] : eligible
                 .map(p => ({ p, value: this.pickupValue(p) }))
-                .filter(({ p, value }) => value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
+                .filter(({ p, value }) => this.mustStack(carrying) || value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
                 .sort((a, b) => b.value - a.value);
 
             const choice = (!this.atCapacity() && worthwhile.length > 0)
@@ -79,6 +82,13 @@ export class StrategyLookAhead extends StrategyMemory {
             if (choice) {
                 this.#logChoice('multi-pickup', choice);
                 return ['go_pick_up', choice.p.x, choice.p.y, choice.p.id];
+            }
+
+            // Stack mission not yet complete and nothing in sight worth grabbing:
+            // keep accumulating (explore towards spawners) instead of delivering early.
+            if (!this.stackReady(carrying)) {
+                log(`stack incomplete (${carrying.length} carried) — hunting more parcels`);
+                return this.exploreIfIdle(currentIntent);
             }
 
             if (currentIntent?.[0] === 'go_deliver'

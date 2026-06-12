@@ -1,5 +1,8 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive, missionConstraints } from '../context.js';
-import { reachableFrom } from '../utils/astar.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive, trafficLight, manualHold, moveTiming } from '../context.js';
+import { reachableFrom, findRoute } from '../utils/astar.js';
+import { applyMissionConfig, dropMissionField, dropAllMissions } from './missionState.js';
+import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
+import { startHandoff, stopHandoff } from './handoff.js';
 
 /*
  * Tool catalogue for the LLM command layer. Every tool returns a STRING
@@ -109,12 +112,26 @@ function withTimeout(promise, ms, tag) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/** emitSay that can neither throw nor hang. The SDK promise resolves only when
+ *  the server acks; a disconnected recipient can leave it pending FOREVER, which
+ *  wedged the whole serialized directive lane. The chat is best-effort — bound
+ *  it and move on. @returns {Promise<boolean>} delivered (ack within timeout) */
+async function safeSay(target, text, ms = 5_000) {
+    if (!target) return false;
+    try {
+        await withTimeout(socket.emitSay(target, text), ms, 'say');
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /** Map an intention rejection tag to a readable observation. */
 function describeFailure(err) {
     const tag = Array.isArray(err) ? err[0] : err;
     switch (tag) {
         case 'stopped':      return 'Failed: the command was interrupted before completing.';
-        case 'no path to':   return `Failed: target (${err[1]},${err[2]}) is unreachable (no path).`;
+        case 'no path to':   return `Failed: target (${err[1]},${err[2]}) is unreachable — a wall, or a tile currently occupied/blocked by an agent.`;
         case 'goal blocked': return `Failed: target (${err[1]},${err[2]}) is blocked by another agent.`;
         case 'busy':         return 'Failed: agent is finishing a previous plan; try again in a moment.';
         case 'timeout':      return `Failed: command timed out after ${COMMAND_TIMEOUT_MS}ms.`;
@@ -190,7 +207,7 @@ export function buildChatTools() {
     return readTools();
 }
 
-export function buildTools(myAgent, replySender) {
+export function buildTools(myAgent, replySender, resumeAutonomy) {
     // Run a BDI command. The FIRST command takes control of the agent (gates the
     // autonomous strategy); the gate is then HELD through the whole command
     // sequence and released once, at the end of the directive (runDirective's
@@ -198,6 +215,8 @@ export function buildTools(myAgent, replySender) {
     // then freeze" freezes AT X, not where it wandered. The agent still does its
     // own work during the LLM's INITIAL thinking, before any command runs.
     const command = async (predicate, ok) => {
+        if (trafficLight.red)
+            return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
         directive.active = true;                       // take / keep control
         try {
             await withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0]);
@@ -221,22 +240,88 @@ export function buildTools(myAgent, replySender) {
             if (x == null) return `Error: go_pickup needs "x,y" (got '${input}').`;
             const id = resolveParcelId(x, y);
             // Known parcel -> proper go_pick_up (updates beliefs by id). Unknown ->
-            // just navigate there and report, so the LLM can sense + retry.
+            // navigate there and try a blind pickup anyway: a parcel may have spawned
+            // during the walk, or sit outside the last sensing snapshot.
             const predicate = id != null ? ['go_pick_up', x, y, id] : ['go_to', x, y];
             return command(predicate, () => {
-                if (id == null)
-                    return `Reached (${x},${y}) but no known parcel there. Call sense_parcels and retry.`;
                 const carrying = parcels.carriedBy(me.id).length;
-                return `Picked up parcel ${id} at (${x},${y}); now carrying ${carrying}.`;
+                if (id != null)
+                    return `Picked up parcel ${id} at (${x},${y}); now carrying ${carrying}.`;
+                return socket.emitPickup().then(picked =>
+                    picked?.length
+                        ? `Picked up ${picked.length} parcel(s) at (${x},${y}); now carrying ${carrying + picked.length}.`
+                        : `Reached (${x},${y}) but no parcel here. To wait for one to spawn: wait(5), sense_parcels, retry.`);
             });
         },
-        async deliver() {
+        async pickup_next_parcel() {
+            // "Pick up the next parcel": release the autonomy gate and let the
+            // SELECTED BDI STRATEGY hunt — it explores spawners and reacts to
+            // sensing in real time (picks up the instant a parcel enters range),
+            // which no LLM wait/sense polling loop can match. We watch the carried
+            // set and take control back the moment a NEW parcel id appears.
+            if (trafficLight.red)
+                return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
+            const before = new Set(parcels.carriedBy(me.id).map(p => p.id));
+            directive.active = false;
+            resumeAutonomy?.();
+            while (!directive.aborted) {
+                const fresh = parcels.carriedBy(me.id).find(p => !before.has(p.id));
+                if (fresh) {
+                    directive.active = true;        // take control back from BDI
+                    myAgent.haltCurrent();          // it may already be heading off to deliver
+                    return `Picked up parcel ${fresh.id} at (${me.x},${me.y}); now carrying ${parcels.carriedBy(me.id).length}.`;
+                }
+                await new Promise(r => setTimeout(r, 100));
+            }
+            return 'Failed: the command was interrupted before completing.';
+        },
+        async deliver(input) {
             const carrying = parcels.carriedBy(me.id).length;
             if (carrying === 0) return 'Nothing to deliver (not carrying any parcel).';
-            const t = nearestDelivery();
-            if (!t) return 'Failed: no delivery tile known. Call sense_delivery_tiles first.';
+            // Optional "x,y" → deliver at that specific tile (e.g. "deliver in 1,1"
+            // missions); without coordinates fall back to the nearest delivery tile.
+            const { x, y } = parseXY(input);
+            let t;
+            if (x != null) {
+                t = deliveryTiles.find(d => d.x === x && d.y === y);
+                if (!t) return `Failed: (${x},${y}) is not a delivery tile. Call sense_delivery_tiles to list them.`;
+            } else {
+                t = nearestDelivery();
+                if (!t) return 'Failed: no delivery tile known. Call sense_delivery_tiles first.';
+            }
             return command(['go_deliver', t.x, t.y], () =>
                 `Delivered at (${t.x},${t.y}); score now ${me.score}.`);
+        },
+        async put_down() {
+            // Drop cargo on the CURRENT tile without navigating anywhere. On a plain
+            // tile this is a handoff drop (no score); on a delivery tile it scores.
+            const carried = parcels.carriedBy(me.id);
+            if (carried.length === 0) return 'Nothing to put down (not carrying any parcel).';
+            // Gate autonomy: without this, BDI resumes the instant the directive ends
+            // and re-picks the parcel from under us — the drop looks like a no-op.
+            directive.active = true;
+            myAgent.haltCurrent();
+            // Pass the explicit id list: the SDK default is [] and the server treats
+            // an empty selection as "nothing", not "everything".
+            const dropped = await withTimeout(
+                socket.emitPutdown(carried.map(p => p.id)), 5_000, 'putdown'
+            ).catch(() => null);
+            if (!dropped || dropped.length === 0)
+                return 'Failed: the server did not confirm the drop.';
+            for (const p of carried) parcels.remove(p.id);
+            return `Dropped ${dropped.length} parcel(s) at (${me.x},${me.y}).`;
+        },
+        async path_cost(input) {
+            const { x, y } = parseXY(input);
+            if (x == null) return `Error: path_cost needs "x,y" (got '${input}').`;
+            const route = findRoute(me, { x, y });
+            if (!route) return `Unreachable: no path from (${me.x},${me.y}) to (${x},${y}).`;
+            const steps = route.length;
+            return JSON.stringify({
+                steps,
+                estSeconds: +(steps * moveTiming.msPerTile / 1000).toFixed(1),
+                decayLostPerCarriedParcel: +(steps * moveTiming.decayPerTile()).toFixed(1),
+            });
         },
         async wait(input) {
             const n = String(input ?? '').match(/-?\d+(\.\d+)?/);
@@ -248,66 +333,81 @@ export function buildTools(myAgent, replySender) {
                 return `Wait interrupted after ${(elapsed / 1000).toFixed(1)}s (directive aborted).`;
             return `Waited ${secs} second(s) holding position at (${me.x}, ${me.y}).`;
         },
+        async hold() {
+            // Indefinite hold: persists AFTER the directive ends (unlike wait), until
+            // release_hold. For "go there and wait for each other" missions.
+            manualHold.active = true;
+            myAgent.haltCurrent();
+            return `Holding position at (${me.x}, ${me.y}) indefinitely — use release_hold to resume.`;
+        },
+        async release_hold() {
+            manualHold.active = false;
+            resumeAutonomy?.();
+            return 'Hold released — autonomous work resumed.';
+        },
         // chat
         async say(input) {
             const text = String(input ?? '');
-            if (replySender) await socket.emitSay(replySender, text);
-            return `Said to ${replySender ?? 'console'}: ${text}`;
+            const ok = await safeSay(replySender, text);
+            return ok ? `Said to ${replySender}: ${text}`
+                      : `Sent to ${replySender ?? 'console'} (delivery not confirmed): ${text}`;
         },
 
-        // Level-2 persistent mission management
+        // partner (the second, worker agent) — orders run on the worker and return
+        // its result; they do NOT move this agent, so autonomy here is not gated.
+        async order_partner_goto(input) {
+            const { x, y } = parseXY(input);
+            if (x == null) return `Error: order_partner_goto needs "x,y" (got '${input}').`;
+            if (trafficLight.red) return 'Failed: RED LIGHT in force — the partner must not move either.';
+            return sendOrder(['go_to', x, y]);
+        },
+        async order_partner_pickup(input) {
+            const { x, y } = parseXY(input);
+            if (x == null) return `Error: order_partner_pickup needs "x,y" (got '${input}').`;
+            if (trafficLight.red) return 'Failed: RED LIGHT in force — the partner must not move either.';
+            return sendOrder(['go_pick_up', x, y]);
+        },
+        async order_partner_deliver(input) {
+            const { x, y } = parseXY(input);
+            if (trafficLight.red) return 'Failed: RED LIGHT in force — the partner must not move either.';
+            if (x != null) return sendOrder(['go_deliver', x, y]);
+            // No coordinates: send the worker to the delivery tile nearest ITS position.
+            const wpos = partner.lastStatus ?? me;
+            const t = deliveryTiles.length
+                ? [...deliveryTiles].sort((a, b) =>
+                    (Math.abs(a.x - wpos.x) + Math.abs(a.y - wpos.y)) - (Math.abs(b.x - wpos.x) + Math.abs(b.y - wpos.y)))[0]
+                : null;
+            if (!t) return 'Failed: no delivery tile known. Call sense_delivery_tiles first.';
+            return sendOrder(['go_deliver', t.x, t.y]);
+        },
+        async order_partner_putdown() {
+            return sendOrder(['putdown']);
+        },
+        async halt_partner()   { return sendHalt(); },
+        async resume_partner() { return sendResume(); },
+        async ask_partner_status() { return requestStatus(); },
+
+        // cross-agent handoff routine ("one picks up, the other delivers" missions)
+        async start_handoff() { return startHandoff(myAgent, resumeAutonomy); },
+        async stop_handoff()  { return stopHandoff(); },
+
+        // Level-2 persistent mission management. The mutation logic lives in
+        // missionState.js (shared with the worker); every change is mirrored to
+        // the partner so persistent missions bind BOTH agents.
         async apply_mission(input) {
             let config;
             try { config = JSON.parse(String(input ?? '{}')); }
             catch { return `Error: expected JSON — e.g. {"requiredStackSize":3}. Got: ${input}`; }
 
-            const fieldsSet = [];
-            if (config.requiredStackSize != null) {
-                missionConstraints.requiredStackSize = Number(config.requiredStackSize);
-                fieldsSet.push('requiredStackSize');
-            }
-            if (config.allowedDeliveryTiles != null) {
-                missionConstraints.allowedDeliveryTiles = new Set(
-                    config.allowedDeliveryTiles.map(([x, y]) => `${x}_${y}`)
-                );
-                fieldsSet.push('allowedDeliveryTiles');
-            }
-            if (config.allowedSpawnerTiles != null) {
-                missionConstraints.allowedSpawnerTiles = new Set(
-                    config.allowedSpawnerTiles.map(([x, y]) => `${x}_${y}`)
-                );
-                fieldsSet.push('allowedSpawnerTiles');
-            }
-            if (Array.isArray(config.avoidTiles)) {
-                for (const [x, y] of config.avoidTiles) missionConstraints.avoidTiles.add(`${x}_${y}`);
-                fieldsSet.push('avoidTiles');
-            }
-            if (config.maxParcelReward != null) {
-                missionConstraints.maxParcelReward = Number(config.maxParcelReward);
-                fieldsSet.push('maxParcelReward');
-            }
-
-            // Tag the description with the field name(s) so the LLM can identify
-            // which dropMission(field) to call later ("drop this mission").
-            const baseDesc   = config.description || 'constraint applied';
-            const taggedDesc = fieldsSet.length > 0 ? `${baseDesc} [${fieldsSet.join(',')}]` : baseDesc;
-            missionConstraints.descriptions.push(taggedDesc);
-
-            const missionName = config.description || 'new constraint';
-            if (replySender) await socket.emitSay(replySender, `Mission accepted: ${missionName}`);
-            const active = missionConstraints.descriptions.join('; ');
-            return `Mission applied. Active missions: ${active}`;
+            const obs = applyMissionConfig(config);
+            sendConstraint('apply', config);
+            return obs;
         },
 
         async dropMissions() {
-            missionConstraints.requiredStackSize    = null;
-            missionConstraints.allowedDeliveryTiles = null;
-            missionConstraints.allowedSpawnerTiles  = null;
-            missionConstraints.avoidTiles.clear();
-            missionConstraints.maxParcelReward      = null;
-            missionConstraints.descriptions         = [];
-            if (replySender) await socket.emitSay(replySender, 'All missions aborted');
-            return 'All mission constraints cleared — agent restored to default behavior.';
+            const obs = dropAllMissions();
+            sendConstraint('dropAll');
+            return obs;
         },
 
         async restrict_exploration(input) {
@@ -326,34 +426,22 @@ export function buildTools(myAgent, replySender) {
             };
             const filtered = spawnerTiles.filter(FILTERS[zone]);
             if (!filtered.length) return `Error: no spawner tiles found in the ${zone} half.`;
-            missionConstraints.allowedSpawnerTiles = new Set(filtered.map(t => `${t.x}_${t.y}`));
-            const desc = `explore only ${zone}-half spawners [allowedSpawnerTiles]`;
-            missionConstraints.descriptions.push(desc);
-            if (replySender) await socket.emitSay(replySender, `Mission accepted: explore only ${zone}-half spawners`);
+            applyMissionConfig({
+                allowedSpawnerTiles: filtered.map(t => [t.x, t.y]),
+                description: `explore only ${zone}-half spawners`,
+            });
+            sendConstraint('apply', {
+                allowedSpawnerTiles: filtered.map(t => [t.x, t.y]),
+                description: `explore only ${zone}-half spawners`,
+            });
             return `Spawner zone restricted to ${zone} half (${filtered.length} spawners).`;
         },
 
         async dropMission(input) {
-            const raw = String(input ?? '').trim();
-            const key = raw.toLowerCase().replace(/[\s_-]/g, '');
-            // [label, camelCaseName, clearFn]
-            const MAP = {
-                requiredstacksize:    ['Stack size constraint',     'requiredStackSize',    () => { missionConstraints.requiredStackSize = null; }],
-                alloweddeliverytiles: ['Delivery tile constraint',  'allowedDeliveryTiles', () => { missionConstraints.allowedDeliveryTiles = null; }],
-                allowedspawnertiles:  ['Spawner zone constraint',   'allowedSpawnerTiles',  () => { missionConstraints.allowedSpawnerTiles = null; }],
-                avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
-                maxparcelreward:      ['Parcel reward ceiling',     'maxParcelReward',      () => { missionConstraints.maxParcelReward = null; }],
-            };
-            const entry = Object.entries(MAP).find(([k]) => k === key || k.startsWith(key) || key.startsWith(k));
-            if (!entry) return `Error: unknown field '${raw}'. Pass one of: requiredStackSize, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward.`;
-            const [, [label, camel, clear]] = entry;
-            clear();
-            // Remove descriptions that were tagged with this field.
-            missionConstraints.descriptions = missionConstraints.descriptions.filter(
-                d => !d.includes(camel)
-            );
-            if (replySender) await socket.emitSay(replySender, `${label} removed`);
-            return `${label} cleared.`;
+            const { ok, label, observation } = dropMissionField(input);
+            if (!ok) return observation;
+            sendConstraint('drop', input);
+            return observation;
         },
     };
 }
