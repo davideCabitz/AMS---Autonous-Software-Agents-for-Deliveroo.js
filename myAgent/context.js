@@ -93,6 +93,18 @@ const DECAY_EVENT_MS = {
  * to compute the real decay rate (see moveTiming below). */
 export let DECAY_INTERVAL_MS = 1000;
 
+/* How often the server spawns a new parcel, in ms (config parcels generation
+ * interval, same 'frame'/'1s'/... vocabulary as decay). Default '2s'. */
+export let PARCEL_GENERATION_MS = 2000;
+
+/* Max parcels alive on the map at once (config PARCELS_MAX). Default 5 (server
+ * default) so an absent value never activates abundance-based strategies. */
+export let PARCELS_MAX = 5;
+
+/* Mean reward a freshly spawned parcel gets (config PARCEL_REWARD_AVG).
+ * Default 30 (server default). Used as the quality bar in the rush strategy. */
+export let PARCEL_REWARD_AVG = 30;
+
 /* Empirically-measured real time per tile.
  *
  * The scoring needs to know how much reward a parcel loses while we walk to it,
@@ -140,11 +152,20 @@ socket.onConfig(config => {
     const decayMs          = DECAY_EVENT_MS[parcelCfg.decaying_event] ?? 1000;
     DECAY_INTERVAL_MS      = decayMs;
     DECAY_STEPS_PER_REWARD = decayMs / MOVEMENT_DURATION;
+
+    // Parcel spawn pacing and population cap — both config shapes, like above.
+    const genEvent = parcelCfg.generation_event ?? parcelCfg.generation_interval
+        ?? game?.PARCELS_GENERATION_INTERVAL ?? config?.PARCELS_GENERATION_INTERVAL;
+    PARCEL_GENERATION_MS = DECAY_EVENT_MS[genEvent] ?? 2000;
+    const maxRaw = Number(parcelCfg.max ?? parcelCfg.parcels_max ?? game?.PARCELS_MAX ?? config?.PARCELS_MAX);
+    PARCELS_MAX  = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : 5;
+    const avgRaw = Number(parcelCfg.reward_avg ?? game?.PARCEL_REWARD_AVG ?? config?.PARCEL_REWARD_AVG);
+    PARCEL_REWARD_AVG = Number.isFinite(avgRaw) && avgRaw > 0 ? avgRaw : 30;
     // Reset the measured pace to the server's movement_duration whenever config
     // changes; it re-converges to the real per-tile cost as the agent moves.
     moveTiming.msPerTile   = MOVEMENT_DURATION;
 
-    configLog(`obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY}`);
+    configLog(`obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY} parcelGen=${PARCEL_GENERATION_MS}ms parcelsMax=${PARCELS_MAX} rewardAvg=${PARCEL_REWARD_AVG}`);
 });
 
 socket.onMap((_w, _h, tiles) => {

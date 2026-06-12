@@ -1,0 +1,448 @@
+import { StrategyLookAhead } from './StrategyLookAhead.js';
+import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import {
+    me, parcels, spawnerTiles, deliveryTiles,
+    OBSERVATION_DISTANCE, CARRYING_CAPACITY, missionConstraints,
+} from '../context.js';
+import { distance } from '../utils/distance.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('highcap');
+
+// Max Euclidean distance for two spawners to merge into one group (same value
+// the stochastic strategy uses, so group shapes match across strategies).
+const D_CLUSTER = 2;
+// Dry-spell timeout: with no eligible parcel sensed for this long, the agent
+// stops camping the current group and either hops to a neighbour or banks.
+export const PATIENCE_MS = 3000;
+// Max A* path length for an en-route detour (parcel or speculative group visit)
+// while travelling to a delivery with spare capacity.
+export const DETOUR_MAX_TILES = 5;
+// Soft load floor: at or above this fraction of capacity a patience expiry
+// banks the load instead of hopping to another group.
+const MIN_LOAD_FRACTION = 0.6;
+// Extra tiles above the direct farm route that a delivery detour may add and
+// still be considered "on the way" to the farm group.
+const ENROUTE_DELIVERY_SLACK = 3;
+// A hop while carrying is viable only when the decay it inflicts on the load
+// stays below this fraction of the carried reward.
+const HOP_MAX_LOSS_FRACTION = 0.25;
+
+/**
+ * Strategy for high-capacity maps (CARRYING_CAPACITY > 5).
+ *
+ * LookAhead weighs every pickup against banking now, so it delivers with small
+ * loads — wasted trips when the hold is large. This strategy farms instead:
+ *
+ *  FARM    — head to the spawner group with the most cells (ties broken by A*
+ *            distance) and greedily pick up every positive-value parcel there,
+ *            skipping LookAhead's bank-first comparison while below capacity.
+ *  HOP     — when no eligible parcel has been seen for PATIENCE_MS, move to the
+ *            best other group (count / A* distance), unless the load is already
+ *            ≥ MIN_LOAD_FRACTION of capacity or the hop's decay cost is too
+ *            high — then bank instead.
+ *  DELIVER — at capacity, go straight to the nearest escapable delivery. With
+ *            spare capacity, detour to parcels OR unvisited spawner groups
+ *            within DETOUR_MAX_TILES of the current position (speculative —
+ *            no sensed parcel required); an empty group is marked visited for
+ *            the rest of the trip and delivery resumes. After banking, groups
+ *            are re-ranked and the cycle restarts at FARM.
+ *
+ * Inherits the value model, pathLen, parcel memory and hysteresis from
+ * StrategyLookAhead; eligibility filters (reachable, safe-region) are
+ * unchanged — only the ranking/commitment logic differs. Falls back to plain
+ * LookAhead behaviour on maps with no spawner groups.
+ */
+export class StrategyHighCapacity extends StrategyLookAhead {
+    /** Heartbeat so the patience timer fires even with no sensing events. */
+    tickIntervalMs = 500;
+
+    /** @type {Array<Array<{x:number,y:number}>>|null} lazily built group list */
+    #groups = null;
+    /** Index of the group currently being farmed (null = re-rank on next use). */
+    #farmIdx = null;
+    /** @type {'farm'|'deliver'} */
+    #phase = 'farm';
+    /** Timestamp of the last tick that saw at least one eligible parcel. */
+    #lastParcelTs = Date.now();
+    /** Patrol waypoints covering the farm group's spawners with sensing discs. */
+    #patrol = [];
+    /** Index of the waypoint currently being walked to. */
+    #patrolIdx = 0;
+    /** Group the patrol was built for (rebuilt when the farm group changes). */
+    #patrolGroupIdx = null;
+    /** Whether the agent was inside the farm group's sensing area last tick. */
+    #wasAtFarm = false;
+    /** Group indices already speculatively visited during the current delivery trip. */
+    #visitedDetours = new Set();
+
+    decide(currentIntent) {
+        this.#initGroups();
+        if (this.#groups.length === 0) return super.decide(currentIntent);
+
+        const carrying = parcels.carriedBy(me.id);
+        const now = Date.now();
+
+        // Load banked → fresh farming cycle: re-rank groups, reset trip state.
+        if (this.#phase === 'deliver' && carrying.length === 0) {
+            this.#phase   = 'farm';
+            this.#farmIdx = null;
+            this.#visitedDetours.clear();
+            this.#lastParcelTs = now;
+            log('load banked → FARM, groups re-ranked');
+        }
+
+        const eligible = this.#eligibleParcels();
+        if (eligible.some(p => this._countsForPatience(p))) this.#lastParcelTs = now;
+
+        if (carrying.length >= this._deliveryCap()) {
+            this.#phase = 'deliver';
+            return this.#deliver(currentIntent, false, false, eligible);
+        }
+
+        if (this.#phase === 'deliver')
+            return this.#deliver(currentIntent, this._opportunisticPickupEnabled(), this._detoursEnabled(), eligible);
+
+        // ── FARM: grab the next parcel (selection policy is a subclass hook) ──
+        if (eligible.length > 0) {
+            const choice = this._pickFarmTarget(eligible);
+            if (choice) {
+                if (this.shouldKeepCurrentPickup(currentIntent, choice)) return null;
+                log(`FARM pickup ${this.pickupDebug(choice.p)}`);
+                return ['go_pick_up', choice.p.x, choice.p.y, choice.p.id];
+            }
+        }
+
+        // The patience timer counts only while actually sensing the farm area:
+        // a far group can take longer than PATIENCE_MS just to walk to, and
+        // counting travel as a dry spell made the agent hop back and forth
+        // between groups without ever arriving at either.
+        const atFarm = this.#isAtFarm();
+        if (atFarm && !this.#wasAtFarm) this.#lastParcelTs = now; // just arrived
+        this.#wasAtFarm = atFarm;
+
+        // Dry spell over the patience window → hop or bank.
+        if (atFarm && now - this.#lastParcelTs >= PATIENCE_MS)
+            return this.#hopOrBank(currentIntent, carrying);
+
+        return this.#goFarm(currentIntent);
+    }
+
+    // ── subclass hooks ───────────────────────────────────────────────────────
+
+    /** Carried count that counts as "full" → triggers the DELIVER phase.
+     *  Subclasses may return a manual cap (e.g. on infinite-capacity maps). */
+    _deliveryCap() {
+        return CARRYING_CAPACITY;
+    }
+
+    /** Whether speculative group visits are allowed during delivery (off-route
+     *  go_explore to an unvisited spawner group even with no sensed parcel). */
+    _detoursEnabled() {
+        return true;
+    }
+
+    /** Whether opportunistic parcel pickup is allowed during delivery (pick up
+     *  a qualifying parcel seen while walking to the delivery tile). Kept
+     *  separate from _detoursEnabled so subclasses can re-enable pickups while
+     *  still disabling speculative group visits. */
+    _opportunisticPickupEnabled() {
+        return true;
+    }
+
+    /**
+     * Which parcel to pick up opportunistically while delivering. Base policy:
+     * best pickupValue within DETOUR_MAX_TILES A* path. Subclasses may tighten
+     * the filter (quality bar, in-sight only, etc.).
+     * Returns {p, value} or undefined.
+     */
+    _pickDeliveryTarget(eligible) {
+        return eligible
+            .map(p => ({ p, value: this.pickupValue(p) }))
+            .filter(({ p, value }) => value > 0 && this.pathLen(me, p) <= DETOUR_MAX_TILES)
+            .sort((a, b) => b.value - a.value)[0];
+    }
+
+    /** Whether a visible parcel counts as a "sighting" that resets the patience
+     *  timer. Subclasses with a quality bar exclude parcels they'd never take,
+     *  so trash spawns can't keep the agent camping a dry group forever. */
+    _countsForPatience(_parcel) {
+        return true;
+    }
+
+    /**
+     * FARM pickup policy: which eligible parcel to go for next. Default is the
+     * best positive pickupValue (greedy on value, no bank-first gate). Returns
+     * {p, value} (value used by the hysteresis check) or null/undefined.
+     */
+    _pickFarmTarget(eligible) {
+        return eligible
+            .map(p => ({ p, value: this.pickupValue(p) }))
+            .filter(({ value }) => value > 0)
+            .sort((a, b) => b.value - a.value)[0];
+    }
+
+    // ── groups ───────────────────────────────────────────────────────────────
+
+    #initGroups() {
+        if (this.#groups !== null) return;
+        let pool = spawnerTiles;
+        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
+            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) pool = f;
+        }
+        this.#groups = buildSpawnerGroups(pool, D_CLUSTER);
+        log(`built ${this.#groups.length} group(s) from ${pool.length} spawner tiles: `
+            + this.#groups.map((g, i) => `G${i}(n=${g.length})`).join(' '));
+    }
+
+    /** Nearest tile of `group` from the agent, by A* path length. */
+    #nearestTile(group) {
+        let best = { tile: null, dist: Infinity };
+        for (const t of group) {
+            const d = this.pathLen(me, t);
+            if (d < best.dist) best = { tile: t, dist: d };
+        }
+        return best;
+    }
+
+    /** Group to farm: most spawner cells, ties broken by A* distance. */
+    #selectFarmGroup() {
+        if (this.#farmIdx !== null) return this.#farmIdx;
+        const ranked = this.#groups
+            .map((g, idx) => ({ idx, count: g.length, ...this.#nearestTile(g) }))
+            .filter(e => Number.isFinite(e.dist))
+            .sort((a, b) => b.count - a.count || a.dist - b.dist);
+        this.#farmIdx = ranked[0]?.idx ?? null;
+        if (this.#farmIdx !== null)
+            log(`farm group → G${this.#farmIdx} (n=${ranked[0].count}, dist=${ranked[0].dist})`);
+        return this.#farmIdx;
+    }
+
+    /**
+     * If a delivery tile lies at most ENROUTE_DELIVERY_SLACK extra tiles off
+     * the direct route from the agent to `farmTarget`, return that delivery
+     * tile (the nearest such one). Returns null when no delivery qualifies.
+     *
+     * Condition: dist(me→D) + dist(D→farm) ≤ dist(me→farm) + SLACK
+     */
+    #enRouteDelivery(farmTarget) {
+        const directDist = this.pathLen(me, farmTarget);
+        if (!Number.isFinite(directDist)) return null;
+        const candidates = [];
+        for (const d of deliveryTiles) {
+            const toD   = this.pathLen(me, d);
+            const dFarm = this.pathLen(d, farmTarget);
+            if (Number.isFinite(toD) && Number.isFinite(dFarm)
+                    && toD + dFarm <= directDist + ENROUTE_DELIVERY_SLACK)
+                candidates.push({ d, toD });
+        }
+        if (candidates.length === 0) return null;
+        candidates.sort((a, b) => a.toD - b.toD);
+        return candidates[0].d;
+    }
+
+    /** True when at least one spawner of the current farm group is within
+     *  sensing range — i.e. the agent has arrived and is actually farming. */
+    #isAtFarm() {
+        const idx = this.#farmIdx;
+        if (idx === null || !this.#groups[idx]) return false;
+        return this.#groups[idx].some(t => distance(me, t) <= OBSERVATION_DISTANCE);
+    }
+
+    // ── FARM movement ────────────────────────────────────────────────────────
+
+    #goFarm(currentIntent) {
+        const idx = this.#selectFarmGroup();
+        if (idx === null) return this.exploreIfIdle(currentIntent);
+
+        // (Re)build the patrol when the farm group changed, starting from the
+        // waypoint nearest to the agent.
+        if (this.#patrolGroupIdx !== idx) {
+            this.#patrol = this.#buildPatrol(this.#groups[idx]);
+            this.#patrolGroupIdx = idx;
+            let bestI = 0, bestD = Infinity;
+            for (let i = 0; i < this.#patrol.length; i++) {
+                const d = this.pathLen(me, this.#patrol[i]);
+                if (d < bestD) { bestD = d; bestI = i; }
+            }
+            this.#patrolIdx = bestI;
+            log(`FARM patrol for G${idx}: ${this.#patrol.length} waypoint(s) `
+                + this.#patrol.map(t => `(${t.x},${t.y})`).join(' '));
+        }
+
+        // Patrol: keep moving across the group so every spawner
+        // cell passes through sensing range while waiting for spawns.
+        if (Math.round(me.x) === this.#patrol[this.#patrolIdx].x
+                && Math.round(me.y) === this.#patrol[this.#patrolIdx].y)
+            this.#patrolIdx = (this.#patrolIdx + 1) % this.#patrol.length;
+
+        for (let tries = 0; tries < this.#patrol.length; tries++) {
+            const target = this.#patrol[this.#patrolIdx];
+            if (this.isReachable(target)) {
+                if (currentIntent?.[0] === 'go_explore'
+                        && currentIntent[1] === target.x && currentIntent[2] === target.y)
+                    return null;
+                // En-route delivery: if carrying parcels and a delivery tile lies
+                // ≤ ENROUTE_DELIVERY_SLACK extra tiles off the path to the farm
+                // waypoint, stop and deliver now — the farm group index is kept
+                // so the agent resumes the same group after banking.
+                if (parcels.carriedBy(me.id).length > 0) {
+                    const deliver = this.#enRouteDelivery(target);
+                    if (deliver) {
+                        log(`FARM en-route delivery to (${deliver.x},${deliver.y}) before G${idx}`);
+                        this.#phase = 'deliver';
+                        this.#visitedDetours.clear();
+                        return ['go_deliver', deliver.x, deliver.y];
+                    }
+                }
+                log(`FARM patrol G${idx} → waypoint ${this.#patrolIdx + 1}/${this.#patrol.length} (${target.x},${target.y})`);
+                return ['go_explore', target.x, target.y];
+            }
+            this.#patrolIdx = (this.#patrolIdx + 1) % this.#patrol.length;
+        }
+        this.#farmIdx = null; // no waypoint reachable — re-rank next tick
+        this.#patrolGroupIdx = null;
+        return this.exploreIfIdle(currentIntent);
+    }
+
+    /**
+     * Patrol waypoints for the group. The agent always keeps moving so every
+     * spawner cell passes through sensing range during the dry-spell window.
+     *
+     * Strategy: compute the group centroid, then pick waypoints by sorting
+     * spawner tiles by angle around the centroid (clockwise). This gives a
+     * loop that naturally covers the spatial extent of the group regardless
+     * of sensing radius. At least 2 waypoints are always returned even for a
+     * single-tile group (centroid tile used twice would be a no-op, so we
+     * add the nearest-to-centroid and farthest-from-centroid tiles as the two
+     * extremes). The number of waypoints is capped so the patrol stays snappy.
+     */
+    #buildPatrol(group) {
+        if (group.length === 1) return [group[0]];
+
+        // Centroid of all group spawner tiles.
+        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
+        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
+
+        // If the group has only 2 tiles just use both.
+        if (group.length === 2) return [...group];
+
+        // Sort by angle around centroid → clockwise loop.
+        const byAngle = [...group].sort((a, b) =>
+            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
+        );
+
+        // Cap the patrol length so the agent doesn't spend forever on large
+        // groups: keep every k-th tile so we get at most MAX_WAYPOINTS stops.
+        const MAX_WAYPOINTS = 6;
+        if (byAngle.length <= MAX_WAYPOINTS) return byAngle;
+        const step = byAngle.length / MAX_WAYPOINTS;
+        return Array.from({ length: MAX_WAYPOINTS }, (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+    }
+
+    // ── HOP / bank decision ──────────────────────────────────────────────────
+
+    #hopOrBank(currentIntent, carrying) {
+        const cap = this._deliveryCap();
+        const minLoad = Number.isFinite(cap)
+            ? Math.ceil(MIN_LOAD_FRACTION * cap)
+            : Infinity;
+        if (carrying.length < minLoad) {
+            const hop = this.#bestNeighbourGroup(carrying);
+            if (hop) {
+                log(`HOP G${this.#farmIdx ?? '?'} dry for ${PATIENCE_MS}ms → G${hop.idx} (n=${hop.count}, dist=${hop.dist})`);
+                this.#farmIdx = hop.idx;
+                this.#lastParcelTs = Date.now();
+                return this.#goFarm(currentIntent);
+            }
+        }
+        if (carrying.length > 0) {
+            this.#phase = 'deliver';
+            // The current group is dry — don't speculatively revisit it en route.
+            if (this.#farmIdx !== null) this.#visitedDetours.add(this.#farmIdx);
+            log(`patience expired with ${carrying.length}/${cap} carried → DELIVER`);
+            return this.#deliver(currentIntent, this._opportunisticPickupEnabled(), this._detoursEnabled(), []);
+        }
+        return this.exploreIfIdle(currentIntent);
+    }
+
+    /**
+     * Best other group by count/distance score. While carrying, the hop is
+     * viable only if its decay loss stays under HOP_MAX_LOSS_FRACTION of the
+     * carried reward; otherwise null (→ bank instead).
+     */
+    #bestNeighbourGroup(carrying) {
+        const best = this.#groups
+            .map((g, idx) => ({ idx, count: g.length, ...this.#nearestTile(g) }))
+            .filter(e => e.idx !== this.#farmIdx && Number.isFinite(e.dist))
+            .sort((a, b) => b.count / Math.max(1, b.dist) - a.count / Math.max(1, a.dist))[0];
+        if (!best) return null;
+        if (carrying.length > 0) {
+            const R    = carrying.reduce((s, p) => s + p.reward, 0);
+            const loss = carrying.length * this.decayRate() * best.dist;
+            if (loss > HOP_MAX_LOSS_FRACTION * R) {
+                log(`hop to G${best.idx} rejected: decay loss ${loss.toFixed(1)} > ${(HOP_MAX_LOSS_FRACTION * R).toFixed(1)}`);
+                return null;
+            }
+        }
+        return best;
+    }
+
+    // ── DELIVER with en-route detours ────────────────────────────────────────
+
+    #deliver(currentIntent, allowPickup, allowSpeculative, eligible) {
+        // 1. Opportunistic parcel pickup: qualifying parcel already in view.
+        if (allowPickup) {
+            const near = this._pickDeliveryTarget(eligible);
+            if (near) {
+                if (this.shouldKeepCurrentPickup(currentIntent, near)) return null;
+                log(`DELIVER pickup ${this.pickupDebug(near.p)}`);
+                return ['go_pick_up', near.p.x, near.p.y, near.p.id];
+            }
+        }
+
+        // 2. Speculative group visit: go_explore an unvisited nearby spawner group.
+        if (allowSpeculative) {
+            if (currentIntent?.[0] === 'go_explore') {
+                // Mid-speculative-detour: keep going until the group is in reach;
+                // a parcel sensed on the way is caught by check 1 above.
+                if (distance(me, { x: currentIntent[1], y: currentIntent[2] }) > 1) return null;
+                // Arrived and nothing eligible — fall through and resume delivery.
+            } else {
+                const spec = this.#groups
+                    .map((g, idx) => ({ idx, ...this.#nearestTile(g) }))
+                    .filter(e => !this.#visitedDetours.has(e.idx)
+                        && e.dist > 0 && e.dist <= DETOUR_MAX_TILES)
+                    .sort((a, b) => a.dist - b.dist)[0];
+                if (spec) {
+                    this.#visitedDetours.add(spec.idx);
+                    log(`DELIVER speculative detour → G${spec.idx} (${spec.tile.x},${spec.tile.y}) dist=${spec.dist}`);
+                    return ['go_explore', spec.tile.x, spec.tile.y];
+                }
+            }
+        }
+
+        if (currentIntent?.[0] === 'go_deliver'
+                && this.isReachable({ x: currentIntent[1], y: currentIntent[2] }))
+            return null;
+        const target = this.nearestEscapableDelivery();
+        if (target) {
+            log(`DELIVER (${parcels.carriedBy(me.id).length}/${this._deliveryCap()}) → (${target.x},${target.y})`);
+            return ['go_deliver', target.x, target.y];
+        }
+        log('no reachable delivery — repositioning');
+        return this.exploreIfIdle(currentIntent);
+    }
+
+    // ── candidate pool (same eligibility filters as LookAhead) ──────────────
+
+    #eligibleParcels() {
+        const remembered = parcels.remembered();
+        const all = [
+            ...parcels.free(),
+            ...remembered.filter(r => !parcels.get(r.id)),
+        ];
+        return all.filter(p => this.isReachable(p) && this.inSafe(p));
+    }
+}
