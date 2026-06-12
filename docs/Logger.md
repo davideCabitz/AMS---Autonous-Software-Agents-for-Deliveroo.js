@@ -39,6 +39,8 @@ LOG_NAMESPACES=              # silenzio totale
 | `not-too-greedy` | StrategyNotTooGreedy decisions |
 | `simple` | StrategySimple decisions |
 | `single-parcel` | StrategySingleParcel decisions |
+| `highcap` | StrategyHighCapacity farm/hop/deliver cycle |
+| `rush` | StrategyHighCapacityRush quality bar and delivery decisions |
 | `llm` | Layer comandi LLM |
 | `llm:chat` | Messaggi chat in arrivo |
 | `llm:tool` | Tool calls LLM eseguiti |
