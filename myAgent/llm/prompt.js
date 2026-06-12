@@ -107,6 +107,8 @@ export function buildSystemPrompt(objective) {
         '  DIFFERENT from deliver(): deliver() navigates to a delivery tile first (scores points).',
         '  Use put_down() when the human says "drop", "put down", "leave it here", or "leave the parcel".',
         '- A spawn tile may currently have NO parcel: go there, then sense_parcels / wait for one.',
+        '- "B" / "agent B" = YOU (the coordinator). "A" / "agent A" = your partner worker agent.',
+        '  People may also call the partner "the worker" or use its in-game name.',
         '',
         'AVAILABLE TOOLS:',
         '- calculate(expression): evaluate math, e.g. "14 - 10"; you may pass two comma-separated',
@@ -137,6 +139,9 @@ export function buildSystemPrompt(objective) {
         '- order_partner_goto(x,y) / order_partner_pickup(x,y) / order_partner_deliver(x,y or none)',
         '- order_partner_putdown(): partner drops its cargo where it stands.',
         '- halt_partner(): freeze the partner (it holds position until resume_partner).',
+        '  To PARK the partner at a tile ("send it to X and make it wait"): halt_partner FIRST,',
+        '  then order_partner_goto — orders run fine while frozen, and the partner stays put',
+        '  afterwards. Ordering before halting lets it wander off again before the halt lands.',
         '- resume_partner(): unfreeze the partner back to autonomous work.',
         '- ask_partner_status(): partner position, score, cargo, frozen state.',
         '- start_handoff(): start the automatic cross-agent routine — I fetch parcels, partner delivers',
@@ -221,6 +226,7 @@ export function buildSystemPrompt(objective) {
  * NEVER move the agent — only read tools are available. The answer is the reply.
  */
 export function buildChatPrompt(message) {
+    const ps = partner.lastStatus;
     return [
         'You are the conversational voice of an autonomous Deliveroo delivery agent.',
         'Someone sent you a chat message. Answer it briefly and helpfully.',
@@ -230,6 +236,15 @@ export function buildChatPrompt(message) {
         'You may be busy doing something else right now; that task keeps running while you reply.',
         'You CANNOT move, pick up, deliver, or wait — you can only OBSERVE and ANSWER.',
         `Your current position is (${me.x}, ${me.y}), score ${me.score}.`,
+        '',
+        'YOUR PARTNER (a second worker agent you coordinate — NOT you):',
+        partner.id
+            ? `- Partner${partner.name ? ` "${partner.name}"` : ''} is connected${ps ? ` — last reported: at (${ps.x},${ps.y}), carrying ${ps.carrying?.length ?? 0}, ${ps.frozen ? 'frozen' : 'working'}` : ''}.`
+            : '- No partner connected: answer partner questions with that fact.',
+        '- "A" / "agent A" / "the worker" / the partner\'s name = the PARTNER.',
+        '- "B" / "agent B" / your own name = YOU. Never mix the two up.',
+        '- For ANY question about the partner (position, cargo, state): call ask_partner_status',
+        '  and answer from its result. NEVER answer with your own position or from memory.',
         '',
         'YOUR CURRENT STATE (answer state questions from this, accurately):',
         manualHold.active
@@ -248,7 +263,8 @@ export function buildChatPrompt(message) {
             : ['- None: default behaviour (pick up and deliver parcels autonomously).']),
         '',
         'AVAILABLE TOOLS (read-only):',
-        '- get_my_position(): your current x, y and score.',
+        '- get_my_position(): YOUR current x, y and score.',
+        '- ask_partner_status(): the PARTNER\'s live position, score, cargo, frozen state.',
         '- sense_parcels(): free parcels currently in view.',
         '- sense_delivery_tiles() / sense_spawn_tiles(): reachable delivery / spawn tiles.',
         '- get_map_info(): map bounds and edges.',
