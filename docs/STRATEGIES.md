@@ -35,14 +35,35 @@ This document describes every strategy class used by the BDI agent, how each one
 | 3 | Spawner tiles > 50 % of all walkable tiles | `StrategyHurry` |
 | 4 | `CARRYING_CAPACITY > 5` **and** `PARCEL_GENERATION_MS ≤ 1000` **and** `PARCELS_MAX ≥ 15` **and** largest group ≥ 5 spawners | `StrategyHighCapacityRush` (also enables parcel memory) |
 | 5 | `CARRYING_CAPACITY > 5` (finite) **and** largest group ≥ 3 spawners | `StrategyHighCapacity` (also enables parcel memory) |
-| 6 | ≥ 3 path-based spatial groups | `StrategyLookAheadStochastic` (also enables parcel memory) |
-| 7 | Otherwise (common case) | `StrategyLookAhead` (also enables parcel memory) |
+| 6 | **Comb / hallway topology** detected (see below) | `StrategyLookAhead` (also enables parcel memory) |
+| 7 | ≥ 3 path-based spatial groups | `StrategyLookAheadStochastic` (also enables parcel memory) |
+| 8 | Otherwise (common case) | `StrategyLookAhead` (also enables parcel memory) |
 
 `StrategySimple`, `StrategyGreedy`, `StrategyNotTooGreedy`, and `StrategyMemory` are available but not auto-selected — manual use or experiments only.
 
 **Group density gates:** High-capacity strategies require the densest spawner cluster to meet a minimum size. If `maxGroupSize < 3` (all groups have 1–2 spawners) even a high-capacity agent falls through to stochastic/LookAhead, where probabilistic or deterministic exploration is more efficient than trying to farm a tiny cluster. The thresholds are `RUSH_MIN_GROUP_SIZE = 5` and `HC_MIN_GROUP_SIZE = 3`.
 
 **Path-based grouping:** Spawner groups are computed with BFS on the walkable grid (max 2 steps). Two spawners separated only by a wall are **never** merged even if their Euclidean distance is ≤ 2.
+
+### Comb / hallway topology override (priority 6)
+
+**File:** `myAgent/beliefs/MapTopology.js` — `detectCombTopology(spawnerTiles, walkableTiles, groups)`.
+
+On comb / hallway maps (parallel spawner "fingers" separated by walls and joined by a spine corridor — e.g. `long_hallways`, `hallways_interconnected`), every tooth is its own spawner group. That trips the `≥ 3 groups` rule (priority 7) and would select `StrategyLookAheadStochastic`, which samples groups **randomly**. On a linear layout that wastes movement: the teeth should be **swept sequentially**, which is exactly what `StrategyLookAhead`'s deterministic nearest-next exploration does. Priority 6 detects this case and diverts it to `StrategyLookAhead`.
+
+The check sits **after** the Blind / single-spawner / Hurry / HighCapacity gates (those keep precedence — a high-capacity comb should still farm) and **immediately before** the stochastic gate, so it only ever converts a would-be-stochastic selection into LookAhead.
+
+A layout is classified as a comb only when, on the horizontal **or** vertical axis (or both — a grid/cross map), **all** of the following hold. The detector keys on *periodic, wall-separated, solid corridors* rather than tracing corridors, which makes it immune to teeth shifted by ±1 on the cross axis:
+
+| Criterion | Constant | Meaning |
+|---|---|---|
+| Enough teeth | `MIN_LINES = 4` | ≥ 4 distinct rows/columns contain a spawner. |
+| Wide span | `MIN_SPAN = 6` | The teeth span ≥ 6 tiles along the tooth axis (not a tight cluster). |
+| Regular spacing | `MAX_TOOTH_GAP = 3`, `REGULAR_FRAC = 0.7` | ≥ 70 % of consecutive-tooth gaps are ≤ 3 tiles. |
+| Solid tooth corridors | `MIN_TOOTH_WALK = 0.85` | Average walkable fraction along the tooth-lines (across the cross-span) ≥ 85 %. **Key discriminator** — real comb teeth measure ≥ 97 %; maze/vortex "teeth" broken by walls measure ≤ 69 %. |
+| Walled separators | `MIN_SEPARATORS = 4`, `MIN_WALL_FRAC = 0.6`, `SEP_WALL_FRAC = 0.7` | ≥ 4 separator bands between consecutive teeth, ≥ 70 % of which are ≥ 60 % wall. Confirms the teeth are genuinely isolated fingers. |
+
+Validated against all 40 real SDK maps: exactly `long_hallways` and `hallways_interconnected` qualify; mazes, vortices, atom, crossroads, circuit, and open spawner fields are all rejected.
 
 ---
 
@@ -275,7 +296,7 @@ carrying == 0:
 
 **File:** `myAgent/strategies/StrategyLookAhead.js`  
 **Extends:** `StrategyMemory`  
-**Selected when:** common case (default strategy)
+**Selected when:** common case (default strategy), **or** when comb / hallway topology is detected (priority 6 — see [Strategy Selection](#1-strategy-selection))
 
 Extends `StrategyMemory` with a **2-step look-ahead** on pickup selection. `StrategyMemory` scores each parcel in isolation — a high-reward distant parcel always wins even when a decent parcel sits almost on the route. `StrategyLookAhead` corrects this by considering pairs.
 
@@ -317,7 +338,7 @@ There is no geometric "on the way" gate. Under decay the longer-travel order is 
 
 **File:** `myAgent/strategies/StrategyLookAheadStochastic.js`  
 **Extends:** `StrategyLookAhead`  
-**Selected when:** ≥ 3 path-based spatial groups (and no high-capacity condition applies)
+**Selected when:** ≥ 3 path-based spatial groups (and no high-capacity condition applies **and** the map is not comb / hallway topology — see priority 6 in [Strategy Selection](#1-strategy-selection))
 
 Identical to `StrategyLookAhead` in all pickup, delivery, memory and look-ahead logic. Only `exploreIfIdle()` is overridden with **probabilistic group-based exploration** to break the deterministic ping-pong loop that forms on maps with many spatially separate spawner clusters.
 
@@ -363,7 +384,7 @@ Within the chosen group, the agent navigates to the tile that **covers the most 
 
 ### Auto-selection note
 
-`selectStrategy` chooses this strategy automatically when ≥ 3 path-based groups are found and no high-capacity condition applies. On maps with fewer groups (stripe maps, single dense cluster), it falls back to `StrategyLookAhead` automatically.
+`selectStrategy` chooses this strategy automatically when ≥ 3 path-based groups are found, no high-capacity condition applies, and the map is not comb / hallway topology. On maps with fewer groups (stripe maps, single dense cluster), or on comb / hallway maps (where a sequential sweep beats random sampling — see priority 6), it falls back to `StrategyLookAhead` automatically.
 
 ---
 

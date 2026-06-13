@@ -12,6 +12,7 @@ import { StrategySingleParcel }        from './StrategySingleParcel.js';
 import { StrategyHighCapacity }        from './StrategyHighCapacity.js';
 import { StrategyHighCapacityRush }    from './StrategyHighCapacityRush.js';
 import { buildSpawnerGroups }          from '../beliefs/SpawnerGroups.js';
+import { detectCombTopology }           from '../beliefs/MapTopology.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('strategy');
@@ -98,6 +99,18 @@ export function selectStrategy() {
             && maxGroupSize >= HC_MIN_GROUP_SIZE) {
         log(`capacity=${CARRYING_CAPACITY} > ${HIGH_CAPACITY_MIN} maxGroup=${maxGroupSize} → StrategyHighCapacity`);
         return new StrategyHighCapacity();
+    }
+
+    // Comb / hallway topology: many regularly-spaced spawner "teeth" along a
+    // spine corridor. Each tooth is its own group, so the stochastic gate below
+    // would fire — but on a linear layout random group sampling wastes movement.
+    // A deterministic nearest-next sweep (StrategyLookAhead) covers the teeth in
+    // spatial order instead. Checked here so it only ever diverts the would-be
+    // stochastic case; Blind/Hurry/HighCapacity above keep precedence.
+    const topo = detectCombTopology(spawnerTiles, walkableTiles, groups);
+    if (topo.isComb) {
+        log(`comb topology (${topo.axis}: ${topo.reason}) → StrategyLookAhead`);
+        return new StrategyLookAhead();
     }
 
     // Probabilistic group-based exploration: worthwhile only when the map has
