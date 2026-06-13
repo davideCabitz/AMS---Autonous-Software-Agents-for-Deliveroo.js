@@ -7,8 +7,7 @@
   "scripts": {
     "start": "node myAgent/agent.js",
     "start:coordinator": "node myAgent/launch.js coordinator",
-    "start:worker": "node myAgent/launch.js worker",
-    "llm": "node llmAgent/llmAgent.js"
+    "start:worker": "node myAgent/launch.js worker"
   },
   "dependencies": {
     "@unitn-asa/deliveroo-js-sdk": "*",

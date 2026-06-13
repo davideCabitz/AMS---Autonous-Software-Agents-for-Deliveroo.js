@@ -10,7 +10,7 @@ const log     = createLogger('pddl');
 const moveLog = createLogger('move:pddl');
 import {
     me, socket, parcels, beliefset, mapHasCrates, pddl, moveTiming,
-    crateTiles, crateSpawnerTiles, walkableTiles, deliveryTiles, spawnerTiles
+    crateTiles, crateSpawnerTiles, walkableTiles
 } from '../context.js';
 import { findRoute, waitForArrival } from '../utils/astar.js';
 

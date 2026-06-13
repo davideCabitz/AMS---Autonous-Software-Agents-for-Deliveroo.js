@@ -11,15 +11,10 @@ The project runs on **Deliveroo.js** — a web-based parcel delivery game on an 
 
 **Two-agent system.** The second challenge requires **two cooperating agents** connected to the same game simultaneously. This codebase implements them as two processes running the *same* agent code in different roles:
 
-<<<<<<< HEAD
-- **Coordinator** (`Alfiere`, token `TOKEN_LLM`) — full BDI agent **plus** the LLM command layer. It reads natural-language missions from the chat, interprets them, and commands both itself and the worker.
-- **Worker** (`bdi_pawn`, token `TOKEN_BDI`) — plain BDI agent **plus** a lightweight partner-order handler. No LLM: it executes structured JSON orders the coordinator sends over the chat channel.
-=======
 - **Coordinator** (token `TOKEN_COORDINATOR`) — full BDI agent **plus** the LLM command layer. It reads natural-language missions from the chat, interprets them, and commands both itself and the worker.
 - **Worker** (token `TOKEN_WORKER`) — plain BDI agent **plus** a lightweight partner-order handler. No LLM: it executes structured JSON orders the coordinator sends over the chat channel.
 
 Agent display names come from the JWT tokens, not from code — any names work (this repo's test tokens happen to be named `Alfiere` and `bdi_pawn`).
->>>>>>> 16ed51407381be43e7cf80feaba7740c0567e412
 
 **Core design principles:**
 1. The LLM decides **WHAT** to do; the BDI agent decides **HOW** to do it. The LLM never moves one tile at a time — it issues high-level commands (`go_to`, `go_pickup`, `deliver`) that the BDI plan library (A*/PDDL) executes and returns from. This avoids the failure modes of a standalone LLM agent (wall collisions, one-model-call-per-tile slowness, no pathfinding).
@@ -336,13 +331,8 @@ The manual text protocol (regex-parsing `Action:` / `Action Input:` / `Final Ans
 | Key | Purpose |
 |---|---|
 | `HOST` | Deliveroo.js server URL |
-<<<<<<< HEAD
-| `TOKEN_LLM` | Coordinator token (role user) |
-| `TOKEN_BDI` | Worker token (role user) |
-=======
 | `TOKEN_COORDINATOR` | Coordinator token (role user) |
 | `TOKEN_WORKER` | Worker token (role user) |
->>>>>>> 16ed51407381be43e7cf80feaba7740c0567e412
 | `LITELLM_BASE_URL` / `LITELLM_API_KEY` | Faculty proxy |
 | `LOCAL_MODEL` | `gpt-4o` (primary) |
 | `LOCAL_MODEL_FALLBACK` | `llama-3.3-70b` — used when Azure's content filter false-positives twice in a row |
