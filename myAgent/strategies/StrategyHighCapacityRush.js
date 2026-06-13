@@ -32,6 +32,14 @@ export const RUSH_HIGH_AVG_FLOOR  = 20;
  * bank fallback (so a dried-up map can't deadlock the agent) are all inherited.
  */
 export class StrategyHighCapacityRush extends StrategyHighCapacity {
+    constructor() {
+        super({
+            deliveryCap:       Number.isFinite(CARRYING_CAPACITY) ? CARRYING_CAPACITY : RUSH_INFINITE_CAP,
+            detoursEnabled:    false,
+            opportunisticPickup: true,
+        });
+    }
+
     /** Minimum reward a parcel must currently have to be worth picking up.
      *  mustStack (LLM layer): while a requiredStackSize mission still needs
      *  parcels, the bar is dropped — a mandated stack must be filled even
@@ -41,18 +49,6 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
         return PARCEL_REWARD_AVG > 30
             ? RUSH_HIGH_AVG_FLOOR
             : PARCEL_REWARD_AVG - RUSH_REWARD_MARGIN;
-    }
-
-    _deliveryCap() {
-        return Number.isFinite(CARRYING_CAPACITY) ? CARRYING_CAPACITY : RUSH_INFINITE_CAP;
-    }
-
-    _detoursEnabled() {
-        return false; // no speculative group visits during delivery
-    }
-
-    _opportunisticPickupEnabled() {
-        return true; // pick up qualifying parcels seen while walking to delivery
     }
 
     /**

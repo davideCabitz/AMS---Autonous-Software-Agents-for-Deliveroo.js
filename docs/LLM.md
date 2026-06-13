@@ -11,7 +11,7 @@ The project runs on **Deliveroo.js** — a web-based parcel delivery game on an 
 
 **Two-agent system.** The second challenge requires **two cooperating agents** connected to the same game simultaneously. This codebase implements them as two processes running the *same* agent code in different roles:
 
-- **Coordinator** (`Alfiere`, token `TOKEN_Alfiere`) — full BDI agent **plus** the LLM command layer. It reads natural-language missions from the chat, interprets them, and commands both itself and the worker.
+- **Coordinator** (`Alfiere`, token `TOKEN_LLM`) — full BDI agent **plus** the LLM command layer. It reads natural-language missions from the chat, interprets them, and commands both itself and the worker.
 - **Worker** (`bdi_pawn`, token `TOKEN_BDI`) — plain BDI agent **plus** a lightweight partner-order handler. No LLM: it executes structured JSON orders the coordinator sends over the chat channel.
 
 **Core design principles:**
@@ -329,7 +329,7 @@ The manual text protocol (regex-parsing `Action:` / `Action Input:` / `Final Ans
 | Key | Purpose |
 |---|---|
 | `HOST` | Deliveroo.js server URL |
-| `TOKEN_Alfiere` | Coordinator token (role user) |
+| `TOKEN_LLM` | Coordinator token (role user) |
 | `TOKEN_BDI` | Worker token (role user) |
 | `LITELLM_BASE_URL` / `LITELLM_API_KEY` | Faculty proxy |
 | `LOCAL_MODEL` | `gpt-4o` (primary) |

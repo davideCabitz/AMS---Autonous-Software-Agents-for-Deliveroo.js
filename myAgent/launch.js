@@ -4,7 +4,7 @@ import 'dotenv/config';
  * Two-agent launcher. The challenge-2 system runs the SAME agent code twice with
  * different roles:
  *   coordinator — full BDI + LLM command layer; interprets shouted missions and
- *                 commands both itself and the worker (token TOKEN_Alfiere).
+ *                 commands both itself and the worker (token TOKEN_LLM).
  *   worker      — plain BDI + lightweight partner-order handler (token TOKEN_BDI).
  *
  * TOKEN must be set BEFORE agent.js is imported: context.js calls DjsConnect()
@@ -21,9 +21,9 @@ if (!['coordinator', 'worker'].includes(role)) {
     process.exit(1);
 }
 
-const token = role === 'coordinator' ? process.env.TOKEN_Alfiere : process.env.TOKEN_BDI;
+const token = role === 'coordinator' ? process.env.TOKEN_LLM : process.env.TOKEN_BDI;
 if (!token) {
-    console.error(`Missing ${role === 'coordinator' ? 'TOKEN_Alfiere' : 'TOKEN_BDI'} in .env`);
+    console.error(`Missing ${role === 'coordinator' ? 'TOKEN_LLM' : 'TOKEN_BDI'} in .env`);
     process.exit(1);
 }
 

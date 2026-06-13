@@ -79,6 +79,24 @@ export class StrategyHighCapacity extends StrategyLookAhead {
      *  under — a restrict_exploration mission applied mid-run rebuilds them. */
     #groupsSig = null;
 
+    // ── constructor config (set once, not virtual) ───────────────────────────
+    #deliveryCap;
+    #detoursEnabled;
+    #opportunisticPickup;
+
+    /**
+     * @param {object} [cfg]
+     * @param {number}  [cfg.deliveryCap]        Carried count that triggers DELIVER. Default: CARRYING_CAPACITY.
+     * @param {boolean} [cfg.detoursEnabled]     Allow speculative group visits during delivery. Default: true.
+     * @param {boolean} [cfg.opportunisticPickup] Allow picking up parcels while en route to delivery. Default: true.
+     */
+    constructor({ deliveryCap = CARRYING_CAPACITY, detoursEnabled = true, opportunisticPickup = true } = {}) {
+        super();
+        this.#deliveryCap      = deliveryCap;
+        this.#detoursEnabled   = detoursEnabled;
+        this.#opportunisticPickup = opportunisticPickup;
+    }
+
     decide(currentIntent) {
         this.#initGroups();
         if (this.#groups.length === 0) return super.decide(currentIntent);
@@ -101,7 +119,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         // Mission gates (LLM layer): maxBundleValue → single-parcel trips, so the
         // hold is "full" at 1; requiredStackSize → never enter DELIVER before the
         // stack is complete (stackReady), exactly like the other strategies.
-        const effectiveCap = this.singleParcelBundles() ? 1 : this._deliveryCap();
+        const effectiveCap = this.singleParcelBundles() ? 1 : this.#deliveryCap;
         if (carrying.length >= effectiveCap && this.stackReady(carrying)) {
             this.#phase = 'deliver';
             return this.#deliver(currentIntent, false, false, eligible);
@@ -110,8 +128,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         if (this.#phase === 'deliver')
             return this.#deliver(
                 currentIntent,
-                this._opportunisticPickupEnabled() && !this.singleParcelBundles(),
-                this._detoursEnabled(),
+                this.#opportunisticPickup && !this.singleParcelBundles(),
+                this.#detoursEnabled,
                 eligible,
             );
 
@@ -141,26 +159,6 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     // ── subclass hooks ───────────────────────────────────────────────────────
-
-    /** Carried count that counts as "full" → triggers the DELIVER phase.
-     *  Subclasses may return a manual cap (e.g. on infinite-capacity maps). */
-    _deliveryCap() {
-        return CARRYING_CAPACITY;
-    }
-
-    /** Whether speculative group visits are allowed during delivery (off-route
-     *  go_explore to an unvisited spawner group even with no sensed parcel). */
-    _detoursEnabled() {
-        return true;
-    }
-
-    /** Whether opportunistic parcel pickup is allowed during delivery (pick up
-     *  a qualifying parcel seen while walking to the delivery tile). Kept
-     *  separate from _detoursEnabled so subclasses can re-enable pickups while
-     *  still disabling speculative group visits. */
-    _opportunisticPickupEnabled() {
-        return true;
-    }
 
     /**
      * Which parcel to pick up opportunistically while delivering. Base policy:
@@ -373,7 +371,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── HOP / bank decision ──────────────────────────────────────────────────
 
     #hopOrBank(currentIntent, carrying) {
-        const cap = this._deliveryCap();
+        const cap = this.#deliveryCap;
         const minLoad = Number.isFinite(cap)
             ? Math.ceil(MIN_LOAD_FRACTION * cap)
             : Infinity;
@@ -395,8 +393,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             log(`patience expired with ${carrying.length}/${cap} carried → DELIVER`);
             return this.#deliver(
                 currentIntent,
-                this._opportunisticPickupEnabled() && !this.singleParcelBundles(),
-                this._detoursEnabled(),
+                this.#opportunisticPickup && !this.singleParcelBundles(),
+                this.#detoursEnabled,
                 [],
             );
         }
@@ -466,7 +464,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             return null;
         const target = this.nearestEscapableDelivery();
         if (target) {
-            log(`DELIVER (${parcels.carriedBy(me.id).length}/${this._deliveryCap()}) → (${target.x},${target.y})`);
+            log(`DELIVER (${parcels.carriedBy(me.id).length}/${this.#deliveryCap}) → (${target.x},${target.y})`);
             return ['go_deliver', target.x, target.y];
         }
         log('no reachable delivery — repositioning');

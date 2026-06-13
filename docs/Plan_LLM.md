@@ -15,7 +15,7 @@ The project is a Deliveroo.js BDI agent (`myAgent/`) plus an LLM command layer (
 ## Verified facts (read from code)
 
 - `socket.emitShout` is rebroadcast server-side as a `msg` event (SDK `DjsServerSocket.js:213`), so the existing `socket.onMsg` handler in `myAgent/llm/index.js` already receives mission shouts; replies via `emitSay(sender, ...)` reach the mission agent (QuestionAnswer listens on `onMsg`).
-- `myAgent/context.js:15` calls `DjsConnect()` with no args → uses `process.env.TOKEN`. `.env` has only `TOKEN_Alfiere` and `TOKEN_BDI` → launch infra needed (Phase 0).
+- `myAgent/context.js:15` calls `DjsConnect()` with no args → uses `process.env.TOKEN`. `.env` has only `TOKEN_LLM` and `TOKEN_BDI` → launch infra needed (Phase 0).
 - `myAgent/plans/GoDeliver.js` `execute(intent, x, y)` is **already parameterized** — only the LLM `deliver()` tool hardcodes the nearest tile.
 - Constraint enforcement exists: `avoidTiles` in `myAgent/utils/astar.js` (~line 323), `allowedDeliveryTiles`/`requiredStackSize` in `myAgent/strategies/Strategy.js` (~lines 73, 103, 312). **Missing**: max-bundle-value constraint (scenario 26c2_7).
 - No putdown primitive outside `GoDeliver` — needed for the handoff (26c2_8).
@@ -41,7 +41,7 @@ Mission agents append `" Bonus is <N>pts."` to every prompt — usable for cost/
 
 ## Phase 0 — Two-agent launch infrastructure
 
-**New `myAgent/launch.js`** (~25 lines): `import 'dotenv/config';` first, then set `process.env.AGENT_ROLE` and `process.env.TOKEN` (coordinator → `TOKEN_Alfiere`, worker → `TOKEN_BDI`) from `process.argv[2]` **before** `await import('./agent.js')` (context.js connects at module load).
+**New `myAgent/launch.js`** (~25 lines): `import 'dotenv/config';` first, then set `process.env.AGENT_ROLE` and `process.env.TOKEN` (coordinator → `TOKEN_LLM`, worker → `TOKEN_BDI`) from `process.argv[2]` **before** `await import('./agent.js')` (context.js connects at module load).
 
 **Modify `myAgent/context.js`**: `export const role = process.env.AGENT_ROLE ?? 'coordinator';`
 
