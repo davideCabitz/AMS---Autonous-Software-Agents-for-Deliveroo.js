@@ -247,6 +247,11 @@ export class StrategyHighCapacity extends StrategyLookAhead {
      * Condition: dist(me→D) + dist(D→farm) ≤ dist(me→farm) + SLACK
      */
     #enRouteDelivery(farmTarget) {
+        // A deliveryMultipliers mission is active: skip the nearest-tile en-route
+        // shortcut (it ignores the multiplier and could short-bank at a 1×/0× tile)
+        // and defer to the multiplier-aware nearestEscapableDelivery on the main
+        // DELIVER path. No-op when no such mission is set.
+        if (missionConstraints.deliveryMultipliers?.size > 0) return null;
         const directDist = this.pathLen(me, farmTarget);
         if (!Number.isFinite(directDist)) return null;
         // allowedDeliveryTiles mission: only constraint-approved tiles qualify.

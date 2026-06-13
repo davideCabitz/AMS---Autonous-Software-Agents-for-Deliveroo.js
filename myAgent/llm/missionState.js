@@ -15,7 +15,8 @@ import { missionConstraints } from '../context.js';
 /**
  * Apply a mission-constraint config. Fields are all optional and additive:
  *   requiredStackSize, allowedDeliveryTiles [[x,y],…], allowedSpawnerTiles,
- *   avoidTiles [[x,y],…], maxParcelReward, maxBundleValue, description.
+ *   avoidTiles [[x,y],…], maxParcelReward, maxBundleValue,
+ *   deliveryMultipliers [[x,y,mult],…], description.
  * @param {object} config already-parsed JSON
  * @returns {string} observation
  */
@@ -49,6 +50,21 @@ export function applyMissionConfig(config) {
         missionConstraints.maxBundleValue = Number(config.maxBundleValue);
         fieldsSet.push('maxBundleValue');
     }
+    if (Array.isArray(config.deliveryMultipliers)) {
+        // Per-tile delivery reward scale, e.g. 5 for "5× pts in (x,y)" or 0 for
+        // "0 pts in (x,y)". Additive: merge into the existing Map so several
+        // missions (a 5× tile, then a 0-pts tile) coexist. Only the [[x,y,m],…]
+        // array crosses the partner protocol; the Map is rebuilt on each side.
+        if (!missionConstraints.deliveryMultipliers)
+            missionConstraints.deliveryMultipliers = new Map();
+        for (const [x, y, mult] of config.deliveryMultipliers) {
+            const m = Number(mult);
+            // Skip malformed entries: a NaN/Infinity scale would poison the
+            // scoring comparators (NaN compares false everywhere).
+            if (Number.isFinite(m)) missionConstraints.deliveryMultipliers.set(`${x}_${y}`, m);
+        }
+        fieldsSet.push('deliveryMultipliers');
+    }
 
     // Tag the description with the field name(s) so the LLM can identify
     // which dropMission(field) to call later ("drop this mission").
@@ -68,6 +84,7 @@ const FIELD_MAP = {
     avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
     maxparcelreward:      ['Parcel reward ceiling',     'maxParcelReward',      () => { missionConstraints.maxParcelReward = null; }],
     maxbundlevalue:       ['Bundle value ceiling',      'maxBundleValue',       () => { missionConstraints.maxBundleValue = null; }],
+    deliverymultipliers:  ['Delivery reward multiplier','deliveryMultipliers',  () => { missionConstraints.deliveryMultipliers = null; }],
 };
 
 /**
@@ -105,6 +122,7 @@ export function dropAllMissions() {
     missionConstraints.avoidTiles.clear();
     missionConstraints.maxParcelReward      = null;
     missionConstraints.maxBundleValue       = null;
+    missionConstraints.deliveryMultipliers  = null;
     missionConstraints.descriptions         = [];
     return 'All mission constraints cleared — agent restored to default behavior.';
 }
