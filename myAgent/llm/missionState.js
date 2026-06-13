@@ -49,6 +49,15 @@ export function applyMissionConfig(config) {
         missionConstraints.maxBundleValue = Number(config.maxBundleValue);
         fieldsSet.push('maxBundleValue');
     }
+    if (Array.isArray(config.deliveryMultipliers)) {
+        // [[x,y,mult],…] -> Map "x_y" -> multiplier. Replaces any prior map so a
+        // re-issued bonus mission supersedes the old tiles (not additive: a tile's
+        // multiplier is whatever the latest mission says).
+        missionConstraints.deliveryMultipliers = new Map(
+            config.deliveryMultipliers.map(([x, y, m]) => [`${x}_${y}`, Number(m)])
+        );
+        fieldsSet.push('deliveryMultipliers');
+    }
 
     // Tag the description with the field name(s) so the LLM can identify
     // which dropMission(field) to call later ("drop this mission").
@@ -68,6 +77,7 @@ const FIELD_MAP = {
     avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
     maxparcelreward:      ['Parcel reward ceiling',     'maxParcelReward',      () => { missionConstraints.maxParcelReward = null; }],
     maxbundlevalue:       ['Bundle value ceiling',      'maxBundleValue',       () => { missionConstraints.maxBundleValue = null; }],
+    deliverymultipliers:  ['Delivery multiplier bonus',  'deliveryMultipliers',  () => { missionConstraints.deliveryMultipliers = null; }],
 };
 
 /**
@@ -105,6 +115,7 @@ export function dropAllMissions() {
     missionConstraints.avoidTiles.clear();
     missionConstraints.maxParcelReward      = null;
     missionConstraints.maxBundleValue       = null;
+    missionConstraints.deliveryMultipliers  = null;
     missionConstraints.descriptions         = [];
     return 'All mission constraints cleared — agent restored to default behavior.';
 }

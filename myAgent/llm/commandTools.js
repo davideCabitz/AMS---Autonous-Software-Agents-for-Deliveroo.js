@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive, trafficLight, manualHold, moveTiming } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, missionConstraints, directive, trafficLight, manualHold, moveTiming } from '../context.js';
 import { reachableFrom, findRoute } from '../utils/astar.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
@@ -441,6 +441,70 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
                 description: `explore only ${zone}-half spawners`,
             });
             return `Spawner zone restricted to ${zone} half (${filtered.length} spawners).`;
+        },
+
+        // Deterministic executor for the whole "don't deliver here" family
+        // (penalty / 0-pts / never deliver in ...). Resolves a side keyword or
+        // explicit coordinates to real delivery tiles and EXCLUDES them by
+        // narrowing allowedDeliveryTiles — the LLM never does the arithmetic.
+        async forbid_delivery(input) {
+            const raw = String(input ?? '').trim();
+            if (!raw)
+                return 'Error: forbid_delivery needs a side keyword (leftmost|rightmost|top|bottom) or coordinates ("x,y", or a ";"-separated list).';
+            if (!deliveryTiles.length) return 'Error: delivery tiles not loaded yet.';
+
+            const SIDES = ['leftmost', 'rightmost', 'top', 'bottom'];
+            const side  = raw.toLowerCase();
+            let forbidden; // array of {x,y} delivery tiles to exclude
+
+            if (SIDES.includes(side)) {
+                // Resolve named edges over the FULL deliveryTiles (NOT the
+                // reachability-filtered sense_delivery_tiles) with the fixed
+                // convention: leftmost=min x, rightmost=max x, top=max y, bottom=min y.
+                // Ties → every tile sitting at that extreme.
+                const xs = deliveryTiles.map(t => t.x), ys = deliveryTiles.map(t => t.y);
+                const PICK = {
+                    leftmost:  { val: Math.min(...xs), key: t => t.x },
+                    rightmost: { val: Math.max(...xs), key: t => t.x },
+                    top:       { val: Math.max(...ys), key: t => t.y },
+                    bottom:    { val: Math.min(...ys), key: t => t.y },
+                }[side];
+                forbidden = deliveryTiles.filter(t => PICK.key(t) === PICK.val);
+            } else {
+                // Explicit coordinates: "x,y" or a ";"-separated list of them.
+                forbidden = [];
+                for (const part of raw.split(';').map(s => s.trim()).filter(Boolean)) {
+                    const { x, y } = parseXY(part);
+                    if (x == null)
+                        return `Error: '${part}' is not a coordinate. Use "x,y", a ";"-separated list, or a side keyword (leftmost|rightmost|top|bottom).`;
+                    if (!deliveryTiles.some(d => d.x === x && d.y === y))
+                        return `Error: (${x},${y}) is not a delivery tile. Call sense_delivery_tiles to list them.`;
+                    forbidden.push({ x, y });
+                }
+                if (!forbidden.length) return 'Error: no coordinates parsed.';
+            }
+
+            const forbiddenKeys = new Set(forbidden.map(t => `${t.x}_${t.y}`));
+            // Accumulate: subtract from the CURRENT allowed set (or all delivery
+            // tiles if none yet), so repeated forbids stack instead of clobbering.
+            const baseAllowed = missionConstraints.allowedDeliveryTiles?.size > 0
+                ? [...missionConstraints.allowedDeliveryTiles]
+                : deliveryTiles.map(t => `${t.x}_${t.y}`);
+            const newAllowedKeys = baseAllowed.filter(k => !forbiddenKeys.has(k));
+
+            const resolved = [...forbiddenKeys].map(k => `(${k.replace('_', ',')})`).join(', ');
+            // Guard: never strand the agent with zero deliverable tiles.
+            if (!newAllowedKeys.length)
+                return `Error: forbidding ${resolved} would leave NO delivery tile available — refusing so the agent isn't stranded. Report that the mission cannot be satisfied.`;
+
+            const newAllowed   = newAllowedKeys.map(k => k.split('_').map(Number));
+            const sideLabel    = SIDES.includes(side) ? `${side} delivery tile ` : '';
+            // Coordinate-bearing description → conversational recall can name the
+            // exact tiles regardless of how the mission was phrased.
+            const description  = `never deliver in ${sideLabel}${resolved}`;
+            applyMissionConfig({ allowedDeliveryTiles: newAllowed, description });
+            sendConstraint('apply', { allowedDeliveryTiles: newAllowed, description });
+            return `Delivery forbidden at ${resolved}. Allowed delivery tiles now: ${newAllowed.map(([x, y]) => `(${x},${y})`).join(', ')}.`;
         },
 
         async dropMission(input) {

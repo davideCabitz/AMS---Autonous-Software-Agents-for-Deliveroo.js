@@ -25,7 +25,7 @@ const toolLog = createLogger('llm:tool');
 const MAX_ITERATIONS = 30;
 // Give up a stuck directive after this many failed command attempts, so the LLM
 // can't keep the agent occupied indefinitely — it returns to autonomous BDI work.
-const MAX_TOOL_FAILURES = 3;
+const MAX_TOOL_FAILURES = 1;
 
 /**
  * Parse a ReAct action. Tolerates both `Action: go_to` + `Action Input: 5,3` and

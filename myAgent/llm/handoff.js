@@ -11,24 +11,37 @@ const log = createLogger('llm:handoff');
  * the start_handoff/stop_handoff tools; the cycle itself is deterministic code —
  * a repeating per-parcel routine is exactly what the LLM should NOT babysit.
  *
- * At start, the worker is posted at the WAITING POST: the tile halfway along the
- * shortest spawn→delivery route. The coordinator then shuttles spawn↔post while
- * the worker shuttles post↔delivery — the two legs run in parallel, and on
- * single-lane (corridor) maps the agents never need to swap places.
+ * The rendezvous is computed PER PARCEL from live geometry, so the routine works
+ * on any map — multiple spawners, multiple delivery tiles, walls — not just a
+ * single corridor. There is no fixed "post": for each parcel the coordinator
+ *   - picks D = the delivery tile with the shortest ROUTE from the cargo (so the
+ *     parcel takes its natural shortest journey across the map and decays least,
+ *     and every delivery tile is in play — Manhattan-nearest could be far or
+ *     walled off);
+ *   - picks M = the split point ALONG that cargo→D shortest path that balances
+ *     the coordinator's carry leg (cargo→M) against the worker's leg
+ *     (worker→M→D), so neither agent idles waiting for the other. Together the
+ *     two legs traverse exactly the shortest cargo path — no detour is added.
  *
  * One cycle:
  *   1. worker frozen (it must never pick up parcels itself — those deliveries
- *      would not qualify for the cross-agent bonus) and sent to the post;
+ *      would not qualify for the cross-agent bonus);
  *   2. coordinator picks up the nearest reachable free parcel;
- *   3. carries it to a meeting tile M chosen NEXT TO THE WORKER (wherever it
- *      is — the agents reach for each other), falling back to a tile adjacent
- *      to the delivery nearest the worker if the worker is boxed in. M must NOT
- *      itself be a delivery tile, or the coordinator's putdown would count as
- *      ITS OWN delivery and void the bonus;
- *   4. puts the parcel down and steps off M (two agents cannot share a tile);
- *   5. orders the worker: pick up at M, then deliver at the delivery tile
- *      nearest it → cross-agent bonus for both; then back to the post.
+ *   3. computes D and M from the cargo's position and the worker's anchor;
+ *   4. carries the parcel to M, puts it down and steps OFF M — preferring to back
+ *      up one tile along the carry route (the spawn side), which keeps single-lane
+ *      corridors deadlock-free (coordinator retreats toward spawn, worker advances
+ *      toward delivery, the two never need to pass). M is never a delivery tile,
+ *      or the coordinator's putdown would count as ITS OWN delivery and void the
+ *      bonus;
+ *   5. orders the worker: pick up at M, then deliver at D → cross-agent bonus for
+ *      both. The worker has NO return-to-post leg — it ends at D, which becomes
+ *      its anchor for the next rendezvous.
  * Any failed step skips to the next cycle with fresh state; no parcels → idle.
+ *
+ * The worker's leg (step 5) runs detached so the coordinator fetches the next
+ * parcel in parallel; the loop re-synchronizes on it before the next drop (a new
+ * worker order would supersede the in-flight delivery and void that bonus).
  */
 
 const IDLE_RETRY_MS = 2_000;
@@ -93,7 +106,7 @@ function pickTargetParcel() {
 
 /**
  * Structure-only BFS path (array of {x,y} tiles, start included) over the
- * walkable map. Unlike findRoute it IGNORES other agents: the post must be
+ * walkable map. Unlike findRoute it IGNORES other agents: the rendezvous must be
  * computable even when the worker itself sits mid-route (single-lane maps).
  */
 function staticRoute(from, to) {
@@ -119,24 +132,81 @@ function staticRoute(from, to) {
 }
 
 /**
- * The worker's standard waiting post: the tile halfway along the shortest
- * spawn→delivery route. Splits the shuttle evenly — coordinator works the
- * spawn↔post leg, worker the post↔delivery leg. Null when no route exists.
+ * Structure-only BFS distance map from `from` to every walkable tile ("x_y" ->
+ * step count). One sweep, so the rendezvous search can score every candidate
+ * handoff tile by the worker's distance to it in O(1). Ignores other agents,
+ * like staticRoute. Null when `from` is off the walkable map.
  */
-function workerPost() {
-    const pairs = [];
-    for (const s of spawnerTiles)
-        for (const d of deliveryTiles)
-            pairs.push({ s, d, md: Math.abs(s.x - d.x) + Math.abs(s.y - d.y) });
-    pairs.sort((a, b) => a.md - b.md);
-    // The Manhattan-closest pairs almost always contain the A*-closest one;
-    // checking a handful bounds the BFS cost on large maps.
-    for (const { s, d } of pairs.slice(0, 10)) {
-        const path = staticRoute(s, d);
-        if (!path || path.length < 3) continue;
-        return path[Math.floor(path.length / 2)];
+function bfsDistances(from) {
+    const walk  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+    const start = `${Math.round(from.x)}_${Math.round(from.y)}`;
+    if (!walk.has(start)) return null;
+    const dist = new Map([[start, 0]]);
+    const queue = [start];
+    for (let i = 0; i < queue.length; i++) {
+        const cur = queue[i];
+        const d = dist.get(cur);
+        const [x, y] = cur.split('_').map(Number);
+        for (const nk of [`${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`]) {
+            if (walk.has(nk) && !dist.has(nk)) { dist.set(nk, d + 1); queue.push(nk); }
+        }
+    }
+    return dist;
+}
+
+/**
+ * Plan the whole handoff for the current cargo: pick the delivery D and the
+ * meeting tile M together. Delivery tiles are tried nearest-first by structural
+ * route (route-based, not Manhattan — with walls the Manhattan-nearest delivery
+ * can be far or unreachable), and the FIRST one that admits a valid handoff tile
+ * is taken. Falling through to the next-nearest delivery matters when the closest
+ * one has no non-delivery split point (e.g. the cargo already sits on or next to
+ * it). Returns { D, m, i, route } or null when no delivery yields a handoff.
+ */
+function planHandoff(cargo, wpos) {
+    const ranked = deliveryTiles
+        .map(d => { const r = staticRoute(cargo, d); return r ? { d, len: r.length - 1 } : null; })
+        .filter(Boolean)
+        .sort((a, b) => a.len - b.len);
+    for (const { d } of ranked) {
+        const rendez = chooseMeeting(cargo, d, wpos);
+        if (rendez) return { D: d, ...rendez };
     }
     return null;
+}
+
+/**
+ * Choose the handoff tile M along the cargo's shortest path to the delivery D.
+ * For each tile R[i] on that path, the coordinator's carry leg is i steps and the
+ * worker's leg is (anchor→M) + (M→D); M is the split that minimizes the larger of
+ * the two (makespan), so the agents share the work instead of one idling. M is
+ * never a delivery tile (a drop there would score as the coordinator's own
+ * delivery) nor the worker's own anchor tile, and the worker must be able to
+ * reach it. Returns { m, i, route } or null.
+ */
+function chooseMeeting(from, D, wpos) {
+    const route = staticRoute(from, D);
+    if (!route || route.length < 1) return null;
+    const L = route.length - 1;                       // structural steps cargo→D
+    const deliv = deliveryKeys();
+    const wKey  = `${wpos.x}_${wpos.y}`;
+    const wDist = bfsDistances(wpos);
+    if (!wDist) return null;
+
+    let best = null;
+    for (let i = 0; i <= L; i++) {
+        const m  = route[i];
+        const mk = `${m.x}_${m.y}`;
+        if (deliv.has(mk)) continue;                  // putdown there would be B's own delivery → no bonus
+        if (mk === wKey)   continue;                  // never hand off on the tile the worker is parked on
+        const dM = wDist.get(mk);
+        if (dM == null) continue;                     // worker cannot reach this handoff tile
+        const aLeg = dM + (L - i);                    // worker: anchor→M→D
+        const bLeg = i;                               // coordinator: cargo→M
+        const cost = Math.max(aLeg, bLeg);
+        if (!best || cost < best.cost) best = { m, i, route, cost };
+    }
+    return best;
 }
 
 /**
@@ -160,13 +230,6 @@ function enRouteParcel(meeting, wBlock) {
         .sort((a, b) => a.cost - b.cost)[0]?.p ?? null;
 }
 
-/** Delivery tile nearest to (x,y) by Manhattan distance, or null. */
-function deliveryNearest(x, y) {
-    if (!deliveryTiles.length) return null;
-    return [...deliveryTiles]
-        .sort((a, b) => (Math.abs(a.x - x) + Math.abs(a.y - y)) - (Math.abs(b.x - x) + Math.abs(b.y - y)))[0];
-}
-
 /** Walkable, non-delivery, unoccupied neighbours of a tile. */
 function freeNeighbours(tile, { excludeDelivery = true } = {}) {
     const walk  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
@@ -181,6 +244,41 @@ function freeNeighbours(tile, { excludeDelivery = true } = {}) {
         if (excludeDelivery && deliv.has(k)) return false;
         return true;
     });
+}
+
+/**
+ * Where the coordinator steps after dropping at M (it MUST vacate M, or the
+ * worker's pickup can never path onto it). Preference order:
+ *   1. back up one tile along the carry route — the spawn side, away from the
+ *      worker's approach from D. This is what keeps single-lane corridors
+ *      deadlock-free: B retreats toward spawn while A advances toward delivery.
+ *   2. a free neighbour of M farthest from both the worker's anchor and D (stay
+ *      out of the worker's M→D path).
+ *   3. any neighbour (delivery tiles allowed now — B is empty, standing on one is
+ *      harmless), then the nearest reachable walkable tile that isn't M/worker.
+ */
+function chooseAside(M, i, route, D, wpos, wBlock) {
+    const deliv = deliveryKeys();
+    const ok = n => !(n.x === wpos.x && n.y === wpos.y) && !(n.x === M.x && n.y === M.y);
+
+    if (i >= 1) {
+        const back = route[i - 1];
+        if (ok(back) && !deliv.has(`${back.x}_${back.y}`) && findRoute(me, back, wBlock)) return back;
+    }
+    const farFrom = n =>
+        Math.abs(n.x - D.x) + Math.abs(n.y - D.y) + Math.abs(n.x - wpos.x) + Math.abs(n.y - wpos.y);
+    const neigh = freeNeighbours(M).filter(ok).sort((a, b) => farFrom(b) - farFrom(a));
+    if (neigh.length && findRoute(me, neigh[0], wBlock)) return neigh[0];
+
+    const any = freeNeighbours(M, { excludeDelivery: false }).find(ok);
+    if (any && findRoute(me, any, wBlock)) return any;
+
+    return walkableTiles
+        .filter(ok)
+        .map(t => ({ t, d: Math.abs(t.x - M.x) + Math.abs(t.y - M.y) }))
+        .sort((a, b) => a.d - b.d)
+        .map(({ t }) => t)
+        .find(t => findRoute(me, t, wBlock)) ?? null;
 }
 
 async function workerPosition() {
@@ -199,18 +297,19 @@ async function loop(myAgent) {
     directive.active = true;          // coordinator autonomy stands down for the whole routine
     let exploreIdx = 0;               // cycles through spawners when no parcel is in sight
 
-    // Post the worker at the spawn↔delivery midpoint (fire-and-forget: the
-    // coordinator starts fetching immediately; the worker travels in parallel).
-    const post = workerPost();
-    if (post) {
-        log(`worker post (spawn↔delivery midpoint): (${post.x},${post.y})`);
-        sendOrder(['go_to', post.x, post.y])
-            .then(r => log(`worker → post: ${r}`)).catch(() => {});
-    }
+    // The worker's anchor: where it will be standing, idle, when it next needs an
+    // order. It has no fixed home post — it ends each cycle on the delivery tile
+    // it just used, and the next rendezvous is computed around that. Seeded from
+    // its live position; thereafter set to the previous cycle's delivery. Anchoring
+    // on this predicted spot (rather than a blocking status round-trip per cycle)
+    // lets the coordinator pick the next meeting point the instant it has cargo,
+    // even while the worker is still finishing the previous delivery.
+    let workerAnchor = await workerPosition() ?? { x: Math.round(me.x), y: Math.round(me.y) };
+    log(`worker anchor (initial): (${workerAnchor.x},${workerAnchor.y})`);
 
-    // Step-5 pipeline of the PREVIOUS cycle (worker pickup → delivery → back to
-    // post). It runs detached so the coordinator fetches the next parcel while
-    // the worker delivers; the loop re-synchronizes on it before the next drop.
+    // Step-5 pipeline of the PREVIOUS cycle (worker pickup → delivery). It runs
+    // detached so the coordinator fetches the next parcel while the worker
+    // delivers; the loop re-synchronizes on it before the next drop.
     let workerChain = Promise.resolve();
 
     while (running && !directive.aborted) {
@@ -247,46 +346,26 @@ async function loop(myAgent) {
                 }
             }
 
-            // 3. choose the meeting point NEXT TO THE WORKER — anchored on its
-            //    POST (its standing destination), not its live position, so the
-            //    coordinator starts toward the exchange the moment it has cargo
-            //    even while the worker is still walking back from a delivery
-            //    (observed live: B idled at the spawn until A reached the post).
-            //    Only without a post do we wait for the worker to settle and
-            //    anchor on its live position instead.
-            let wpos = post;
-            if (!wpos) {
-                await workerChain;
-                if (!running || directive.aborted) break;
-                wpos = await workerPosition() ?? me;
+            // 3. choose THIS parcel's delivery and rendezvous from live geometry.
+            const cargo = { x: Math.round(me.x), y: Math.round(me.y) };
+            const plan = planHandoff(cargo, workerAnchor);
+            if (!plan) {
+                log(`no reachable delivery with a valid meeting from cargo (${cargo.x},${cargo.y}) — next cycle`);
+                await idle(IDLE_RETRY_MS); continue;
             }
-            const dTile = deliveryNearest(wpos.x, wpos.y);
-            if (!dTile) { log('no delivery tile known — next cycle'); await idle(IDLE_RETRY_MS); continue; }
-            // findRoute only treats SENSED agents as obstacles, but the worker is
-            // known from the status protocol even from across the map: block its
-            // tile explicitly, or a far coordinator picks a meeting BEHIND the
-            // worker that the walk can never reach (observed live: hallway loop).
-            const wx = Math.round(wpos.x), wy = Math.round(wpos.y);
-            const wBlock = new Set([`${wx}_${wy}`]);
-            let meeting = freeNeighbours(wpos).find(n => findRoute(me, n, wBlock));
-            // Fallback (worker boxed in, e.g. parked in a delivery nook): a free
-            // tile adjacent to the delivery nearest the worker.
-            if (!meeting)
-                meeting = freeNeighbours(dTile)
-                    .filter(n => !(n.x === wx && n.y === wy))
-                    .find(n => findRoute(me, n, wBlock));
-            if (!meeting) { log(`no free meeting tile next to the worker (${wpos.x},${wpos.y}) or (${dTile.x},${dTile.y})`); await idle(IDLE_RETRY_MS); continue; }
-            log(`meeting next to worker at (${meeting.x},${meeting.y})`);
+            const { D, m: meeting, i: carryLen, route } = plan;
+            log(`delivery (${D.x},${D.y}); meeting (${meeting.x},${meeting.y}) [B carries ${carryLen}, A: approach + ${route.length - 1 - carryLen}]`);
 
             // 4. travel to M, opportunistically grabbing any sensed parcel that
             //    costs at most ENROUTE_SLACK extra tiles (one more parcel per
             //    exchange at ~zero travel cost); re-check after every pickup.
             //    Then sync on the worker chain BEFORE dropping: the putdown must
-            //    happen with the worker parked in front, or its pickup order
-            //    races its own return trip.
+            //    happen with the worker free, or its pickup order races its own
+            //    in-flight delivery.
             //    Single-spawner maps skip this entirely: every parcel appears at
             //    the one tile B already fetches from, so nothing can spawn
             //    "on the way" — no point re-evaluating after leaving.
+            const wBlock = new Set([`${workerAnchor.x}_${workerAnchor.y}`]);
             if (spawnerTiles.length > 1) {
                 for (let extra = enRouteParcel(meeting, wBlock); extra; extra = enRouteParcel(meeting, wBlock)) {
                     log(`en-route pickup ${extra.id} at (${extra.x},${extra.y})`);
@@ -305,38 +384,26 @@ async function loop(myAgent) {
             log(`dropped ${carried.length} parcel(s) at meeting (${meeting.x},${meeting.y})`);
 
             // Vacating M is MANDATORY — if the coordinator stays put, the worker's
-            // pickup can never path onto M. Prefer a neighbour; fall back to the
-            // nearest reachable walkable tile that isn't M, the delivery tile, or
-            // the worker's own tile (which sensing may not see from here).
-            const notWorkerOrDelivery = n =>
-                !(n.x === dTile.x && n.y === dTile.y) && !(n.x === wx && n.y === wy);
-            const aside = freeNeighbours(meeting).find(notWorkerOrDelivery)
-                ?? freeNeighbours(meeting, { excludeDelivery: false }).find(notWorkerOrDelivery)
-                ?? walkableTiles
-                    .filter(t => !(t.x === meeting.x && t.y === meeting.y) && notWorkerOrDelivery(t))
-                    .map(t => ({ t, d: Math.abs(t.x - meeting.x) + Math.abs(t.y - meeting.y) }))
-                    .sort((a, b) => a.d - b.d)
-                    .map(({ t }) => t)
-                    .find(t => findRoute(me, t, wBlock));
+            // pickup can never path onto M.
+            const aside = chooseAside(meeting, carryLen, route, D, workerAnchor, wBlock);
             if (aside) await withTimeout(myAgent.commandAndAwait(['go_to', aside.x, aside.y])).catch(() => {});
             if (!running || directive.aborted) break;
 
-            // 5. worker: collect at M, deliver, return to the post — DETACHED, so
-            //    the coordinator heads straight back for the next parcel instead
-            //    of idling at the meeting while the worker travels (observed
-            //    live). The worker-side steps stay strictly sequential: a new
-            //    order would supersede the previous one.
+            // 5. worker: collect at M, deliver at D — DETACHED, so the coordinator
+            //    heads straight back for the next parcel instead of idling at the
+            //    meeting while the worker travels. The worker-side steps stay
+            //    strictly sequential: a new order would supersede the previous one.
+            //    No return-to-post leg — the worker ends at D, its next anchor.
             workerChain = (async () => {
                 const pickRes = await sendOrder(['go_pick_up', meeting.x, meeting.y]);
                 log(`worker pickup: ${pickRes}`);
                 if (!running || directive.aborted) return;
                 if (!/^Failed|no parcel/i.test(pickRes)) {       // stolen/decayed → skip delivery
-                    const delivRes = await sendOrder(['go_deliver', dTile.x, dTile.y]);
+                    const delivRes = await sendOrder(['go_deliver', D.x, D.y]);
                     log(`worker delivery: ${delivRes}`);
-                    if (!running || directive.aborted) return;
                 }
-                if (post) await sendOrder(['go_to', post.x, post.y]);
             })().catch(() => {});
+            workerAnchor = { x: D.x, y: D.y };   // predicted free spot for the next rendezvous
         } catch (err) {
             const tag = Array.isArray(err) ? err.join(' ') : (err?.message ?? String(err));
             log.warn(`cycle failed (${tag}) — retrying with fresh state`);

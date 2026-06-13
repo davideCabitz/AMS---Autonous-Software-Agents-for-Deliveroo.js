@@ -104,6 +104,7 @@ export const missionConstraints = {
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
     maxParcelReward:      null,      // number | null — null = no ceiling
     maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this
+    deliveryMultipliers:  null,      // Map<"x_y",number> | null — per-tile delivery reward multiplier (bonus tiles); null/empty = all tiles ×1
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 
