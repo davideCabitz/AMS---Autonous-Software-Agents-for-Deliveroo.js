@@ -63,6 +63,18 @@ export class Strategy {
     // ─── shared helpers ──────────────────────────────────────────────────────
 
     /**
+     * Per-tile delivery reward multiplier from the active Level-2 mission
+     * (deliveryMultipliers): e.g. 5 for "5× pts in (x,y)", 0 for "0 pts in (x,y)".
+     * Defaults to 1 (no scaling) when no such mission is active, so every caller
+     * below is an exact no-op until a multiplier mission arrives. Coords are
+     * rounded to match the integer "x_y" keys built in applyMissionConfig.
+     */
+    deliveryScale(tile) {
+        return missionConstraints.deliveryMultipliers
+            ?.get(`${Math.round(tile.x)}_${Math.round(tile.y)}`) ?? 1;
+    }
+
+    /**
      * Nearest delivery tile A*-reachable from `from` (shortest real route, walls/
      * crates/agents/arrows respected). Returns undefined when NO delivery is
      * currently reachable (e.g. other agents wall off every route) — callers must
@@ -77,7 +89,9 @@ export class Strategy {
         return [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
-            .sort((a, b) => a.len - b.len)[0]?.d;
+            // Prefer higher reward multiplier, then nearer. With no multiplier
+            // mission every scale is 1 ⇒ the first term is 0 ⇒ pure nearest (unchanged).
+            .sort((a, b) => (this.deliveryScale(b.d) - this.deliveryScale(a.d)) || (a.len - b.len))[0]?.d;
     }
 
     /**
@@ -107,7 +121,9 @@ export class Strategy {
         const reachable = [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
-            .sort((a, b) => a.len - b.len);
+            // Multiplier-priority then nearest (no-op without a deliveryMultipliers
+            // mission); a 0× tile sorts last and is taken only as a fallback below.
+            .sort((a, b) => (this.deliveryScale(b.d) - this.deliveryScale(a.d)) || (a.len - b.len));
         if (crateTiles.length > 0)
             deliveryLog(`candidates from (${Math.round(from.x)},${Math.round(from.y)}): `
                 + reachable.map(({ d, len }) => `(${d.x},${d.y})=${len}${usableDeliverySet.has(`${d.x}_${d.y}`) ? '' : '·unusable'}`).join(' '));
@@ -251,7 +267,9 @@ export class Strategy {
         const R   = carried.reduce((sum, p) => sum + p.reward, 0);
         const del = this.nearestDelivery(me);
         const d0  = del ? this.pathLen(me, del) : Infinity;
-        return R - n * this.decayRate() * d0;
+        // Reward is scaled by the chosen delivery tile's multiplier (1× by default).
+        const scale = del ? this.deliveryScale(del) : 1;
+        return scale * R - n * this.decayRate() * d0;
     }
 
     /**
@@ -268,7 +286,10 @@ export class Strategy {
         const d1  = this.pathLen(me, parcel);
         const del = this.nearestDelivery(parcel);
         const d2  = del ? this.pathLen(parcel, del) : Infinity;
-        return (R + parcel.reward) - (n + 1) * this.decayRate() * (d1 + d2);
+        // The whole load is delivered at `del`, so scale its reward by that tile's
+        // multiplier (1× by default ⇒ unchanged).
+        const scale = del ? this.deliveryScale(del) : 1;
+        return scale * (R + parcel.reward) - (n + 1) * this.decayRate() * (d1 + d2);
     }
 
     /**
@@ -294,8 +315,12 @@ export class Strategy {
         const d4   = del2 ? this.pathLen(parcel, del2) : Infinity;
         const n    = carried.length;
         const R    = carried.reduce((s, p) => s + p.reward, 0);
-        const bankNow    = R - n * this.decayRate() * d0;
-        const valueAfter = parcel.reward - this.decayRate() * (d0 + d3 + d4);
+        // Each leg is delivered at its own tile, so scale by that tile's multiplier
+        // (1× by default): the current load at `del`, the new parcel at `del2`.
+        const scale0 = this.deliveryScale(del);
+        const scale2 = del2 ? this.deliveryScale(del2) : 1;
+        const bankNow    = scale0 * R - n * this.decayRate() * d0;
+        const valueAfter = scale2 * parcel.reward - this.decayRate() * (d0 + d3 + d4);
         return bankNow + Math.max(0, valueAfter);
     }
 

@@ -214,21 +214,35 @@ export function buildChatTools() {
 }
 
 export function buildTools(myAgent, replySender, resumeAutonomy) {
-    // Run a BDI command. The FIRST command takes control of the agent (gates the
-    // autonomous strategy); the gate is then HELD through the whole command
-    // sequence and released once, at the end of the directive (runDirective's
-    // finally). That stops the agent drifting between two commands — e.g. "go to X
-    // then freeze" freezes AT X, not where it wandered. The agent still does its
-    // own work during the LLM's INITIAL thinking, before any command runs.
+    // Run a BDI command. The gate is released OPTIMISTICALLY the instant each
+    // command finishes (see finally) rather than being held through the whole
+    // directive: otherwise the autonomy gate stays shut across the confirmation
+    // round-trip (the LLM call that decides whether another command follows), and
+    // on a single-command directive like "go to the bottom spawn" the agent idles
+    // at the destination for seconds instead of letting its strategy start picking
+    // up parcels. If the LLM does issue a follow-up command, this helper re-takes
+    // the gate and halts whatever the strategy began during the gap, so each
+    // command still starts from a clean state.
+    //
+    // Trade-off vs. holding the gate: the agent may do its own BDI work — and thus
+    // physically move — during the inter-command think. A move-then-stay sequence
+    // ("go to X, then hold/wait/put_down") can drift in that gap before the
+    // stationary command re-grabs. Stationary commands manage their own gate and
+    // don't go through this helper.
     const command = async (predicate, ok) => {
         if (trafficLight.red)
             return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
-        directive.active = true;                       // take / keep control
+        directive.active = true;                       // (re)take control
+        myAgent.haltCurrent();                         // drop any BDI intention started in the gap
         try {
             await withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0]);
-            return ok();
+            return ok();                               // built while the gate is still ours (live pos)
         } catch (err) {
             return describeFailure(err);
+        } finally {
+            // Hand control back to BDI immediately; a follow-up command re-takes it above.
+            directive.active = false;
+            resumeAutonomy?.();
         }
     };
 

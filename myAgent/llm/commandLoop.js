@@ -70,10 +70,12 @@ function hasEndMarker(text) {
  */
 export async function runDirective(objective, myAgent, replySender, resumeAutonomy, history = []) {
     // We do NOT gate autonomy at the start: the agent keeps doing its own BDI work
-    // while the LLM is still THINKING (before any command). The first command takes
-    // control (see commandTools) and the gate is HELD through the command sequence,
-    // then released once here in finally — so a multi-step directive like "go to X
-    // then freeze" stays at X instead of drifting between the two commands.
+    // while the LLM is still THINKING (before any command). Each command takes
+    // control for its duration and releases it optimistically when it finishes (see
+    // commandTools), so the agent resumes autonomous work during the think between
+    // commands and after the last one — instead of idling through the confirmation
+    // round-trip. The finally below is a backstop that guarantees the gate is open
+    // and BDI is kicked once the directive ends (except while a handoff owns it).
     const tools = buildTools(myAgent, replySender, resumeAutonomy);
     const messages = [
         { role: 'system', content: buildSystemPrompt(objective) },
