@@ -204,7 +204,13 @@ function readTools() {
  *  NEVER move the agent or touch the autonomy gate, so it is safe to run
  *  concurrently with an action directive. */
 export function buildChatTools() {
-    return readTools();
+    return {
+        ...readTools(),
+        // Read-only and safe concurrently with an action directive: it only sends
+        // a status_req over chat. The chat lane needs it so partner position/cargo
+        // questions are answered live, never from memory.
+        async ask_partner_status() { return requestStatus(); },
+    };
 }
 
 export function buildTools(myAgent, replySender, resumeAutonomy) {
