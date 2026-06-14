@@ -17,13 +17,15 @@ const log = createLogger('llm:handoff');
  *      same exploration, multi-pickup and value/decay-aware decisions it makes
  *      autonomously — until the strategy decides to bank the load; the worker (A)
  *      never collects on its own (those deliveries would not earn the bonus);
- *   2. B computes the cargo→delivery path and its MIDPOINT, and orders A to that
- *      midpoint NOW, so A travels there in parallel while B carries. Recomputed
- *      every cycle, the midpoint automatically follows B's active spawn zone;
- *   3. both close the gap: A heads for the midpoint, B carries toward it and then
- *      HOMES onto A's live tile (A streams its position while under order) for the
- *      final approach, so a detour by either is absorbed — no fixed carry path,
- *      full A* replanning the whole way;
+ *   2. B computes the cargo→delivery path and orders A toward the BALANCED meet on
+ *      it NOW, so A travels there in parallel while B carries;
+ *   3. both close the gap, and the meet is re-steered LIVE: every carry pass B
+ *      recomputes the balanced rendezvous from both agents' current positions (the
+ *      tile minimizing the later arrival) and re-orders A there, so neither ever
+ *      walks a whole corridor to a stale anchor — the meeting point slides to the
+ *      spot between their live positions. B then HOMES onto A's live tile for the
+ *      final approach (A streams its position while under order), so a detour by
+ *      either is absorbed — no fixed carry path, full A* replanning the whole way;
  *   4. the instant B is adjacent to A it DROPS on the spot (never a delivery tile —
  *      that would score as B's OWN delivery and void the bonus) and steps back,
  *      preferring the spawn side so single-lane corridors stay deadlock-free;
@@ -43,6 +45,17 @@ const STEP_TIMEOUT_MS = 60_000;
 // How long B waits to meet A before abandoning THIS attempt: it freezes A and
 // retries (recompute, re-invite) rather than ever dropping the load unguarded.
 const MEET_TIMEOUT_MS = 25_000;
+// Hand-off-now margin (tiles). While carrying, B keeps gathering only if the next
+// pickup doesn't push it materially FURTHER from any drop than it is now. This is
+// what stops B carrying the load PAST a delivery corridor toward distant spawners:
+// in handoff B never delivers, so a go_pick_up that walks past a viable drop —
+// rational only because autonomous B would bank in passing — must instead trigger
+// a hand-off to A at/near that drop. A few tiles of slack still allows a genuinely
+// on-the-way extra parcel.
+const HANDOFF_PASS_MARGIN = 3;
+// How often B re-orders A toward its own position while gathering (pre-positioning).
+// 500ms ≈ the worker's status cadence — re-steering faster gives no fresher info.
+const DRIFT_MS = 500;
 
 let running = false;
 
@@ -122,29 +135,37 @@ function bfsDistances(from) {
 }
 
 /**
- * The split tile on `route` nearest its middle that is a valid rendezvous: an
- * INTERIOR tile (never the cargo at index 0 nor the delivery at L), not itself a
- * delivery tile (a drop there would score as the coordinator's OWN delivery and
- * void the bonus), and reachable by the worker. Searches outward from the middle
- * so the carry is balanced. Returns { tile, i } or null when the route is too
- * short to have an interior tile.
+ * The split tile on `route` that is the BEST rendezvous: a valid interior tile
+ * (never the cargo at index 0 nor the delivery at L), not itself a delivery tile (a
+ * drop there would score as the coordinator's OWN delivery and void the bonus), and
+ * reachable by the worker. Among the valid tiles it picks the one minimizing the
+ * LATER arrival — max(B's distance = its index i on the carry route, A's distance =
+ * wDist.get(k)). That is the tile where the two actually meet soonest, so when A's
+ * anchor is far the meeting point slides toward A instead of sitting at the
+ * geometric middle of B's route (which left A still walking while B waited). With no
+ * wDist (worker position unknown) it falls back to the geometric middle. Ties broken
+ * toward the middle so the carry stays balanced. Returns { tile, i } or null when
+ * the route is too short to have an interior tile.
  */
 function midpointTile(route, wDist) {
     const L = route.length - 1;
     if (L < 2) return null;                           // no interior tile to meet on
     const deliv = deliveryKeys();
-    const mid = Math.round(L / 2);
-    for (let off = 0; off <= L; off++) {
-        for (const i of (off === 0 ? [mid] : [mid - off, mid + off])) {
-            if (i <= 0 || i >= L) continue;           // skip cargo (0) and delivery (L)
-            const t = route[i];
-            const k = `${t.x}_${t.y}`;
-            if (deliv.has(k)) continue;
-            if (wDist && wDist.get(k) == null) continue;  // worker cannot reach it
-            return { tile: t, i };
-        }
+    const mid = L / 2;
+    let best = null;
+    for (let i = 1; i < L; i++) {                      // skip cargo (0) and delivery (L)
+        const t = route[i];
+        const k = `${t.x}_${t.y}`;
+        if (deliv.has(k)) continue;
+        const aDist = wDist ? wDist.get(k) : null;
+        if (wDist && aDist == null) continue;          // worker cannot reach it
+        // Cost = later of the two arrivals (meet time); tie-break toward the middle.
+        const meet   = wDist ? Math.max(i, aDist) : 0;
+        const center = Math.abs(i - mid);
+        if (!best || meet < best.meet || (meet === best.meet && center < best.center))
+            best = { tile: t, i, meet, center };
     }
-    return null;
+    return best ? { tile: best.tile, i: best.i } : null;
 }
 
 /**
@@ -166,6 +187,41 @@ function planDelivery(cargo, wpos) {
         if (mp) return { D: d, route, mid: mp.tile, meetB: route[mp.i - 1] };
     }
     return null;
+}
+
+/**
+ * Structural route distance from `from` to the NEAREST delivery tile (agents
+ * ignored, like staticRoute — the corridor must be measurable even when A sits in
+ * it). Infinity when no delivery is reachable. Used to detect when a pickup would
+ * carry the load past/away from any drop, so B hands off instead of wandering.
+ */
+function nearestDeliveryDist(from) {
+    let best = Infinity;
+    for (const d of deliveryTiles) {
+        const r = staticRoute(from, d);
+        if (r) best = Math.min(best, r.length - 1);
+    }
+    return best;
+}
+
+/**
+ * The live meet tile between A and B: the geometric midpoint of their CURRENT
+ * positions, snapped to the nearest legal rendezvous — walkable, not a delivery tile
+ * (a drop there scores as B's OWN delivery and voids the bonus), and reachable by B
+ * (findRoute, agents ignored via no block set is fine here — we only need existence).
+ * Crucially this is NOT constrained to B's delivery route: that constraint was why A
+ * only ever walked onto B's line and then sat — the meet could never move toward A.
+ * Recomputed every carry pass, the midpoint sits genuinely BETWEEN the two, so both
+ * walk roughly equal distance and converge. Returns {x,y} or null if nothing legal.
+ */
+function liveMeet(bPos, aPos) {
+    const cx = (bPos.x + aPos.x) / 2, cy = (bPos.y + aPos.y) / 2;
+    const deliv = deliveryKeys();
+    const ok = t => !deliv.has(`${t.x}_${t.y}`) && findRoute(me, t);
+    return walkableTiles
+        .filter(ok)
+        .map(t => ({ t, d: Math.abs(t.x - cx) + Math.abs(t.y - cy) }))
+        .sort((a, b) => a.d - b.d)[0]?.t ?? null;
 }
 
 /** Manhattan-adjacent — the two agents stand on neighbouring tiles. */
@@ -192,6 +248,32 @@ function partnerAdjacent(aPos) {
     return otherAgents.some(a =>
         manhattanAdj(a, here) &&
         (!aPos || Math.abs(a.x - aPos.x) + Math.abs(a.y - aPos.y) <= 3));
+}
+
+/**
+ * Drift target for A WHILE B is still gathering (pre-positioning, not the meet).
+ * A free, B-reachable tile next to B's current position so A trails just behind B
+ * around the gather zone — by the time B decides to bank, A is already close and the
+ * real meet starts from a short gap instead of a far delivery tile. Picks B's free
+ * neighbour nearest A (A tucks in from its own side); falls back to the nearest
+ * reachable tile to B when every neighbour is a wall/occupied. Never B's own tile
+ * (occupied → unreachable goal). Returns {x,y} or null. Delivery tiles are allowed
+ * here — A carries nothing during acquisition, so standing on one is harmless.
+ */
+function driftTowardB(bPos, aPos) {
+    const neigh = freeNeighbours(bPos, { excludeDelivery: false })
+        .filter(n => findRoute(me, n));
+    if (neigh.length) {
+        if (!aPos) return neigh[0];
+        return neigh.sort((p, q) =>
+            (Math.abs(p.x - aPos.x) + Math.abs(p.y - aPos.y)) -
+            (Math.abs(q.x - aPos.x) + Math.abs(q.y - aPos.y)))[0];
+    }
+    // All neighbours blocked — send A to the closest reachable tile to B instead.
+    return walkableTiles
+        .filter(t => !(t.x === bPos.x && t.y === bPos.y) && findRoute(me, t))
+        .map(t => ({ t, d: Math.abs(t.x - bPos.x) + Math.abs(t.y - bPos.y) }))
+        .sort((a, b) => a.d - b.d)[0]?.t ?? null;
 }
 
 /**
@@ -319,6 +401,20 @@ async function loop(myAgent) {
     // delivers; the loop re-synchronizes on it before the next drop.
     let workerChain = Promise.resolve();
 
+    // Pre-positioning drift: while B gathers, it re-orders A toward a tile next to
+    // B every DRIFT_MS so A trails just behind and the eventual meet starts from a
+    // short gap. Kept on its OWN detached chain (never workerChain) so the handoff's
+    // await-workerChain is never blocked by a drift leg.
+    //
+    // CRITICAL: a drift order is a newer order, and newest-order-wins on the worker
+    // means it would SUPERSEDE an in-flight delivery — A would abandon a parcel it was
+    // delivering for the cross-agent bonus. So drift is suppressed whenever the
+    // previous cycle's pickup→deliver pipeline (workerChain) is still running. The flag
+    // is set when that pipeline is launched and cleared when it settles.
+    let driftTarget = null;
+    let lastDriftAt = 0;
+    let deliveryInFlight = false;   // true while A is mid pickup→deliver — do NOT drift
+
     while (running && !directive.aborted) {
         try {
             // Red light: no movement at all — wait it out.
@@ -333,6 +429,23 @@ async function loop(myAgent) {
             const strat = runtime.strategy ?? (runtime.strategy = selectStrategy());
             while (running && !directive.aborted) {
                 if (trafficLight.red) { await idle(500); continue; }
+
+                // Pre-position A: every DRIFT_MS, re-order it toward a tile beside B's
+                // CURRENT position so it trails the gather and the meet starts close.
+                // Detached + throttled; only re-issued when the target tile actually
+                // moves, so a stationary B doesn't spam identical orders. SKIPPED while a
+                // delivery is in flight — a drift order would supersede it and make A
+                // drop the parcel it's delivering for the bonus.
+                if (!deliveryInFlight && Date.now() - lastDriftAt >= DRIFT_MS) {
+                    lastDriftAt = Date.now();
+                    const bHere = { x: Math.round(me.x), y: Math.round(me.y) };
+                    const d = driftTowardB(bHere, partnerTile());
+                    if (d && (d.x !== driftTarget?.x || d.y !== driftTarget?.y)) {
+                        driftTarget = { x: d.x, y: d.y };
+                        sendOrder(['go_to', d.x, d.y]).catch(() => {});   // detached
+                    }
+                }
+
                 const carrying = parcels.carriedBy(me.id).length;
                 // Pass null, NOT the queue's current intention: we run each decision to
                 // completion, and a STALE autonomous intention left in the queue from
@@ -346,6 +459,22 @@ async function loop(myAgent) {
                 // hand the load over. planDelivery routes with staticRoute, which ignores
                 // agents, so the worker blocking B's own delivery path is irrelevant.
                 if (carrying > 0 && decision?.[0] !== 'go_pick_up') break;
+
+                // Carrying already, and the next pickup would carry the load PAST/away
+                // from any drop (the strategy only proposes this because autonomous B
+                // would bank in passing — but handoff B never delivers). Hand off NOW,
+                // at/near the current drop, rather than wander toward distant spawners
+                // and risk losing the whole accumulated load.
+                if (carrying > 0 && decision?.[0] === 'go_pick_up') {
+                    const here   = { x: Math.round(me.x), y: Math.round(me.y) };
+                    const dNow   = nearestDeliveryDist(here);
+                    const dNext  = nearestDeliveryDist({ x: decision[1], y: decision[2] });
+                    if (dNext > dNow + HANDOFF_PASS_MARGIN) {
+                        log(`next pickup (${decision[1]},${decision[2]}) is past the nearest drop `
+                            + `(dNow=${dNow} dNext=${dNext}) — handing off ${carrying} parcel(s) now`);
+                        break;
+                    }
+                }
 
                 // Productively moving — pursue a pickup, or an explore to a DIFFERENT tile.
                 const camping = decision?.[0] === 'go_explore'
@@ -377,20 +506,22 @@ async function loop(myAgent) {
                 log(`no reachable delivery with a valid midpoint from cargo (${cargo.x},${cargo.y}) — next cycle`);
                 await idle(IDLE_RETRY_MS); continue;
             }
-            const { D, route, mid, meetB } = plan;
-            log(`delivery (${D.x},${D.y}); A→midpoint (${mid.x},${mid.y}); B→rendezvous (${meetB.x},${meetB.y})`);
+            const { D, route, mid } = plan;
+            log(`delivery (${D.x},${D.y}); seed midpoint (${mid.x},${mid.y}) — meet re-steered live from here`);
 
             // Re-sync the previous cycle's worker pickup+deliver before issuing a new
             // order: a fresh order would supersede an in-flight delivery and void it.
             await workerChain;
             if (!running || directive.aborted) break;
 
-            // Send the worker to the midpoint NOW, in parallel, so it travels there
-            // while we carry — and re-homes automatically each cycle when our spawn
-            // zone moves. Detached. The worker streams its live position while under
-            // the order; seed it once in case streaming hasn't started yet.
-            workerChain = sendOrder(['go_to', mid.x, mid.y]);
+            // Make sure we have A's live position, then send it toward the live A↔B
+            // meet NOW, in parallel, so it travels while we carry. The carry loop below
+            // re-steers it every pass as both close in. Detached.
             if (!partnerTile()) await requestStatus(2_000).catch(() => {});
+            const here0 = { x: Math.round(me.x), y: Math.round(me.y) };
+            const seed  = (partnerTile() && liveMeet(here0, partnerTile())) ?? mid;
+            let aTarget = { x: seed.x, y: seed.y };   // last tile we steered A toward
+            workerChain = sendOrder(['go_to', aTarget.x, aTarget.y]);
 
             // 4. carry to the rendezvous (meetB) while A anchors on the midpoint, homing
             //    onto A's live tile for the final step. DROP ONLY ON ADJACENCY — a
@@ -401,7 +532,24 @@ async function loop(myAgent) {
             while (running && !directive.aborted && Date.now() < meetDeadline) {
                 const here = { x: Math.round(me.x), y: Math.round(me.y) };
                 if (partnerAdjacent(partnerTile())) { met = true; break; }   // met → safe to drop
-                const tgt = chooseMeetTarget(partnerTile(), meetB, here);
+
+                // Re-steer A toward the live A↔B midpoint (snapped to a legal tile),
+                // recomputed each pass and NOT constrained to B's route — so the meet
+                // genuinely slides toward A instead of pinning A onto B's line. Both
+                // walk; they converge in the middle. Detached + newest-order-wins on the
+                // worker, so this never blocks us and supersedes A's previous leg cleanly.
+                // Only re-issue when the tile moves.
+                const aPos = partnerTile();
+                if (aPos) {
+                    const bm = liveMeet(here, aPos);
+                    if (bm && (bm.x !== aTarget.x || bm.y !== aTarget.y)) {
+                        aTarget = { x: bm.x, y: bm.y };
+                        workerChain = sendOrder(['go_to', aTarget.x, aTarget.y]);
+                        log(`re-steer A → live meet (${aTarget.x},${aTarget.y})`);
+                    }
+                }
+
+                const tgt = chooseMeetTarget(partnerTile(), aTarget, here);
                 if (!tgt || (tgt.x === here.x && tgt.y === here.y)) {        // at the rendezvous → wait for A
                     await idle(400);
                     continue;
@@ -461,6 +609,10 @@ async function loop(myAgent) {
             //    heads straight back for the next parcel instead of idling while the
             //    worker travels. Worker steps stay sequential (a new order supersedes
             //    the previous). No return-to-post leg — the worker ends at D.
+            //    deliveryInFlight gates the gather-phase drift OFF for the whole
+            //    pickup→deliver so a drift order can never supersede this delivery and
+            //    make A abandon the parcel mid-route.
+            deliveryInFlight = true;
             workerChain = (async () => {
                 const pickRes = await sendOrder(['go_pick_up', dropTile.x, dropTile.y]);
                 log(`worker pickup: ${pickRes}`);
@@ -469,7 +621,10 @@ async function loop(myAgent) {
                     const delivRes = await sendOrder(['go_deliver', D.x, D.y]);
                     log(`worker delivery: ${delivRes}`);
                 }
-            })().catch(() => {});
+            })().finally(() => {
+                deliveryInFlight = false;
+                driftTarget = null;   // A is now at D — force a fresh drift re-aim next pass
+            }).catch(() => {});
             workerAnchor = { x: D.x, y: D.y };   // predicted free spot for the next rendezvous
         } catch (err) {
             const tag = Array.isArray(err) ? err.join(' ') : (err?.message ?? String(err));

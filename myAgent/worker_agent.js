@@ -50,6 +50,11 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
     // after an order completes, so the worker holds position between orders —
     // exactly what the handoff and "wait for each other" missions need.
     let frozen = false;
+    // Newest-order-wins: each incoming order bumps this. A running order whose seq
+    // is no longer current was superseded (the coordinator re-steered us toward a
+    // moving rendezvous), so it must NOT report a result — the newer order owns the
+    // reply. Lets the coordinator re-target us continuously without racing two plans.
+    let orderSeq = 0;
 
     const send = (payload) => {
         if (!coordinatorId) return;
@@ -112,6 +117,11 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
             send({ type: 'result', orderId, ok: false, detail: 'RED LIGHT in force — movement is forbidden' });
             return;
         }
+        // Claim the latest sequence and pre-empt any plan still running for an older
+        // order, so only ONE intention executes at a time even under rapid re-targeting.
+        const seq = ++orderSeq;
+        myAgent.haltCurrent();
+        const superseded = () => seq !== orderSeq;
         directive.active = true;       // hold the gate while the order runs
         try {
             // A pickup order may target a parcel the worker has not sensed yet
@@ -126,6 +136,7 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                     predicate = ['go_pick_up', x, y, known.id];
                 } else {
                     await withTimeout(myAgent.commandAndAwait(['go_to', x, y]), ORDER_TIMEOUT_MS);
+                    if (superseded()) return;   // a newer order owns the reply
                     const picked = await socket.emitPickup();
                     const n = picked?.length ?? 0;
                     send({ type: 'result', orderId, ok: n > 0,
@@ -139,16 +150,21 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                 return;
             }
             await withTimeout(myAgent.commandAndAwait(predicate), ORDER_TIMEOUT_MS);
+            if (superseded()) return;           // a newer order owns the reply
             send({ type: 'result', orderId, ok: true,
                    detail: `done: ${predicate.join(' ')} — now at (${me.x},${me.y})` });
         } catch (err) {
-            send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
+            // A halt from the superseding order surfaces as 'stopped'/'timeout'; that
+            // order will report, so stay silent rather than spuriously failing this one.
+            if (!superseded()) send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
         } finally {
             // Stream our RESTING tile: the throttled onYou stream can skip the final
             // step when we stop right after arriving, leaving the coordinator a tile
             // behind exactly where it needs to know we've reached the rendezvous.
+            // Only release the gate if WE are still the current order — a newer one
+            // running must keep directive.active held.
             sendStatus();
-            if (!frozen) {
+            if (!frozen && !superseded()) {
                 directive.active = false;
                 resumeAutonomy?.();
             }
