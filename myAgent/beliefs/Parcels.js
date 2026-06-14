@@ -8,6 +8,11 @@ export class Parcels {
     #memoryEnabled = false;
     #decayIntervalMs = Infinity;
 
+    // Ids permanently excluded from beliefs and all future sensing syncs. Used when
+    // the coordinator hands a parcel to its partner: it's back on the ground (sensing
+    // re-reports it as free), but re-grabbing it would steal the partner's pickup.
+    #ignored = new Set();
+
     /**
      * Activate parcel memory. Called once from selectStrategy() when StrategyMemory
      * is chosen. When disabled (default) the #memory Map is never written to, so
@@ -37,6 +42,7 @@ export class Parcels {
 
         // 2. Update live map from sensing; sensing is authoritative over memory.
         for (const p of sensingParcels) {
+            if (this.#ignored.has(p.id)) continue;   // handed off to the partner — never re-acquire
             this.#map.set(p.id, p);
             if (this.#memoryEnabled) this.#memory.delete(p.id);
         }
@@ -66,6 +72,18 @@ export class Parcels {
         this.#memory.delete(id); // also evict from memory on failed pickup / explicit removal
     }
 
+    /**
+     * Permanently exclude a parcel from beliefs and every future sensing sync. Used
+     * when the coordinator hands a parcel to its partner: the strategy reads free()
+     * directly, so without this it would re-target the drop and steal the partner's
+     * pickup. Ids are unique per spawn, so excluding forever is safe.
+     */
+    ignore(id) {
+        this.#ignored.add(id);
+        this.#map.delete(id);
+        this.#memory.delete(id);
+    }
+
     /** All parcels currently in belief state. */
     all() {
         return [...this.#map.values()];
@@ -73,7 +91,7 @@ export class Parcels {
 
     /*Free parcels */
     free() {
-        return this.all().filter(p => !p.carriedBy);
+        return this.all().filter(p => !p.carriedBy && !this.#ignored.has(p.id));
     }
 
     /** Parcels currently carried by a given agent id. */
@@ -102,6 +120,7 @@ export class Parcels {
         const result = [];
         for (const [id, mp] of this.#memory) {
             if (this.#map.has(id)) continue; // live sensing is authoritative
+            if (this.#ignored.has(id)) continue; // handed off to the partner
             const decayed = Number.isFinite(this.#decayIntervalMs)
                 ? Math.floor((now - mp.lastSeenMs) / this.#decayIntervalMs)
                 : 0;

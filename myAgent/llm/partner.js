@@ -4,7 +4,7 @@ import { createLogger } from '../utils/logger.js';
 const log = createLogger('llm:partner');
 
 /*
- * Coordinator side of the partner link (see myAgent/partnerWorker.js for the
+ * Coordinator side of the partner link (see myAgent/worker_agent.js for the
  * worker side). The coordinator commands the worker over the normal chat channel
  * with small JSON payloads:
  *

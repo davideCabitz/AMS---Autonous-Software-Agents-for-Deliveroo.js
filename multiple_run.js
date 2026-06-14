@@ -8,7 +8,7 @@ const TOKEN = process.env.TOKEN || '';
 for (let i = 0; i < 5; i++) {
     const name  = `m_${i}`;
     const child = spawn(
-        `HOST="${HOST}" TOKEN="${TOKEN}" NAME="${name}" node myAgent/agent.js`,
+        `HOST="${HOST}" TOKEN="${TOKEN}" NAME="${name}" node myAgent/coordinator_agent.js`,
         { shell: true }
     );
     child.stdout.on('data', d => process.stdout.write(`[${name}] ${d}`));

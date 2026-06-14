@@ -85,6 +85,27 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         resumeAutonomy?.();
     }
 
+    /** Current worker status snapshot (position, score, cargo, frozen). */
+    const sendStatus = () => send({
+        type: 'status',
+        x: me.x, y: me.y, score: me.score,
+        carrying: parcels.carriedBy(me.id).map(p => ({ id: p.id, reward: p.reward })),
+        frozen,
+    });
+
+    // While executing a coordinator order (directive.active), stream our position so
+    // the coordinator can track us id-certainly at any distance — otherAgents is
+    // id-less and range-limited, but a handoff needs to know exactly where we are.
+    // Throttled, and only fires on real movement (onYou).
+    let lastStreamAt = 0;
+    socket.onYou(() => {
+        if (!directive.active || !coordinatorId) return;
+        const now = Date.now();
+        if (now - lastStreamAt < 200) return;
+        lastStreamAt = now;
+        sendStatus();
+    });
+
     // --- one-shot orders ----------------------------------------------------------
     async function runOrder(orderId, predicate) {
         if (trafficLight.red) {
@@ -123,6 +144,10 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         } catch (err) {
             send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
         } finally {
+            // Stream our RESTING tile: the throttled onYou stream can skip the final
+            // step when we stop right after arriving, leaving the coordinator a tile
+            // behind exactly where it needs to know we've reached the rendezvous.
+            sendStatus();
             if (!frozen) {
                 directive.active = false;
                 resumeAutonomy?.();
@@ -181,12 +206,7 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                 break;
             }
             case 'status_req':
-                send({
-                    type: 'status',
-                    x: me.x, y: me.y, score: me.score,
-                    carrying: parcels.carriedBy(me.id).map(p => ({ id: p.id, reward: p.reward })),
-                    frozen,
-                });
+                sendStatus();
                 break;
             default:
                 log(`unknown partner message type '${j.type}' from ${id}`);

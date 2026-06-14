@@ -33,8 +33,13 @@ socket.on('disconnect', (reason) => {
 /* Which of the two challenge-2 processes this is. Set by myAgent/launch.js before
  * this module loads. 'coordinator' runs the LLM command layer and orders the
  * worker around; 'worker' runs plain BDI plus the partner-order handler. A direct
- * `node myAgent/agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
+ * `node myAgent/coordinator_agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
 export const role = process.env.AGENT_ROLE ?? 'coordinator';
+
+/* The coordinator's CHOSEN strategy instance, set by coordinator_agent.js on its
+ * first deliberation. Shared here so the handoff routine can drive B's parcel
+ * acquisition with the SAME map-chosen strategy it uses for autonomous play. */
+export const runtime = { strategy: null };
 export const parcels = new Parcels();
 export const deliveryTiles = [];
 export const spawnerTiles  = [];
