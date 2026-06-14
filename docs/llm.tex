@@ -1,0 +1,49 @@
+\section{LLM Command Layer Architecture}
+The system bridges high-level cognitive reasoning with low-level deterministic execution by combining a Large Language Model (LLM) with a Belief-Desire-Intention (BDI) framework within a multi-agent environment. The core operational paradigm dictates that the \textbf{LLM decides what to do}, emitting abstract directives, while the \textbf{BDI framework decides how to do it}, resolving pathfinding ($A^*$/PDDL) and handling local navigation obstacles. This layout avoids the common failure modes of standalone LLM agents, such as grid collisions and high execution latency.
+
+The system is deployed as a two-agent team running separate processes of the same codebase under a "one brain, two bodies" topology:
+\begin{itemize}
+    \item \textbf{Coordinator}: Houses the full BDI loop alongside the LLM command layer. It intercepts natural-language mission prompts from the game chat, reasons over the world state, and orchestrates the actions of both team members.
+    \item \textbf{Worker}: Runs a pure BDI architecture augmented with a lightweight JSON order handler. It operates without an independent LLM instance, executing structured orders sent by the coordinator over the chat channel. This layout eliminates multi-model disagreement and avoids extra API costs.
+\end{itemize}
+
+\subsection{Directive Routing and Execution Lanes}
+All inputs entering the coordinator are filtered by a centralized gateway function, \texttt{route()}, which classifies and prioritizes messages deterministically to preserve computational resources:
+\begin{enumerate}
+    \item \textbf{Partner Protocol Interception}: Incoming JSON strings containing inter-agent communication bypass the LLM entirely and are handled immediately.
+    \item \textbf{Reflex Fast-Paths}: Time-critical signals, such as environmental stop commands (\texttt{"RED LIGHT!"} / \texttt{"GREEN LIGHT!"}), are evaluated via anchored regular expressions. They trigger immediate behavioral switches in the runtime, bypassing LLM processing latency entirely.
+    \item \textbf{Asynchronous Lane Allocation}: Remaining text is processed by a single-call classifier that splits messages into two lanes:
+    \begin{itemize}
+        \item \textit{ACTION Lane}: Serializes complex commands or special mission offers into a queue. These are processed one at a time via a full reasoning loop.
+        \item \textit{CHAT Lane}: Routes non-spatial queries (e.g., map status, quiz responses) to a concurrent, read-only loop using a restricted toolset that cannot modify agent movement.
+    \end{itemize}
+\end{enumerate}
+
+\subsection{The ReAct Execution Loop and Autonomy Gate}
+Commands in the action lane are governed by an iterative ReAct (Reasoning and Acting) loop (\texttt{runDirective}) capped at 30 iterations. The loop matches text patterns to high-level abstract tools, returns environmental feedback as an observation, and tracks execution against a strict budget of 3 command failures. 
+
+A flat ReAct architecture was selected over a separate planner/executor split. Because the BDI layer abstracts complex multi-step tasks into atomic commands (e.g., a single \texttt{deliver()} handles long-range navigation), long plans are condensed into few iterations. Furthermore, pre-computed plans quickly expire in dynamic grid environments; flat ReAct naturally adapts by evaluating fresh observations at each iteration.
+
+The boundary between LLM driving and BDI self-direction is managed by a state-driven \textbf{Autonomy Gate}:
+\begin{itemize}
+    \item \textbf{BDI Deferral}: While the LLM is only reasoning or utilizing read-only tools, the BDI agent continues its autonomous parcel collection strategy.
+    \item \textbf{LLM Override}: The execution of any physical command tool locks the gate (\texttt{directive.active = true}). This suppresses the BDI layer's standard option generation, forcing it to exclusively serve the LLM's explicit target.
+    \item \textbf{Synchronous Abort}: If an abort keyword is sent, the system instantly executes \texttt{abortCurrent()}. This clears the action queue, cancels active promises, halts the physical agents in place, unlocks the gate, and restores autonomous BDI play within a single execution frame.
+\end{itemize}
+
+\subsection{Multi-Agent Coordination and Level-3 Routines}
+Inter-agent coordination is driven by a custom JSON-based remote procedure protocol over the shared chat channel. This protocol handles remote task assignments, state queries, and \textbf{constraint mirroring}, ensuring that persistent mission limitations (such as forbidden tiles or payload caps) applied to the coordinator are immediately replayed to the worker.
+
+Two advanced cooperative routines are embedded within this layer:
+\begin{itemize}
+    \item \textbf{Handoff Loop ("One Picks Up, Another Delivers")}: A deterministic background routine designed to maximize cooperative delivery bonuses. The coordinator freezes the worker, locates a parcel, drops it on a non-delivery tile adjacent to the worker's destination, and clears the cell. The worker is then ordered to execute the final pickup and delivery. This loop cycles autonomously in the background without requiring continuous LLM prompting.
+    \item \textbf{Synchronized Holds}: Enables mutual waiting states (e.g., moving both agents near a target coordinate). The coordinator dispatches the worker, navigates to its own target, and activates a persistent \texttt{manualHold} flag that pauses both agents until a joint release condition is met.
+\end{itemize}
+
+\subsection{Fault Tolerance and Graceful Degradation}
+To ensure continuous operation during execution anomalies, the system features multiple fallback mechanisms:
+\begin{itemize}
+    \item \textbf{BDI-Only Mode}: If the API configuration keys are missing at startup, the command layer stays inactive, and the agents safely run their default autonomous BDI strategy.
+    \item \textbf{Promise Safeguards}: To prevent the asynchronous engine from freezing due to dropped actions, the system overrides intention modification modules. If an intention is dropped as stale, its completion promise is explicitly settled via a \texttt{cancel()} method, releasing any stalled execution lines.
+    \item \textbf{Socket Reconnection}: The system captures unexpected network disconnects to force immediate socket restoration. Following a reconnect, the worker's periodic keepalive signal automatically re-registers the partner link and re-synchronizes active mission constraints.
+\end{itemize}
