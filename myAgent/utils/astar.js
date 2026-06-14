@@ -1,4 +1,4 @@
-import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints } from '../context.js';
+import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
 import { canEnterDir } from './directions.js';
 import { createLogger } from './logger.js';
 
@@ -303,11 +303,72 @@ export function reachableFrom(start) {
 const GOAL_BLOCKED_WAIT_MS  = 500;
 const GOAL_BLOCKED_MAX_WAIT = 6;
 
+// Case 5 (anti-deadlock): if we re-block on the SAME non-goal agent tile this many
+// times within one navigateTo, attempt a yield maneuver — a random step to a free
+// neighbour + pause — to break a mutual block (two agents facing off in a hallway).
+// The step is random to break the symmetry that makes two mirror-image agents
+// re-collide; one random try may not diverge, so allow a few attempts per
+// navigation before falling back to the throw.
+const DEADLOCK_REBLOCK_MAX = 3;
+const YIELD_MAX_ATTEMPTS    = 3;
+const YIELD_PAUSE_MS        = 400;
+
+/**
+ * Case 5 one-shot yield: break a mutual block by stepping to a RANDOM free
+ * adjacent tile, then pausing to let the other agent advance. A directional
+ * sidestep ("step away from the goal") fails in a 2-wide hallway — both lanes are
+ * valid path tiles, so A* just reroutes through the sidestep tile and we re-block,
+ * and two mirror-image agents pick symmetric tiles and re-collide forever. Random
+ * choice breaks that symmetry: the two agents diverge with high probability.
+ *
+ * We don't bias toward/away from the goal — the only goal is to physically vacate
+ * so the corridor frees up; the normal A* loop re-paths to the goal afterward.
+ * Best-effort: if no free neighbour exists or the step fails, it just pauses (the
+ * blocker may pass on its own) and returns to the normal recompute / throw path.
+ *
+ * `blockedTile` is the tile we kept re-blocking on; we never yield onto it.
+ */
+async function tryYield(blockedTile, agentBlocked) {
+    const cx = Math.round(me.x), cy = Math.round(me.y);
+    const here = key(cx, cy);
+    const crateSet = new Set(crateTiles.map(c => key(Math.round(c.x), Math.round(c.y))));
+    const walkable = getWalkable();
+
+    // Any free, arrow-legal, unoccupied neighbour except the tile we keep blocking on.
+    const candidates = DIRS
+        .map(({ dx, dy, dir }) => ({ x: cx + dx, y: cy + dy, dir }))
+        .filter(({ x, y }) => {
+            const k = key(x, y);
+            return k !== here && k !== blockedTile
+                && walkable.has(k) && !crateSet.has(k)
+                && !agentBlocked.has(k) && !agentKeys().has(k)
+                && canEnterDir(directionalTiles.get(k), cx, cy, x, y);
+        });
+
+    if (candidates.length === 0) {
+        // Nowhere to step (true 1-wide dead-end facing the blocker): just pause and
+        // let the loop retry — the other agent may yield or move on.
+        navLog('yield: no free neighbour — pausing in place');
+        await new Promise(r => setTimeout(r, YIELD_PAUSE_MS));
+        return;
+    }
+
+    // Random pick breaks the symmetry that makes two facing agents re-collide.
+    const step = candidates[Math.floor(Math.random() * candidates.length)];
+    navLog(`yield: random step ${step.dir} to (${step.x},${step.y}) to break deadlock`);
+    const ok = await socket.emitMove(step.dir);
+    if (ok) await waitForArrival(step.x, step.y);
+    await new Promise(r => setTimeout(r, YIELD_PAUSE_MS));
+}
+
 export async function navigateTo(targetX, targetY, stoppedFn) {
     const goal    = { x: Math.round(targetX), y: Math.round(targetY) };
     const goalKey = key(goal.x, goal.y);
     const agentBlocked  = new Set();
     let goalBlockedCount = 0;
+    // Case 5: per-tile re-block tally + a bounded yield budget for this navigation.
+    const reblockCount  = new Map();   // "x_y" of blocking agent tile -> count
+    let yieldAttempts = 0;
 
     while (Math.round(me.x) !== goal.x || Math.round(me.y) !== goal.y) {
         if (stoppedFn()) throw ['stopped'];
@@ -391,7 +452,16 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                 const bk = key(Math.round(me.x) + dx, Math.round(me.y) + dy);
 
                 if (bk === goalKey) {
-                    // In this case we implemented that if an agent is blocking a tile, we wait and retry (maybe the agent will move). Otherwise we replan trying to go around it
+                    // If an agent blocks the goal tile, normally we wait and retry
+                    // (it may be passing through). Case 3: but if the blocker is
+                    // stationary (parked/deadlocked), waiting the full budget is
+                    // wasted — throw 'goal blocked' now so re-deliberation picks a
+                    // new target instead of burning GOAL_BLOCKED_MAX_WAIT × wait.
+                    const [bx, by] = bk.split('_').map(Number);
+                    if (nearestAgentIsStationary({ x: bx, y: by })) {
+                        navLog(`goal ${bk} blocked by STATIONARY agent — aborting wait`);
+                        throw ['goal blocked', goal.x, goal.y];
+                    }
                     goalBlockedCount++;
                     if (goalBlockedCount >= GOAL_BLOCKED_MAX_WAIT)
                         throw ['goal blocked', goal.x, goal.y];
@@ -409,7 +479,21 @@ export async function navigateTo(targetX, targetY, stoppedFn) {
                         crateTiles.push({ x: bx, y: by });
                         navLog(`inferred crate at ${bk} — crateTiles: ${crateTiles.length}`);
                     } else {
-                        navLog(`blocked at ${bk} — recomputing path`);
+                        // Case 5 (anti-deadlock): count repeated blocks on this tile.
+                        // After DEADLOCK_REBLOCK_MAX, one yield maneuver — a random
+                        // step to a free neighbour to break a mutual block.
+                        const n = (reblockCount.get(bk) ?? 0) + 1;
+                        reblockCount.set(bk, n);
+                        if (yieldAttempts < YIELD_MAX_ATTEMPTS && n >= DEADLOCK_REBLOCK_MAX && !isKnownCrateZone) {
+                            yieldAttempts++;
+                            // Reset this tile's tally so we re-arm: each yield gets
+                            // DEADLOCK_REBLOCK_MAX fresh re-blocks before the next try.
+                            reblockCount.set(bk, 0);
+                            navLog(`yield attempt ${yieldAttempts}/${YIELD_MAX_ATTEMPTS} at ${bk}`);
+                            await tryYield(bk, agentBlocked);
+                        } else {
+                            navLog(`blocked at ${bk} — recomputing path (reblock ${n})`);
+                        }
                     }
                 }
                 break;

@@ -30,6 +30,7 @@ LOG_NAMESPACES=              # silenzio totale
 | `explore` | Esplorazione mappa |
 | `delivery` | Selezione zona consegna |
 | `pathlen` | Costo percorso con casse |
+| `contest` | Valutazione competitor-aware dei colli: win-probability vs. agenti avversari |
 | `blind` | StrategyBlind decisions |
 | `greedy` | StrategyGreedy decisions |
 | `hurry` | StrategyHurry decisions |

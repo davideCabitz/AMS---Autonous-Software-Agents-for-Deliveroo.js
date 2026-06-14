@@ -3,6 +3,7 @@ import {
     deliveryTiles, spawnerTiles, walkableTiles, crateTiles,
     OBSERVATION_DISTANCE, moveTiming, CARRYING_CAPACITY,
     usableDeliverySet, safeTargetSet, missionConstraints,
+    otherAgentDistTo, nearestAgentId, isAgentMovingToward,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { findRoute, pushAwareCost } from '../utils/astar.js';
@@ -11,6 +12,7 @@ import { createLogger } from '../utils/logger.js';
 const exploreLog  = createLogger('explore');
 const deliveryLog = createLogger('delivery');
 const pathlenLog  = createLogger('pathlen');
+const contestLog  = createLogger('contest');
 
 export const MIN_DELIVERY_REWARD = 5;
 // Max extra tiles tolerated when choosing an alternative to the excluded spawner.
@@ -27,6 +29,29 @@ export const MULTI_PICKUP_MIN = 0;
 // the worthwhile set each tick (decay/distance/sensing shifts) make the agent
 // flip between "pick up" and "deliver" every tick → physical back-and-forth.
 export const SWITCH_MARGIN = 5;
+
+// ─── competitor-awareness (Phase 1) ──────────────────────────────────────────
+// contestFactor discounts a parcel's value by an estimated win-probability vs.
+// the nearest competitor racing us to it. Probabilistic, never a hard exclude: a
+// misread competitor self-corrects next tick.
+//   delta = theirDist − ourDist  (positive ⇒ we're closer)
+// CONTEST_K     — tiles of lead that decide the win-probability (delta ≥ +K ⇒ 1,
+//                 delta ≤ −K ⇒ floor, delta = 0 ⇒ ~0.5).
+// CONTEST_FLOOR — minimum multiplier; a contested parcel is DEPRIORITIZED, never
+//                 inverted (keeps value ≥ 0 so it can't fight MIN_DELIVERY_REWARD /
+//                 bankFirst gates illogically).
+// CONTEST_DEADBAND — |delta| within this counts as a clean tie, so 1-tile
+//                 competitor jitter can't swing the score and re-introduce the
+//                 flip-flop that SWITCH_MARGIN exists to prevent.
+const CONTEST_K        = 3;
+const CONTEST_FLOOR    = 0.15;
+const CONTEST_DEADBAND = 1;
+// Case 6: additive path-length penalty for an explore/wait spawner that already has
+// a sensed agent on/adjacent to it, so we don't camp a spawner a competitor owns.
+// Additive (not a filter) — a camped spawner is still chosen if it's the only
+// reachable one. Sized like EXPLORE_NEARBY_MARGIN: enough to lose a near-tie, not
+// enough to send us across the map.
+const SPAWNER_CAMP_PENALTY = EXPLORE_NEARBY_MARGIN;
 
 /**
  * Base class for option-generation strategies.
@@ -112,6 +137,23 @@ export class Strategy {
      * instead of freezing. Used for the actual go_deliver target; scoring keeps
      * using nearestDelivery (nearest reachable) unchanged.
      */
+    /**
+     * Effective cost of delivering at tile `d` from `from`: the A* path length
+     * plus a congestion penalty when a competitor sits on/adjacent to the zone, so
+     * a congested-but-near zone loses to a clear slightly-farther one. Additive,
+     * not a filter — the zone is still selectable if it's the only option.
+     * Reuses SWITCH_MARGIN as the penalty: a zone is "worth detouring around"
+     * exactly when an alternative beats it by the switch threshold. Degrades to
+     * plain pathLen when no agents are sensed (otherAgentDistTo → Infinity).
+     */
+    deliveryCost(from, d) {
+        const base = this.pathLen(from, d);
+        if (!Number.isFinite(base)) return base;
+        const near = otherAgentDistTo(d);
+        const pen  = Number.isFinite(near) && near <= 1 ? SWITCH_MARGIN : 0;
+        return base + pen;
+    }
+
     nearestEscapableDelivery(from = me) {
         let tiles = deliveryTiles;
         if (missionConstraints.allowedDeliveryTiles?.size > 0) {
@@ -119,7 +161,7 @@ export class Strategy {
             if (f.length > 0) tiles = f;
         }
         const reachable = [...tiles]
-            .map(d => ({ d, len: this.pathLen(from, d) }))
+            .map(d => ({ d, len: this.deliveryCost(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
             // Multiplier-priority then nearest (no-op without a deliveryMultipliers
             // mission); a 0× tile sorts last and is taken only as a fallback below.
@@ -130,6 +172,31 @@ export class Strategy {
         if (reachable.length === 0) return undefined;
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
         return (usable[0] ?? reachable[0]).d;
+    }
+
+    /**
+     * Margin-gated, congestion-aware keep-or-switch for the active go_deliver
+     * target. Returns true to KEEP the current target. Replaces the inline
+     * `currentIntent[0]==='go_deliver' && isReachable(...)` keep-current check.
+     *
+     * Switching must beat the current target by more than SWITCH_MARGIN tiles of
+     * effective (congestion-adjusted) cost — the same anti-ping-pong threshold as
+     * pickups. This lets us (a) abandon a now-congested zone for a clear one, and
+     * (b) revert to the originally-nearer zone once a competitor steps aside — but
+     * a competitor oscillating in a doorway can't make us flip (it never wins the
+     * full margin). Falls back to the old "keep while reachable" when no
+     * alternative exists, and to recompute when the current target is unreachable.
+     */
+    betterDelivery(currentIntent) {
+        if (currentIntent?.[0] !== 'go_deliver') return false;
+        const cur = { x: currentIntent[1], y: currentIntent[2] };
+        if (!this.isReachable(cur)) return false;        // current gone → recompute
+        const alt = this.nearestEscapableDelivery();
+        if (!alt) return true;                            // nothing better exists
+        const curCost = this.deliveryCost(me, cur);
+        const altCost = this.deliveryCost(me, alt);
+        // Keep unless the alternative wins by MORE than the margin.
+        return (curCost - altCost) <= SWITCH_MARGIN;
     }
 
     /** Naive reward-per-distance ratio. Used only by StrategySimple. */
@@ -273,11 +340,52 @@ export class Strategy {
     }
 
     /**
+     * Win-probability multiplier in [CONTEST_FLOOR, 1] for racing the nearest
+     * competitor to `parcel`. 1 when uncontested (no agents, or we're clearly
+     * closer); → CONTEST_FLOOR when a competitor is clearly closer. `ourDist` is
+     * passed in (already computed by the caller) to avoid a redundant pathLen.
+     *
+     * Backward-compat: with no agents sensed, otherAgentDistTo → Infinity ⇒ 1, so
+     * pickupValue is unchanged. This is the invariant the unit suite asserts.
+     */
+    contestFactor(parcel, ourDist) {
+        const their = otherAgentDistTo(parcel);
+        if (!Number.isFinite(their)) return 1;                 // no contender
+        const our = Number.isFinite(ourDist) ? ourDist : this.pathLen(me, parcel);
+        let delta = their - our;                               // >0 ⇒ we're closer
+        // Deadband: small leads count as ties so 1-tile jitter doesn't move score.
+        if (Math.abs(delta) <= CONTEST_DEADBAND) delta = 0;
+        // Quality softener: if the nearest agent isn't actually closing on the
+        // parcel, it's probably not racing us — soften the penalty it imposes.
+        const id = nearestAgentId(parcel);
+        if (id && !isAgentMovingToward(id, parcel)) delta += CONTEST_K / 2;
+        // Discount ONLY when we're losing the race (delta < 0). If we're closer or
+        // tied (delta ≥ 0) we'll win it → factor 1, no haircut. This is the fix for
+        // "walked over a high-score parcel but skipped it": a parcel we're on top of
+        // (ourDist≈0) is a near-certain win and must keep its full value even with a
+        // competitor nearby. The penalty ramps in only as the competitor pulls ahead:
+        //   delta ≥ 0 → 1 ;  delta = −K → floor ;  linear between.
+        let factor = 1;
+        if (delta < 0) {
+            const t = Math.max(0, 1 + delta / CONTEST_K);     // delta∈[−K,0] → [0,1]
+            factor = CONTEST_FLOOR + (1 - CONTEST_FLOOR) * t;  // [floor, 1)
+        }
+        // Only logs when a competitor is actually in contention (their is finite),
+        // so the uncontested common case stays silent.
+        contestLog(`parcel ${parcel.id} @${parcel.x},${parcel.y}: theirDist=${their} `
+            + `ourDist=${our} delta=${delta}${id && !isAgentMovingToward(id, parcel) ? ' (not-racing)' : ''} `
+            + `factor=${factor.toFixed(3)}`);
+        return factor;
+    }
+
+    /**
      * Value B(p) — reward banked if we detour to pick up `parcel` and then deliver
      * the whole load. Accounts for the extra decay the detour inflicts on every
      * already-carried parcel plus the new one (both legs of the trip).
-     *   B(p) = (R + reward_p) − (n+1)·ρ·(d1 + d2)
-     * with d1 = dist(me, p), d2 = dist(p, D_p).
+     *   B(p) = (R + reward_p)·contestFactor − (n+1)·ρ·(d1 + d2)
+     * with d1 = dist(me, p), d2 = dist(p, D_p). The reward term is scaled by the
+     * estimated win-probability vs. competitors; the decay penalty is left intact
+     * so a contested parcel is deprioritized but value never inverts negative.
      */
     pickupValue(parcel) {
         const carried = parcels.carriedBy(me.id);
@@ -289,7 +397,8 @@ export class Strategy {
         // The whole load is delivered at `del`, so scale its reward by that tile's
         // multiplier (1× by default ⇒ unchanged).
         const scale = del ? this.deliveryScale(del) : 1;
-        return scale * (R + parcel.reward) - (n + 1) * this.decayRate() * (d1 + d2);
+        return scale * (R + parcel.reward) * this.contestFactor(parcel, d1)
+               - (n + 1) * this.decayRate() * (d1 + d2);
     }
 
     /**
@@ -358,6 +467,19 @@ export class Strategy {
      * @param {Array|null} currentIntent
      * @returns {Array|null}
      */
+    /**
+     * Ranking cost for an explore spawner: A* path length plus a Case-6 camping
+     * penalty when a competitor sits on/adjacent to it. Used as the single sort key
+     * so the sort, tie-grouping, and chosen target all agree. Degrades to plain
+     * pathLen when no agents are sensed (otherAgentDistTo → Infinity).
+     */
+    exploreCost(t) {
+        const base = this.pathLen(me, t);
+        if (!Number.isFinite(base)) return base;
+        const near = otherAgentDistTo(t);
+        return base + (Number.isFinite(near) && near <= 1 ? SPAWNER_CAMP_PENALTY : 0);
+    }
+
     exploreIfIdle(currentIntent) {
         if (currentIntent) {
             const [intent, tx, ty] = currentIntent;
@@ -438,12 +560,14 @@ export class Strategy {
             }
         }
 
-        const sorted = [...finalCandidates].sort((a, b) => this.pathLen(me, a) - this.pathLen(me, b));
+        // Rank by exploreCost (pathLen + Case-6 camping penalty) so a spawner a
+        // competitor is sitting on loses a near-tie to a clear one.
+        const sorted = [...finalCandidates].sort((a, b) => this.exploreCost(a) - this.exploreCost(b));
         const target = sorted[0];
         if (target) {
             const key = `${target.x}_${target.y}`;
-            const shortestLen = this.pathLen(me, target);
-            const tied = sorted.filter(t => this.pathLen(me, t) === shortestLen);
+            const shortestLen = this.exploreCost(target);
+            const tied = sorted.filter(t => this.exploreCost(t) === shortestLen);
             if (tied.length > 1) {
                 const tiedStr = tied.map(t => `(${t.x},${t.y})`).join(', ');
                 exploreLog(`tie: ${tied.length} at pathLen=${shortestLen} — ${tiedStr} — picking (${target.x},${target.y}), prev-excluded=${this._prevExploreKey ?? 'none'}`);

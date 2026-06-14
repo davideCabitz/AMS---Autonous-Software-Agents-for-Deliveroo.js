@@ -73,9 +73,7 @@ export class StrategyMemory extends StrategyGreedy {
                 return this.exploreIfIdle(currentIntent);
             }
 
-            if (currentIntent?.[0] === 'go_deliver'
-                    && this.isReachable({ x: currentIntent[1], y: currentIntent[2] }))
-                return null;
+            if (this.betterDelivery(currentIntent)) return null;
             const target = this.nearestEscapableDelivery();
             if (target) {
                 log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);

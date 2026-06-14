@@ -7,6 +7,9 @@
  *   LOG_NAMESPACES=pddl,nav    → only those two namespaces
  *   LOG_NAMESPACES=            → silent run
  *
+ * Known namespaces: config, map, crate, sensing, explore, delivery, pathlen,
+ * contest (competitor-aware pickup scoring — Phase 1), pddl, nav.
+ *
  * warn/error are always emitted regardless of the filter (they signal problems).
  */
 

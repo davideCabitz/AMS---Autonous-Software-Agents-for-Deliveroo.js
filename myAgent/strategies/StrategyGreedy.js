@@ -45,11 +45,9 @@ export class StrategyGreedy extends Strategy {
 
             const stackOk = this.stackReady(carrying);
             if (stackOk) {
-                // Hysteresis: keep heading to the current delivery tile as long as it
-                // is still reachable. Only recompute when agents/crates block it.
-                if (currentIntent?.[0] === 'go_deliver'
-                        && this.isReachable({ x: currentIntent[1], y: currentIntent[2] }))
-                    return null;
+                // Hysteresis: keep heading to the current delivery tile unless a
+                // clearer/closer zone beats it by the switch margin (congestion-aware).
+                if (this.betterDelivery(currentIntent)) return null;
                 const target = this.nearestEscapableDelivery();
                 if (target) {
                     log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);

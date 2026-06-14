@@ -464,9 +464,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             }
         }
 
-        if (currentIntent?.[0] === 'go_deliver'
-                && this.isReachable({ x: currentIntent[1], y: currentIntent[2] }))
-            return null;
+        if (this.betterDelivery(currentIntent)) return null;
         const target = this.nearestEscapableDelivery();
         if (target) {
             log(`DELIVER (${parcels.carriedBy(me.id).length}/${this.#deliveryCap}) → (${target.x},${target.y})`);

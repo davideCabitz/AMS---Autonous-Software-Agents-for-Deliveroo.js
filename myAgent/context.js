@@ -4,7 +4,7 @@ import { Beliefset }   from '@unitn-asa/pddl-client';
 import { Me }          from './beliefs/Me.js';
 import { Parcels }     from './beliefs/Parcels.js';
 import { isDirectional } from './utils/directions.js';
-import { tilesThatReach } from './utils/astar.js';
+import { tilesThatReach, findRoute } from './utils/astar.js';
 import { createLogger } from './utils/logger.js';
 
 const configLog  = createLogger('config');
@@ -52,6 +52,18 @@ export let   mapHasCrates      = false;
  * impassable obstacles by A* (see utils/astar.js). Fully replaced each sensing
  * event — agents move, so stale positions must not linger. */
 export const otherAgents = [];
+
+/* Per-id velocity history for competitor-aware scoring (see
+ * docs/COMPETITOR_AWARENESS_IMPLEMENTATION.md). Keyed by agent id, holds last
+ * position + one-tick velocity. Unlike otherAgents (a positional snapshot for A*),
+ * this persists across ticks so we can reason about where an agent is GOING.
+ * Pruned when an id isn't re-sensed within AGENT_STALE_MS. */
+const agentHistory = new Map();   // id -> { x, y, vx, vy, lastSeen }
+const AGENT_STALE_MS = 2000;
+/* Agents farther than this (Manhattan) from a scored target can't realistically
+ * contest it; we skip the A* call for them. Bounds the per-tick findRoute cost on
+ * crowded maps — the concrete answer to "A* cost unchanged in spirit". */
+const AGENT_DIST_MANH_GATE = 8;
 
 /* Trap-avoidance sets for directional ("arrow") mazes, computed once per map in
  * onMap from walls + arrow tiles only (static geometry — agents/crates excluded so
@@ -315,10 +327,25 @@ socket.onSensing(sensing => {
     // a stale position would wrongly block a tile. Runs before any crate-related
     // early-return below so agent tracking is independent of mapHasCrates.
     otherAgents.length = 0;
+    const now = Date.now();
     for (const a of sensing.agents ?? []) {
         if (a.id === me.id) continue;
-        otherAgents.push({ x: Math.round(a.x), y: Math.round(a.y) });
+        const x = Math.round(a.x), y = Math.round(a.y);
+        otherAgents.push({ x, y });                  // positional snapshot for A*
+        // Per-id velocity: delta over the last tick only. Zero on first sight or
+        // after a gap (a stale prev would yield a bogus huge velocity).
+        const prev = agentHistory.get(a.id);
+        const fresh = prev && (now - prev.lastSeen) <= AGENT_STALE_MS;
+        agentHistory.set(a.id, {
+            x, y,
+            vx: fresh ? x - prev.x : 0,
+            vy: fresh ? y - prev.y : 0,
+            lastSeen: now,
+        });
     }
+    // Prune ids not re-sensed recently so a vanished agent stops biasing scoring.
+    for (const [id, h] of agentHistory)
+        if (now - h.lastSeen > AGENT_STALE_MS) agentHistory.delete(id);
     if (otherAgents.length)
         sensingLog(`agents: ${otherAgents.length} at [${otherAgents.map(a => `${a.x},${a.y}`).join(' ')}]`);
 
@@ -341,3 +368,63 @@ socket.onSensing(sensing => {
             crateTiles.push({ x: rx, y: ry });
     }
 });
+
+// ─── competitor-awareness helpers (Phase 0) ─────────────────────────────────
+// Consumed by the Strategy scoring layer. All degrade to "no competitors" when
+// agentHistory is empty, preserving current behavior (backward-compat invariant).
+
+/**
+ * Min A* distance from ANY sensed agent to `tile`; Infinity if none in range.
+ * Manhattan pre-filter (AGENT_DIST_MANH_GATE) bounds findRoute calls per tick.
+ *
+ * findRoute treats every other-agent tile as blocked and returns null when an
+ * agent stands ON the goal (astar.js:135-136,143) — so an agent sitting on a
+ * still-free parcel would yield Infinity, the OPPOSITE of the contest signal we
+ * want. Special-case manh===0 -> 0 (max contest) before any findRoute call; this
+ * also avoids a wasted A*.
+ */
+export function otherAgentDistTo(tile) {
+    let best = Infinity;
+    for (const h of agentHistory.values()) {
+        const manh = Math.abs(h.x - tile.x) + Math.abs(h.y - tile.y);
+        if (manh === 0) return 0;                    // agent ON the tile = max contest
+        if (manh >= best) continue;                  // can't beat best (A* >= Manhattan)
+        if (manh > AGENT_DIST_MANH_GATE) continue;
+        const route = findRoute({ x: h.x, y: h.y }, tile);
+        const len = route ? route.length : Infinity;
+        if (len < best) best = len;
+    }
+    return best;
+}
+
+/** Id of the nearest sensed agent to `tile` (Manhattan), or null if none. */
+export function nearestAgentId(tile) {
+    let best = Infinity, id = null;
+    for (const [aid, h] of agentHistory) {
+        const manh = Math.abs(h.x - tile.x) + Math.abs(h.y - tile.y);
+        if (manh < best) { best = manh; id = aid; }
+    }
+    return id;
+}
+
+/**
+ * True if `agentId`'s velocity is closing on `tile` (positive dot product of
+ * velocity with the bearing to the tile). Used as a Phase-1 quality softener and
+ * by Phase-3 Case 3. False for unknown/stationary agents.
+ */
+export function isAgentMovingToward(agentId, tile) {
+    const h = agentHistory.get(agentId);
+    if (!h) return false;
+    const bx = tile.x - h.x, by = tile.y - h.y;
+    return (h.vx * bx + h.vy * by) > 0;
+}
+
+/** True when the nearest sensed agent to `tile` has ~zero velocity (Case 3). */
+export function nearestAgentIsStationary(tile) {
+    let best = Infinity, stat = false;
+    for (const h of agentHistory.values()) {
+        const manh = Math.abs(h.x - tile.x) + Math.abs(h.y - tile.y);
+        if (manh < best) { best = manh; stat = (h.vx === 0 && h.vy === 0); }
+    }
+    return stat;
+}
