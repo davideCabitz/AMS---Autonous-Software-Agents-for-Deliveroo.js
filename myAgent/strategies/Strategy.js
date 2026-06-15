@@ -474,6 +474,12 @@ export class Strategy {
     bankFirstValue(parcel) {
         const carried = parcels.carriedBy(me.id);
         if (carried.length === 0) return -Infinity;
+        const del = this.nearestDelivery();
+        if (!del) return -Infinity;
+        const d0   = this.pathLen(me, del);
+        const d3   = this.pathLen(del, parcel);
+        const del2 = this.nearestDelivery(parcel);
+        const d4   = del2 ? this.pathLen(parcel, del2) : Infinity;
         const n    = carried.length;
         const R    = carried.reduce((s, p) => s + p.reward, 0);
         // Each leg is delivered at its own tile, so scale by that tile's multiplier
