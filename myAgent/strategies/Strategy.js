@@ -6,7 +6,7 @@ import {
     otherAgentDistTo, nearestAgentId, isAgentMovingToward,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
-import { findRoute, pushAwareCost } from '../utils/astar.js';
+import { findRoute, pushAwareCost, reachableIgnoringAgents } from '../utils/astar.js';
 import { createLogger } from '../utils/logger.js';
 
 const exploreLog  = createLogger('explore');
@@ -171,8 +171,30 @@ export class Strategy {
                 + reachable.map(({ d, len }) => `(${d.x},${d.y})=${len}${usableDeliverySet.has(`${d.x}_${d.y}`) ? '' : '·unusable'}`).join(' '));
         if (reachable.length === 0) return undefined;
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
-        const pool   = usable.length > 0 ? usable : reachable;   // both sorted nearest-first
-        return this._pickDelivery(pool).d;
+        if (usable.length > 0) return this._pickDelivery(usable).d; // safe zone reachable now
+
+        // No SAFE (usable) zone reachable right now — every reachable zone is a trap.
+        // Before diving into one, distinguish WHY the safe zones are unreachable:
+        //   • structurally one-way (a real dead-end map)  → must use the trap,
+        //   • or just a competitor standing in the corridor (transient)  → WAIT.
+        // findRoute treats agents as walls, so an agent-blocked safe zone looks
+        // identical to a walled-off one; reachableIgnoringAgents asks the static
+        // question. If a usable zone is structurally reachable but blocked now, hold
+        // the load (return undefined → the strategies' "no reachable delivery →
+        // reposition/idle" branch) and retry next tick instead of entering a trap we
+        // can't escape. Only fall back to the trap when NO usable zone exists at all.
+        let tiles2 = deliveryTiles;
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles2.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) tiles2 = f;
+        }
+        const safeBlocked = tiles2.some(d =>
+            usableDeliverySet.has(`${d.x}_${d.y}`) && reachableIgnoringAgents(from, d));
+        if (safeBlocked) {
+            deliveryLog(`safe delivery exists but is agent-blocked — holding, NOT entering a trap`);
+            return undefined;
+        }
+        return this._pickDelivery(reachable).d;   // genuinely all-traps → last resort
     }
 
     // ─── deliveryMultipliers (Level-2 bonus-tile missions) ───────────────────
@@ -250,7 +272,15 @@ export class Strategy {
         const cur = { x: currentIntent[1], y: currentIntent[2] };
         if (!this.isReachable(cur)) return false;        // current gone → recompute
         const alt = this.nearestEscapableDelivery();
-        if (!alt) return true;                            // nothing better exists
+        if (!alt) {
+            // nearestEscapableDelivery returned nothing. Two cases:
+            //   • current target is a SAFE (usable) zone → genuinely nothing better,
+            //     keep heading there.
+            //   • current target is a TRAP and we got undefined because a safe zone
+            //     is agent-blocked (the wait case) → do NOT keep driving into the
+            //     trap; recompute so the caller takes the hold/idle branch instead.
+            return usableDeliverySet.has(`${cur.x}_${cur.y}`);
+        }
         const curCost = this.deliveryCost(me, cur);
         const altCost = this.deliveryCost(me, alt);
         // Keep unless the alternative wins by MORE than the margin.
@@ -283,21 +313,36 @@ export class Strategy {
         return true;
     }
 
-    /** Delivery gate. maxBundleValue → deliver one cheap parcel at a time (the
-     *  sum of a single filtered parcel is always ≤ the threshold, so every
+    /** True when `n` is a count the agent must never DELIVER at ("deliver N =
+     *  penalty"). At capacity we can't pick up more to escape it, so the ban is
+     *  lifted there — delivering the forbidden count beats never delivering at all. */
+    stackForbidden(n) {
+        if (!(missionConstraints.forbiddenStackSizes?.size > 0)) return false;
+        if (n >= CARRYING_CAPACITY) return false;        // can't grow the stack to escape
+        return missionConstraints.forbiddenStackSizes.has(n);
+    }
+
+    /** Delivery gate. forbiddenStackSizes → never deliver while carrying a banned
+     *  count (e.g. exactly 2). maxBundleValue → deliver one cheap parcel at a time
+     *  (the sum of a single filtered parcel is always ≤ the threshold, so every
      *  delivery earns the bonus). requiredStackSize → only deliver once the
      *  stack is complete. Otherwise deliver whenever it's worthwhile. */
     stackReady(carrying) {
+        if (this.stackForbidden(carrying.length)) return false;
         if (missionConstraints.maxBundleValue != null) return carrying.length >= 1;
         if (missionConstraints.requiredStackSize != null)
             return carrying.length >= missionConstraints.requiredStackSize;
         return true;
     }
 
-    /** True while a requiredStackSize mission still needs more parcels — used to
-     *  relax the value-based multi-pickup gates (a mandated stack must be filled
-     *  even when the marginal parcel isn't "worth it" by the decay model). */
+    /** True while the agent must keep picking up rather than deliver: a
+     *  requiredStackSize mission still below its floor, OR we're holding a
+     *  forbidden count and must grab one more to escape it (e.g. carrying 2 when
+     *  delivering 2 is penalised → go find a 3rd). Relaxes the value-based
+     *  multi-pickup gates (a mandated pickup must happen even when the marginal
+     *  parcel isn't "worth it" by the decay model). */
     mustStack(carrying) {
+        if (this.stackForbidden(carrying.length)) return true;
         return missionConstraints.requiredStackSize != null
             && carrying.length < missionConstraints.requiredStackSize;
     }
@@ -306,8 +351,10 @@ export class Strategy {
      *  stop picking up and deliver. Only "exactly N" / "only when carrying N" missions
      *  set a cap; "at least N" leaves maxStackSize null so the agent may keep stacking.
      *  Without this the multi-pickup gates grab past N — "deliver 2 at a time" delivered
-     *  3–4. Complements mustStack() (which forces pickups while below the floor). */
+     *  3–4. Complements mustStack() (which forces pickups while below the floor).
+     *  A forbidden count is never "full" — we must be free to pick up to escape it. */
     stackFull(carrying) {
+        if (this.stackForbidden(carrying.length)) return false;
         return missionConstraints.maxStackSize != null
             && carrying.length >= missionConstraints.maxStackSize;
     }
@@ -410,6 +457,61 @@ export class Strategy {
         // Reward is scaled by the chosen delivery tile's multiplier (1× by default).
         const scale = del ? this.deliveryScale(del) : 1;
         return scale * R - n * this.decayRate() * d0;
+    }
+
+    /**
+     * Net value of diverting to the active one-shot bonus (missionConstraints.
+     * oneShotBonus), expressed in the SAME units as bankNowValue/pickupValue so the
+     * literal `+points` competes with parcel income inside the agent's own cost
+     * function — the cross-layer coordination this feature exists for.
+     *
+     *   bonusNet = points − n·ρ·dist(me → bonus)
+     *
+     * The only cost charged is the decay the detour inflicts on the n parcels we
+     * already carry (we delay banking them by dist tiles). The literal points are
+     * a one-shot reward, not scaled by any delivery multiplier. Returns null when
+     * no bonus is active or the tile is unreachable, so callers skip it cleanly.
+     * Caller compares this against the best parcel option (pickupValue/bankNow) and
+     * only diverts when the bonus wins — see decide() in the sensing strategies.
+     */
+    bonusGoalValue() {
+        const b = missionConstraints.oneShotBonus;
+        if (!b) return null;
+        const d = this.pathLen(me, { x: b.x, y: b.y });
+        if (!Number.isFinite(d)) return null;
+        const n = parcels.carriedBy(me.id).length;
+        return b.points - n * this.decayRate() * d;
+    }
+
+    /**
+     * Shared front-door called once per tick (coordinator_agent.optionsGeneration)
+     * BEFORE the strategy's own decide(), so every strategy is bonus-aware with no
+     * per-subclass edits. Returns a ['go_to', x, y] predicate to divert to the
+     * active oneShotBonus, or null to let normal parcel deliberation proceed.
+     *
+     * The bonus diverts only when its net value (bonusGoalValue, in parcel-income
+     * units) beats what the agent would otherwise bank now by more than
+     * SWITCH_MARGIN — the same anti-ping-pong threshold pickups use. Once the agent
+     * is standing on the bonus tile we stop diverting (let it deliver/resume), so a
+     * per-agent bonus is collected by arrival and the field can be dropped by the
+     * mission layer. With no oneShotBonus this is a null-returning no-op.
+     */
+    bonusDiversion(currentIntent) {
+        const b = missionConstraints.oneShotBonus;
+        if (!b) return null;
+        // Already there — arrival earns it; don't re-issue go_to and stall on-tile.
+        if (Math.round(me.x) === b.x && Math.round(me.y) === b.y) return null;
+        const net = this.bonusGoalValue();
+        if (net == null) return null;                 // unreachable → ignore
+        // Compare against the best the agent would otherwise do this tick: bank the
+        // current load now (0 when empty-handed). A positive, margin-beating net
+        // means the literal bonus is worth more than continuing the parcel loop.
+        const baseline = this.bankNowValue();
+        if (net - baseline <= SWITCH_MARGIN) return null;
+        // Hysteresis: if we're already heading to the bonus tile, keep going.
+        if (currentIntent?.[0] === 'go_to'
+            && currentIntent[1] === b.x && currentIntent[2] === b.y) return null;
+        return ['go_to', b.x, b.y];
     }
 
     /**

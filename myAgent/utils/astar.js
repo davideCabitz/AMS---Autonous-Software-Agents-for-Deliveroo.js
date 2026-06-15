@@ -140,6 +140,13 @@ export function findRoute(start, goal, blockedKeys = null) {
     const s = { x: Math.round(start.x), y: Math.round(start.y) };
     const g = { x: Math.round(goal.x),  y: Math.round(goal.y) };
 
+    // A non-finite start/goal (undefined/NaN coords — e.g. a parcel or agent
+    // sighting whose position never resolved) makes the heuristic NaN, which makes
+    // every fScore NaN, which leaves astar's open-set selection with no winner →
+    // it dereferences an undefined node and crashes. Treat it as unreachable here,
+    // the clean failure every caller already handles, instead of crashing the loop.
+    if (![s.x, s.y, g.x, g.y].every(Number.isFinite)) return null;
+
     const blocked = agentKeys();
     if (blockedKeys) for (const k of blockedKeys) blocked.add(k);
     blocked.delete(key(s.x, s.y)); // never block where we already stand
@@ -149,6 +156,31 @@ export function findRoute(start, goal, blockedKeys = null) {
         walkable = new Set([...walkable].filter(k => !blocked.has(k)));
 
     return astar(s, g, walkable);
+}
+
+/**
+ * True when a route from `start` to `goal` exists over the STATIC map with other
+ * agents IGNORED (walls, arrows and mission avoidTiles still respected). Unlike
+ * findRoute — which treats every other agent as an impassable wall — this answers
+ * the structural question "could I get there if the agents weren't standing in the
+ * way right now?". Used by trap avoidance to tell a real one-way dead-end (never
+ * reachable) from a safe zone that a competitor is only temporarily blocking
+ * (reachable here, blocked in findRoute) — so the agent waits for the block to
+ * clear instead of diving into a trap zone it can't escape.
+ */
+export function reachableIgnoringAgents(start, goal) {
+    const s = { x: Math.round(start.x), y: Math.round(start.y) };
+    const g = { x: Math.round(goal.x),  y: Math.round(goal.y) };
+    if (![s.x, s.y, g.x, g.y].every(Number.isFinite)) return false;
+
+    let walkable = getWalkable();
+    // Honour mission avoidTiles (a deliberate hard ban), but NOT other agents.
+    const avoid = missionConstraints.avoidTiles;
+    if (avoid?.size > 0) {
+        walkable = new Set([...walkable].filter(k => !avoid.has(k)));
+        walkable.add(key(s.x, s.y)); // never block where we already stand
+    }
+    return astar(s, g, walkable) != null;
 }
 
 /**

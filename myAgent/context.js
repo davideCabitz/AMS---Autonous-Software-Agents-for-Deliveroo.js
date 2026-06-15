@@ -125,12 +125,29 @@ export const manualHold = { active: false };
 export const missionConstraints = {
     requiredStackSize:    null,      // number | null — FLOOR: deliver only once carrying ≥ this ("at least N")
     maxStackSize:         null,      // number | null — CAP: never carry more than this ("exactly N" sets both)
+    forbiddenStackSizes:  new Set(), // Set<number> — counts the agent must never DELIVER at ("deliver N = penalty").
+                                     //   NOT a cap: carrying a forbidden count forces more pickups (toward N+1), so
+                                     //   e.g. {2} means "1 ok, 3+ ok, never deliver exactly 2 — if holding 2, grab a 3rd".
     allowedDeliveryTiles: null,      // Set<"x_y"> | null — null = all tiles allowed
     allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
     maxParcelReward:      null,      // number | null — null = no ceiling
     maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this
     deliveryMultipliers:  null,      // Map<"x_y", number> | null — per-tile delivery reward scale; null = every tile 1×
+    oneShotBonus:         null,      // { x, y, points, perAgent } | null — a go-there reward goal; the literal
+                                     //   `points` competes with parcel income inside the value functions
+                                     //   (bonusGoalValue) so "is +N worth the trip?" is a real comparison.
+    penaltyTiles:         new Map(), // Map<"x_y", number> — literal point penalty for entering/delivering at a
+                                     //   tile. Keys are also folded into avoidTiles (hard ban) on apply; the
+                                     //   magnitude here feeds the worth-gate and conversational recall.
+    // Per-type running point totals for the Level-3 multi-agent routines. Each new
+    // same-type mission OFFER adds its signed value here; the routine is armed/kept
+    // while its total is ≥ 0 and declined/stopped while < 0 (see armedByNet in
+    // missionState.js). Default 0 ⇒ a routine with no reward clause is followed exactly
+    // as before. "−500 then +1000" nets +500 (followed); a later "−800" nets −300 (stopped).
+    handoffNet:           0,         // Σ point values of "one picks up / other delivers" offers
+    gatherNet:            0,         // Σ point values of "move both near (x,y) and wait" offers
+    lightNet:             0,         // Σ point values of red-light-green-light offers
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 

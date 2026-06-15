@@ -32,7 +32,12 @@ function optionsGeneration() {
     }
 
     const currentIntent = myAgent.intention_queue.at(-1)?.predicate ?? null;
-    const option = runtime.strategy.decide(currentIntent);
+    // A one-shot point bonus (missionConstraints.oneShotBonus) competes with the
+    // parcel loop inside the value functions: divert to it only when its net value
+    // beats banking the current load. Checked here, before decide(), so every
+    // strategy is bonus-aware with no per-subclass edits.
+    const option = runtime.strategy.bonusDiversion(currentIntent)
+                ?? runtime.strategy.decide(currentIntent);
 
     if (option) myAgent.push(option);
 }

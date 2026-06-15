@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, otherAgents, directive, trafficLight, runtime } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, otherAgents, directive, trafficLight, runtime, missionConstraints } from '../context.js';
 import { findRoute, navigateTo } from '../utils/astar.js';
 import { selectStrategy } from '../strategies/selectStrategy.js';
 import { partner, sendOrder, sendHalt, sendResume, requestStatus } from './partner.js';
@@ -647,6 +647,10 @@ async function loop(myAgent) {
  */
 export function startHandoff(myAgent, resumeAutonomy) {
     if (!partner.id) return 'Cannot start handoff: no partner connected yet.';
+    // Defence-in-depth: never run the handoff while its running point total is a net
+    // penalty (a "-N bonus" handoff mission). The tool already gates on this, but a
+    // direct call must honour it too. net >= 0 (incl. the default 0, no-reward) ⇒ run.
+    if (missionConstraints.handoffNet < 0) return 'Mission declined.';
     if (running)     return 'Handoff routine already running.';
     running = true;
     loop(myAgent).finally(() => resumeAutonomy?.());

@@ -1,6 +1,6 @@
 import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, missionConstraints, directive, trafficLight, manualHold, lightMission, moveTiming } from '../context.js';
 import { reachableFrom, findRoute } from '../utils/astar.js';
-import { applyMissionConfig, dropMissionField, dropAllMissions } from './missionState.js';
+import { applyMissionConfig, dropMissionField, dropAllMissions, armedByNet } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
 import { startHandoff, stopHandoff } from './handoff.js';
 
@@ -64,6 +64,17 @@ function parseXY(input) {
     const nums = String(input ?? '').match(/-?\d+/g);
     if (!nums || nums.length < 2) return { x: null, y: null };
     return { x: parseInt(nums[0], 10), y: parseInt(nums[1], 10) };
+}
+
+/**
+ * Parse an OPTIONAL signed reward from a Level-3 mission's input — only an explicit
+ * "pts=N" / "points=N" token (N may be negative). A bare coordinate number is NOT a
+ * reward, so "x,y,D" never accidentally reads its geometry as points. Returns the
+ * number, or null when no reward token is present (⇒ neutral, contributes 0).
+ */
+function parseRewardToken(input) {
+    const m = String(input ?? '').match(/(?:pts|points)\s*=\s*(-?\d+)/i);
+    return m ? parseInt(m[1], 10) : null;
 }
 
 /** A known free parcel sitting on (x,y), highest reward first; null if none. */
@@ -246,6 +257,23 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         }
     };
 
+    // Accumulate a Level-3 routine's reward into its running net total (mirrored to
+    // the worker) and report whether the routine is now armed. `field` is the
+    // missionConstraints net key ('handoffNet'|'gatherNet'|'lightNet'). The reward is
+    // parsed from the tool input as an explicit pts=N token; absent ⇒ 0 (neutral, the
+    // no-reward mission still counts as armed). The decision is the net's sign, so a
+    // later positive offer can outweigh an earlier penalty and re-arm, and a later
+    // penalty can flip an armed routine off — see armedByNet (net >= 0 ⇒ armed).
+    const applyRoutineNet = (field, input) => {
+        const pts = parseRewardToken(input);
+        if (pts != null) {
+            const cfg = { [field]: pts };
+            applyMissionConfig(cfg);
+            sendConstraint('apply', cfg);
+        }
+        return armedByNet(missionConstraints[field]);
+    };
+
     return {
         ...readTools(),
 
@@ -411,8 +439,16 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         async resume_partner() { return sendResume(); },
         async ask_partner_status() { return requestStatus(); },
 
-        // cross-agent handoff routine ("one picks up, the other delivers" missions)
-        async start_handoff() { return startHandoff(myAgent, resumeAutonomy); },
+        // cross-agent handoff routine ("one picks up, the other delivers" missions).
+        // Pass pts=N when the mission states a reward; the running handoffNet decides
+        // whether to arm. A net penalty (net < 0) declines and stops any running loop.
+        async start_handoff(input) {
+            if (!applyRoutineNet('handoffNet', input)) {
+                stopHandoff();   // no-op if not running; stops it if a penalty flipped it off
+                return 'Mission declined.';
+            }
+            return startHandoff(myAgent, resumeAutonomy);
+        },
         async stop_handoff()  { return stopHandoff(); },
 
         // Red-light-green-light mission control. ARM the mission when the admin
@@ -420,7 +456,14 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         // once armed do the live "RED LIGHT!/GREEN LIGHT!" shouts (classified as
         // STOP/GO) stop/resume the agents. This is what stops a stray "red light" in
         // chat from freezing the agents before any mission has started.
-        async start_light_mission() {
+        async start_light_mission(input) {
+            // Pass pts=N when the announcement states a reward; lightNet decides arming.
+            // A net penalty (net < 0) declines and disarms any active light mission.
+            if (!applyRoutineNet('lightNet', input)) {
+                lightMission.active = false;
+                trafficLight.red = false;
+                return 'Mission declined.';
+            }
             lightMission.active = true;
             return 'Red-light-green-light mission STARTED: live RED LIGHT / GREEN LIGHT shouts will now stop / resume both agents.';
         },
@@ -440,7 +483,16 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         // no longer has to guess tiles (it has no tool to enumerate them, which is
         // why the prompt-only version picked walls / unreachable / identical tiles).
         async gather_near(input) {
-            const nums = String(input ?? '').match(/-?\d+/g);
+            // Accumulate the gather routine's reward (pts=N) into gatherNet first; a net
+            // penalty declines and releases any hold this routine put both agents in.
+            if (!applyRoutineNet('gatherNet', input)) {
+                if (manualHold.active) { manualHold.active = false; sendResume(); }
+                return 'Mission declined.';
+            }
+            // Strip the pts=N token BEFORE parsing geometry so the reward's digits are
+            // never mistaken for a coordinate (a bare 4th number is NOT a reward).
+            const geom = String(input ?? '').replace(/(?:pts|points)\s*=\s*-?\d+/i, '');
+            const nums = geom.match(/-?\d+/g);
             if (!nums || nums.length < 2)
                 return `Error: gather_near needs "x,y" or "x,y,distance" (got '${input}').`;
             const cx = parseInt(nums[0], 10), cy = parseInt(nums[1], 10);
