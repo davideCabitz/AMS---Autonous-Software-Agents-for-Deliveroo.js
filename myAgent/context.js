@@ -123,7 +123,8 @@ export const manualHold = { active: false };
  * read by every strategy on each decide() call. All fields are null/empty by
  * default (= no constraint). dropMissions() resets them all. */
 export const missionConstraints = {
-    requiredStackSize:    null,      // number | null — deliver only at this stack depth
+    requiredStackSize:    null,      // number | null — FLOOR: deliver only once carrying ≥ this ("at least N")
+    maxStackSize:         null,      // number | null — CAP: never carry more than this ("exactly N" sets both)
     allowedDeliveryTiles: null,      // Set<"x_y"> | null — null = all tiles allowed
     allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance

@@ -302,15 +302,25 @@ export class Strategy {
             && carrying.length < missionConstraints.requiredStackSize;
     }
 
+    /** True when the bundle CAP is reached (carrying ≥ maxStackSize): the agent must
+     *  stop picking up and deliver. Only "exactly N" / "only when carrying N" missions
+     *  set a cap; "at least N" leaves maxStackSize null so the agent may keep stacking.
+     *  Without this the multi-pickup gates grab past N — "deliver 2 at a time" delivered
+     *  3–4. Complements mustStack() (which forces pickups while below the floor). */
+    stackFull(carrying) {
+        return missionConstraints.maxStackSize != null
+            && carrying.length >= missionConstraints.maxStackSize;
+    }
+
     /** True when the active mission forbids carrying a second parcel, so the
      *  multi-pickup gates collapse to single-parcel bundles:
      *   - maxBundleValue: a second parcel could push the bundle total over the cap.
-     *   - requiredStackSize === 1: "deliver exactly one at a time" — the mandated
-     *     stack is full at one parcel, so never grab another before delivering.
-     *  (requiredStackSize ≥ 2 still stacks normally via mustStack/stackReady.) */
+     *   - maxStackSize === 1: "deliver exactly one at a time" — the cap is one parcel,
+     *     so never grab another before delivering.
+     *  (a cap ≥ 2 still stacks normally via mustStack/stackReady/stackFull.) */
     singleParcelBundles() {
         return missionConstraints.maxBundleValue != null
-            || missionConstraints.requiredStackSize === 1;
+            || missionConstraints.maxStackSize === 1;
     }
 
     /**

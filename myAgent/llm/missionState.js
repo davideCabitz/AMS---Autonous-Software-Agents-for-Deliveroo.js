@@ -14,7 +14,7 @@ import { missionConstraints } from '../context.js';
 
 /**
  * Apply a mission-constraint config. Fields are all optional and additive:
- *   requiredStackSize, allowedDeliveryTiles [[x,y],…], allowedSpawnerTiles,
+ *   requiredStackSize (floor), maxStackSize (cap), allowedDeliveryTiles [[x,y],…], allowedSpawnerTiles,
  *   avoidTiles [[x,y],…], maxParcelReward, maxBundleValue,
  *   deliveryMultipliers [[x,y,mult],…], description.
  * @param {object} config already-parsed JSON
@@ -25,6 +25,10 @@ export function applyMissionConfig(config) {
     if (config.requiredStackSize != null) {
         missionConstraints.requiredStackSize = Number(config.requiredStackSize);
         fieldsSet.push('requiredStackSize');
+    }
+    if (config.maxStackSize != null) {
+        missionConstraints.maxStackSize = Number(config.maxStackSize);
+        fieldsSet.push('maxStackSize');
     }
     if (config.allowedDeliveryTiles != null) {
         missionConstraints.allowedDeliveryTiles = new Set(
@@ -72,7 +76,8 @@ export function applyMissionConfig(config) {
 
 // [normalized key] -> [label, camelCaseName, clearFn]
 const FIELD_MAP = {
-    requiredstacksize:    ['Stack size constraint',     'requiredStackSize',    () => { missionConstraints.requiredStackSize = null; }],
+    requiredstacksize:    ['Stack size floor',          'requiredStackSize',    () => { missionConstraints.requiredStackSize = null; }],
+    maxstacksize:         ['Stack size cap',            'maxStackSize',         () => { missionConstraints.maxStackSize = null; }],
     alloweddeliverytiles: ['Delivery tile constraint',  'allowedDeliveryTiles', () => { missionConstraints.allowedDeliveryTiles = null; }],
     allowedspawnertiles:  ['Spawner zone constraint',   'allowedSpawnerTiles',  () => { missionConstraints.allowedSpawnerTiles = null; }],
     avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
@@ -93,7 +98,7 @@ export function dropMissionField(field) {
     if (!entry) {
         return {
             ok: false,
-            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue.`,
+            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, maxStackSize, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue.`,
         };
     }
     const [, [label, camel, clear]] = entry;
@@ -111,6 +116,7 @@ export function dropMissionField(field) {
  */
 export function dropAllMissions() {
     missionConstraints.requiredStackSize    = null;
+    missionConstraints.maxStackSize         = null;
     missionConstraints.allowedDeliveryTiles = null;
     missionConstraints.allowedSpawnerTiles  = null;
     missionConstraints.avoidTiles.clear();

@@ -1,6 +1,6 @@
 import { StrategyMemory } from './StrategyMemory.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
-import { me, parcels, CARRYING_CAPACITY } from '../context.js';
+import { me, parcels, CARRYING_CAPACITY, missionConstraints } from '../context.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('lookahead');
@@ -66,23 +66,36 @@ export class StrategyLookAhead extends StrategyMemory {
         const eligible = allFree.filter(p => this.isReachable(p) && this.inSafe(p));
 
         if (carrying.length > 0) {
-            // maxBundleValue missions skip multi-pickup entirely (single-parcel
-            // bundles); a mandated requiredStackSize relaxes the value gate (the
-            // stack must be filled even at marginal value).
-            const worthwhile = this.singleParcelBundles() ? [] : eligible
+            // A maxStackSize CAP bounds the bundle: once carrying ≥ cap (stackFull)
+            // we must stop picking up and deliver, otherwise the value-based gate
+            // keeps grabbing parcels past the cap ("deliver 2 at a time" delivered 4).
+            // maxBundleValue / a cap of 1 (singleParcelBundles) forbid a second parcel
+            // outright. Either way → no more pickups this trip. (An "at least N" mission
+            // sets no cap, so it keeps stacking past N — that is intended.)
+            const noMorePickups = this.singleParcelBundles() || this.stackFull(carrying);
+            // While below the requiredStackSize FLOOR, mustStack relaxes the value gate
+            // (the floor must be reached even when a marginal parcel isn't "worth it").
+            const worthwhile = noMorePickups ? [] : eligible
                 .map(p => ({ p, value: this.pickupValue(p) }))
                 .filter(({ p, value }) => this.mustStack(carrying) || value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
                 .sort((a, b) => b.value - a.value);
 
+            // When the NEXT pickup would hit the cap (so it's the last one), take the
+            // best SINGLE parcel (ranked by pickupValue) — the two-parcel look-ahead
+            // would optimise a 2-pickup tour we won't make, so it could pick a worse
+            // first stop. Otherwise use the look-ahead pairing.
+            const lastPickupBeforeCap = missionConstraints.maxStackSize != null
+                && carrying.length === missionConstraints.maxStackSize - 1;
             const choice = (!this.atCapacity() && worthwhile.length > 0)
-                ? this.#chooseTarget(worthwhile, carrying.length)
+                ? (lastPickupBeforeCap
+                    ? { p: worthwhile[0].p, value: worthwhile[0].value, via: 'direct' }
+                    : this.#chooseTarget(worthwhile, carrying.length))
                 : undefined;
-            // When single-parcel bundles are mandated (maxBundleValue, or
-            // requiredStackSize===1) we must NOT keep an in-flight extra pickup:
-            // #shouldKeep(_, undefined) would otherwise return true for any pending
-            // go_pick_up and the agent would still carry a second parcel. Skip the
+            // When no further pickup is allowed we must NOT keep an in-flight extra
+            // pickup: #shouldKeep(_, undefined) would otherwise return true for any
+            // pending go_pick_up and the agent would overshoot the stack. Skip the
             // hysteresis so the next branch delivers what we already hold.
-            if (!this.singleParcelBundles() && !this.atCapacity() && this.#shouldKeep(currentIntent, choice))
+            if (!noMorePickups && !this.atCapacity() && this.#shouldKeep(currentIntent, choice))
                 return null;
             if (choice) {
                 this.#logChoice('multi-pickup', choice);
@@ -112,7 +125,15 @@ export class StrategyLookAhead extends StrategyMemory {
             .sort((a, b) => b.value - a.value);
 
         if (ranked.length > 0) {
-            const choice = this.#chooseTarget(ranked, carrying.length);
+            // Two-parcel look-ahead picks the best FIRST STOP of a two-pickup tour,
+            // which can be a parcel that is only good because a second parcel lies
+            // beyond it. With a cap of one ("deliver one at a time", maxStackSize===1)
+            // the agent carries exactly one parcel, so that pairing is wrong — take
+            // the greedy best SINGLE parcel (ranked[0]), the one BDI would pick in
+            // observation range.
+            const choice = missionConstraints.maxStackSize === 1
+                ? { p: ranked[0].p, value: ranked[0].value, via: 'direct' }
+                : this.#chooseTarget(ranked, carrying.length);
             if (this.#shouldKeep(currentIntent, choice)) return null;
             this.#logChoice('go_pick_up', choice);
             return ['go_pick_up', choice.p.x, choice.p.y, choice.p.id];
