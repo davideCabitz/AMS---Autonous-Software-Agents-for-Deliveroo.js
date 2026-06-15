@@ -53,6 +53,19 @@ function extractFinal(text) {
     return m ? m[1].trim() : null;
 }
 
+// Tools that ACCEPT/CHANGE a persistent mission. When one of these succeeds the
+// directive is a mission, not an action: it must acknowledge with "Mission
+// accepted." in chat. Because the model applies a mission via a TOOL and then
+// ends the directive with "End" (the action output contract forbids a Final
+// Answer after a tool), the loop itself emits the ack — otherwise the mission is
+// applied silently and the sender never hears back (observed bug).
+const MISSION_TOOLS = new Set([
+    'apply_mission', 'forbid_delivery', 'restrict_exploration',
+    'dropMission', 'dropMissions',
+    'start_light_mission', 'stop_light_mission',
+    'start_handoff', 'stop_handoff',
+]);
+
 /** "End" on its own line marks the accompanying Action as the directive's last
  *  step: the directive terminates the moment that action completes. */
 function hasEndMarker(text) {
@@ -84,6 +97,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
     ];
 
     let failures = 0;                              // failed command attempts (budget)
+    let missionApplied = false;                    // a mission tool succeeded → ack with "Mission accepted."
 
     try {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -112,8 +126,9 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
             const final = extractFinal(out);
 
             // Bare "End" with no Action: the model declares the directive already
-            // complete — terminate silently (no chat reply for action directives).
-            if (!act && hasEndMarker(out)) return null;
+            // complete. A pure action directive ends silently; a mission directive
+            // (a mission tool ran earlier this turn-sequence) acks "Mission accepted.".
+            if (!act && hasEndMarker(out)) return missionApplied ? 'Mission accepted.' : null;
 
             // If both appear, run the Action first.
             if (act) {
@@ -123,13 +138,19 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                     : `Error: unknown tool '${act.action}'. Available: ${Object.keys(tools).join(', ')}`;
                 toolLog(`${act.action}(${act.input}) -> ${obs}`);
 
+                // Remember a successful mission change so the directive acks with
+                // "Mission accepted." when it ends (a mission tool that fails leaves
+                // this false → the failure stays silent, as the operator wants).
+                if (MISSION_TOOLS.has(act.action) && fn && !/^(Error|Failed)/i.test(obs))
+                    missionApplied = true;
+
                 if (directive.aborted)
                     return null; // aborted: the abort handler already replied — stay silent
 
                 // "End" marker with the Action = "this is my last step": the
-                // directive ends the INSTANT the action completes — no confirmation
-                // round-trip, no chat reply (success or failure is observed in-game).
-                if ((hasEndMarker(out) || final) && fn) return null;
+                // directive ends the INSTANT the action completes. Action directives
+                // end silently; a mission directive acks "Mission accepted.".
+                if ((hasEndMarker(out) || final) && fn) return missionApplied ? 'Mission accepted.' : null;
 
                 // Failure budget: don't let the LLM keep retrying a stuck directive.
                 // After a few failed commands, give up and let the BDI agent carry on.

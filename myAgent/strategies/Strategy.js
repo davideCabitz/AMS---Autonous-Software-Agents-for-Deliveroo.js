@@ -302,10 +302,15 @@ export class Strategy {
             && carrying.length < missionConstraints.requiredStackSize;
     }
 
-    /** True when a maxBundleValue mission forbids carrying a second parcel
-     *  (multi-pickup could push the bundle total over the threshold). */
+    /** True when the active mission forbids carrying a second parcel, so the
+     *  multi-pickup gates collapse to single-parcel bundles:
+     *   - maxBundleValue: a second parcel could push the bundle total over the cap.
+     *   - requiredStackSize === 1: "deliver exactly one at a time" — the mandated
+     *     stack is full at one parcel, so never grab another before delivering.
+     *  (requiredStackSize ≥ 2 still stacks normally via mustStack/stackReady.) */
     singleParcelBundles() {
-        return missionConstraints.maxBundleValue != null;
+        return missionConstraints.maxBundleValue != null
+            || missionConstraints.requiredStackSize === 1;
     }
 
     /**

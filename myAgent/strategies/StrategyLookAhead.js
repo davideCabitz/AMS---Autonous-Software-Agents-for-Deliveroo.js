@@ -77,7 +77,12 @@ export class StrategyLookAhead extends StrategyMemory {
             const choice = (!this.atCapacity() && worthwhile.length > 0)
                 ? this.#chooseTarget(worthwhile, carrying.length)
                 : undefined;
-            if (!this.atCapacity() && this.#shouldKeep(currentIntent, choice))
+            // When single-parcel bundles are mandated (maxBundleValue, or
+            // requiredStackSize===1) we must NOT keep an in-flight extra pickup:
+            // #shouldKeep(_, undefined) would otherwise return true for any pending
+            // go_pick_up and the agent would still carry a second parcel. Skip the
+            // hysteresis so the next branch delivers what we already hold.
+            if (!this.singleParcelBundles() && !this.atCapacity() && this.#shouldKeep(currentIntent, choice))
                 return null;
             if (choice) {
                 this.#logChoice('multi-pickup', choice);

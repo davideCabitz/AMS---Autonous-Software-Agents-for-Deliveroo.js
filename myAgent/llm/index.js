@@ -111,9 +111,12 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
                     }
                     // Silent endings: null (aborted / last-action-completed) and bare
                     // Done/Failure confirmations are never sent — outcomes are observed
-                    // in-game. Substantive answers (quiz results, scored QuestionAnswer
-                    // replies) still go back to the sender.
-                    if (answer != null && !/^(Done\.?|Failure:.*)$/is.test(answer.trim())) {
+                    // in-game. Mission FAILURES are silent too: a declined mission, a
+                    // give-up after failed commands, or the iteration-limit message never
+                    // go to chat — only a successful "Mission accepted." (and substantive
+                    // answers like quiz/calculation results) are sent back to the sender.
+                    const SILENT = /^(Done\.?|Failure:.*|Mission declined\.?|Could not complete the directive.*|Directive not completed.*|Mission cannot be.*|Can'?t comply:.*)$/is;
+                    if (answer != null && !SILENT.test(answer.trim())) {
                         record(key, objective, answer);
                         await sendReply(key, replySender, answer);
                     }
