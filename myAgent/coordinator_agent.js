@@ -1,16 +1,17 @@
-import { socket, me, parcels, directive, trafficLight, manualHold, role } from './context.js';
+import { socket, me, parcels, directive, trafficLight, manualHold, role, runtime } from './context.js';
 import { IntentionRevisionReplace }   from './intentions/IntentionRevisionReplace.js';
 import { selectStrategy }             from './strategies/selectStrategy.js';
 import { registerLlm }                from './llm/index.js';
-import { registerWorker }             from './partnerWorker.js';
+import { registerWorker }             from './worker_agent.js';
 import { createLogger } from './utils/logger.js';
 
 const log = createLogger('llm');
 
 const myAgent = new IntentionRevisionReplace();
 
-// Chosen once the agent is ready (server config has arrived). See selectStrategy().
-let strategy = null;
+// The chosen strategy lives in the shared `runtime.strategy` (context.js) so the
+// handoff routine can drive B's acquisition with the SAME strategy. Created lazily
+// once the agent is ready (server config has arrived). See selectStrategy().
 
 function optionsGeneration() {
     if (!me.isReady) return;
@@ -22,16 +23,16 @@ function optionsGeneration() {
     // strategy doesn't clobber the intention it pushed. Beliefs still update
     // (parcels.sync in onSensing runs regardless) — only deciding/pushing pauses.
     if (directive.active) return;
-    if (!strategy) {
-        strategy = selectStrategy();
+    if (!runtime.strategy) {
+        runtime.strategy = selectStrategy();
         // The strategy declares its re-deliberation cadence; the loop owns the timer.
         // Needed for strategies that can idle with no event to wake them (e.g. blind,
         // stationary after a pickup, where own-tile sensing emits nothing).
-        if (strategy.tickIntervalMs > 0) setInterval(optionsGeneration, strategy.tickIntervalMs);
+        if (runtime.strategy.tickIntervalMs > 0) setInterval(optionsGeneration, runtime.strategy.tickIntervalMs);
     }
 
     const currentIntent = myAgent.intention_queue.at(-1)?.predicate ?? null;
-    const option = strategy.decide(currentIntent);
+    const option = runtime.strategy.decide(currentIntent);
 
     if (option) myAgent.push(option);
 }

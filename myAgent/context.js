@@ -33,8 +33,13 @@ socket.on('disconnect', (reason) => {
 /* Which of the two challenge-2 processes this is. Set by myAgent/launch.js before
  * this module loads. 'coordinator' runs the LLM command layer and orders the
  * worker around; 'worker' runs plain BDI plus the partner-order handler. A direct
- * `node myAgent/agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
+ * `node myAgent/coordinator_agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
 export const role = process.env.AGENT_ROLE ?? 'coordinator';
+
+/* The coordinator's CHOSEN strategy instance, set by coordinator_agent.js on its
+ * first deliberation. Shared here so the handoff routine can drive B's parcel
+ * acquisition with the SAME map-chosen strategy it uses for autonomous play. */
+export const runtime = { strategy: null };
 export const parcels = new Parcels();
 export const deliveryTiles = [];
 export const spawnerTiles  = [];
@@ -94,11 +99,19 @@ export const pddl = { busy: false };
  * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
 export const directive = { active: false, aborted: false };
 
-/* Red-light/green-light state ("red light, green light" mission). Set by a
- * keyword fast-path on incoming chat (NOT by the LLM — a 20s light cycle can't
- * afford model latency). While red: optionsGeneration stands down, LLM commands
- * are refused, and worker orders are refused — every movement costs points. */
+/* Red-light/green-light enforcement state ("red light, green light" mission).
+ * `red` is set by the LLM message classifier's STOP/GO verdict (see llm/index.js).
+ * While red: optionsGeneration stands down, LLM commands are refused, and worker
+ * orders are refused — every movement costs points. */
 export const trafficLight = { red: false };
+
+/* Whether a "red light, green light" mission has been STARTED. The live
+ * "RED LIGHT!/GREEN LIGHT!" shouts only stop/resume the agents once the LLM has
+ * read an announcement ("let's begin a red light green light game …") and armed
+ * the mission via the start_light_mission tool. Before that, a stray "red light"
+ * in chat is classified STOP but IGNORED — it must not freeze the agents. Cleared
+ * by stop_light_mission or an abort. */
+export const lightMission = { active: false };
 
 /* Indefinite position hold, set by the LLM hold() tool (e.g. "move there and
  * wait for each other"). Unlike directive.active — which is released when the
@@ -116,7 +129,11 @@ export const missionConstraints = {
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
     maxParcelReward:      null,      // number | null — null = no ceiling
     maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this
+<<<<<<< HEAD
     deliveryMultipliers:  null,      // Map<"x_y", number> | null — per-tile delivery reward scale; null = every tile 1×
+=======
+    deliveryMultipliers:  null,      // Map<"x_y",number> | null — per-tile delivery reward multiplier (bonus tiles); null/empty = all tiles ×1
+>>>>>>> LLM
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 

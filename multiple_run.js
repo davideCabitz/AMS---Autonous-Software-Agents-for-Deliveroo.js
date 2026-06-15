@@ -22,12 +22,19 @@ function tokenFor(i) {
 
 for (let i = 0; i < COUNT; i++) {
     const name  = `m_${i}`;
+<<<<<<< HEAD
     const token = tokenFor(i);
     const env   = { ...process.env, HOST, NAME: name };
     if (token) env.TOKEN = token;
     else delete env.TOKEN;   // avoid an inherited shared TOKEN overriding NAME
 
     const child = spawn('node', ['myAgent/agent.js'], { env, stdio: 'pipe' });
+=======
+    const child = spawn(
+        `HOST="${HOST}" TOKEN="${TOKEN}" NAME="${name}" node myAgent/coordinator_agent.js`,
+        { shell: true }
+    );
+>>>>>>> LLM
     child.stdout.on('data', d => process.stdout.write(`[${name}] ${d}`));
     child.stderr.on('data', d => process.stderr.write(`[${name}] ERR: ${d}`));
     child.on('close', code => console.log(`[${name}] exit: ${code}`));

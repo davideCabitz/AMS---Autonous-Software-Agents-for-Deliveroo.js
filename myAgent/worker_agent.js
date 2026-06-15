@@ -50,6 +50,11 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
     // after an order completes, so the worker holds position between orders —
     // exactly what the handoff and "wait for each other" missions need.
     let frozen = false;
+    // Newest-order-wins: each incoming order bumps this. A running order whose seq
+    // is no longer current was superseded (the coordinator re-steered us toward a
+    // moving rendezvous), so it must NOT report a result — the newer order owns the
+    // reply. Lets the coordinator re-target us continuously without racing two plans.
+    let orderSeq = 0;
 
     const send = (payload) => {
         if (!coordinatorId) return;
@@ -85,12 +90,38 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         resumeAutonomy?.();
     }
 
+    /** Current worker status snapshot (position, score, cargo, frozen). */
+    const sendStatus = () => send({
+        type: 'status',
+        x: me.x, y: me.y, score: me.score,
+        carrying: parcels.carriedBy(me.id).map(p => ({ id: p.id, reward: p.reward })),
+        frozen,
+    });
+
+    // While executing a coordinator order (directive.active), stream our position so
+    // the coordinator can track us id-certainly at any distance — otherAgents is
+    // id-less and range-limited, but a handoff needs to know exactly where we are.
+    // Throttled, and only fires on real movement (onYou).
+    let lastStreamAt = 0;
+    socket.onYou(() => {
+        if (!directive.active || !coordinatorId) return;
+        const now = Date.now();
+        if (now - lastStreamAt < 200) return;
+        lastStreamAt = now;
+        sendStatus();
+    });
+
     // --- one-shot orders ----------------------------------------------------------
     async function runOrder(orderId, predicate) {
         if (trafficLight.red) {
             send({ type: 'result', orderId, ok: false, detail: 'RED LIGHT in force — movement is forbidden' });
             return;
         }
+        // Claim the latest sequence and pre-empt any plan still running for an older
+        // order, so only ONE intention executes at a time even under rapid re-targeting.
+        const seq = ++orderSeq;
+        myAgent.haltCurrent();
+        const superseded = () => seq !== orderSeq;
         directive.active = true;       // hold the gate while the order runs
         try {
             // A pickup order may target a parcel the worker has not sensed yet
@@ -105,6 +136,7 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                     predicate = ['go_pick_up', x, y, known.id];
                 } else {
                     await withTimeout(myAgent.commandAndAwait(['go_to', x, y]), ORDER_TIMEOUT_MS);
+                    if (superseded()) return;   // a newer order owns the reply
                     const picked = await socket.emitPickup();
                     const n = picked?.length ?? 0;
                     send({ type: 'result', orderId, ok: n > 0,
@@ -118,12 +150,21 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                 return;
             }
             await withTimeout(myAgent.commandAndAwait(predicate), ORDER_TIMEOUT_MS);
+            if (superseded()) return;           // a newer order owns the reply
             send({ type: 'result', orderId, ok: true,
                    detail: `done: ${predicate.join(' ')} — now at (${me.x},${me.y})` });
         } catch (err) {
-            send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
+            // A halt from the superseding order surfaces as 'stopped'/'timeout'; that
+            // order will report, so stay silent rather than spuriously failing this one.
+            if (!superseded()) send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
         } finally {
-            if (!frozen) {
+            // Stream our RESTING tile: the throttled onYou stream can skip the final
+            // step when we stop right after arriving, leaving the coordinator a tile
+            // behind exactly where it needs to know we've reached the rendezvous.
+            // Only release the gate if WE are still the current order — a newer one
+            // running must keep directive.active held.
+            sendStatus();
+            if (!frozen && !superseded()) {
                 directive.active = false;
                 resumeAutonomy?.();
             }
@@ -147,19 +188,13 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         try { j = JSON.parse(text); } catch { /* not protocol JSON */ }
 
         if (!j?.type) {
-            // Red/green-light fast-path on the raw shout — no LLM, no relay needed.
-            // ANCHORED match: the mission announcement contains "red light" mid-
-            // sentence and must NOT freeze the worker; the real shouts start with it.
-            if (/^\s*red light\b/i.test(text)) {
-                trafficLight.red = true;
-                myAgent.haltCurrent();
-                log('RED LIGHT — holding position');
-            } else if (/^\s*green light\b/i.test(text)) {
-                trafficLight.red = false;
-                log('GREEN LIGHT — resuming');
-                if (!frozen && !directive.active) resumeAutonomy?.();
-            }
-            return; // all other plain chat is for the coordinator, not the worker
+            // Plain chat — INCLUDING the live "RED LIGHT!/GREEN LIGHT!" shouts — is
+            // for the coordinator to interpret with its LLM (one-brain design: the
+            // worker has no model). The worker reacts only to the coordinator's
+            // relayed halt/resume, so the red-light-green-light mission stays fully
+            // LLM-driven. (Trade-off: the worker now waits out the coordinator's
+            // classify-call latency + the relay hop before freezing.)
+            return;
         }
 
         switch (j.type) {
@@ -181,12 +216,7 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                 break;
             }
             case 'status_req':
-                send({
-                    type: 'status',
-                    x: me.x, y: me.y, score: me.score,
-                    carrying: parcels.carriedBy(me.id).map(p => ({ id: p.id, reward: p.reward })),
-                    frozen,
-                });
+                sendStatus();
                 break;
             default:
                 log(`unknown partner message type '${j.type}' from ${id}`);

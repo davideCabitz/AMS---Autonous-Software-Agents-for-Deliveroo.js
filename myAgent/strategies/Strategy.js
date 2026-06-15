@@ -171,7 +171,65 @@ export class Strategy {
                 + reachable.map(({ d, len }) => `(${d.x},${d.y})=${len}${usableDeliverySet.has(`${d.x}_${d.y}`) ? '' : '·unusable'}`).join(' '));
         if (reachable.length === 0) return undefined;
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
-        return (usable[0] ?? reachable[0]).d;
+        const pool   = usable.length > 0 ? usable : reachable;   // both sorted nearest-first
+        return this._pickDelivery(pool).d;
+    }
+
+    // ─── deliveryMultipliers (Level-2 bonus-tile missions) ───────────────────
+    // "Deliver in (x,y) for 5× pts" makes some delivery tiles worth more. The
+    // multiplier scales the banked reward at that tile, so the agent both ROUTES
+    // deliveries to the bonus tile (nearestEscapableDelivery → _pickDelivery) and
+    // VALUES its carried load higher when a bonus tile is reachable (the value
+    // functions). With no such mission every tile is ×1, so all of this collapses
+    // to the historical nearest-tile behaviour exactly.
+
+    /** Delivery reward multiplier for `tile` (1 when no deliveryMultipliers mission). */
+    deliveryMultiplierAt(tile) {
+        const m = missionConstraints.deliveryMultipliers;
+        if (!(m?.size > 0)) return 1;
+        return m.get(`${Math.round(tile.x)}_${Math.round(tile.y)}`) ?? 1;
+    }
+
+    /**
+     * Best delivery {d,len} from `from` for a load of total reward `R` over `n`
+     * parcels. Default (no multipliers): the nearest reachable allowed tile —
+     * identical to nearestDelivery. With a deliveryMultipliers mission: the tile
+     * maximizing banked value R·mult(tile) − n·ρ·len, so a 5× tile is chosen when
+     * its bonus outweighs the extra travel decay. Respects allowedDeliveryTiles.
+     * @returns {{d:object, len:number}|undefined}
+     */
+    _bestDelivery(from, R, n) {
+        let tiles = deliveryTiles;
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) tiles = f;
+        }
+        const reachable = [...tiles]
+            .map(d => ({ d, len: this.pathLen(from, d) }))
+            .filter(({ len }) => Number.isFinite(len));
+        if (reachable.length === 0) return undefined;
+        if (!(missionConstraints.deliveryMultipliers?.size > 0))
+            return reachable.sort((a, b) => a.len - b.len)[0];
+        const rho = this.decayRate();
+        return reachable
+            .map(o => ({ ...o, v: R * this.deliveryMultiplierAt(o.d) - n * rho * o.len }))
+            .sort((a, b) => (b.v - a.v) || (a.len - b.len))[0]; // ties → the nearer tile
+    }
+
+    /**
+     * Pick the delivery tile from an already-reachable, nearest-first `pool`
+     * ({d,len} entries). Default: the nearest (pool[0]). With a deliveryMultipliers
+     * mission: the entry maximizing R·mult − n·ρ·len for the currently carried
+     * load, so the actual go_deliver target prefers a reachable bonus tile.
+     */
+    _pickDelivery(pool) {
+        if (!(missionConstraints.deliveryMultipliers?.size > 0)) return pool[0];
+        const carried = parcels.carriedBy(me.id);
+        const R   = carried.reduce((s, p) => s + p.reward, 0) || 1;
+        const n   = carried.length || 1;
+        const rho = this.decayRate();
+        const valueOf = e => R * this.deliveryMultiplierAt(e.d) - n * rho * e.len;
+        return [...pool].sort((a, b) => (valueOf(b) - valueOf(a)) || (a.len - b.len))[0];
     }
 
     /**
@@ -416,12 +474,6 @@ export class Strategy {
     bankFirstValue(parcel) {
         const carried = parcels.carriedBy(me.id);
         if (carried.length === 0) return -Infinity;
-        const del = this.nearestDelivery();
-        if (!del) return -Infinity;
-        const d0   = this.pathLen(me, del);
-        const d3   = this.pathLen(del, parcel);
-        const del2 = this.nearestDelivery(parcel);
-        const d4   = del2 ? this.pathLen(parcel, del2) : Infinity;
         const n    = carried.length;
         const R    = carried.reduce((s, p) => s + p.reward, 0);
         // Each leg is delivered at its own tile, so scale by that tile's multiplier

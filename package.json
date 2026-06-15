@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Autonomous Software Agents for Deliveroo — BDI architecture",
   "type": "module",
-  "main": "myAgent/agent.js",
+  "main": "myAgent/coordinator_agent.js",
   "scripts": {
-    "start": "node myAgent/agent.js",
+    "start": "node myAgent/coordinator_agent.js",
     "start:coordinator": "node myAgent/launch.js coordinator",
     "start:worker": "node myAgent/launch.js worker"
   },

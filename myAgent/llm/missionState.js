@@ -51,18 +51,12 @@ export function applyMissionConfig(config) {
         fieldsSet.push('maxBundleValue');
     }
     if (Array.isArray(config.deliveryMultipliers)) {
-        // Per-tile delivery reward scale, e.g. 5 for "5× pts in (x,y)" or 0 for
-        // "0 pts in (x,y)". Additive: merge into the existing Map so several
-        // missions (a 5× tile, then a 0-pts tile) coexist. Only the [[x,y,m],…]
-        // array crosses the partner protocol; the Map is rebuilt on each side.
-        if (!missionConstraints.deliveryMultipliers)
-            missionConstraints.deliveryMultipliers = new Map();
-        for (const [x, y, mult] of config.deliveryMultipliers) {
-            const m = Number(mult);
-            // Skip malformed entries: a NaN/Infinity scale would poison the
-            // scoring comparators (NaN compares false everywhere).
-            if (Number.isFinite(m)) missionConstraints.deliveryMultipliers.set(`${x}_${y}`, m);
-        }
+        // [[x,y,mult],…] -> Map "x_y" -> multiplier. Replaces any prior map so a
+        // re-issued bonus mission supersedes the old tiles (not additive: a tile's
+        // multiplier is whatever the latest mission says).
+        missionConstraints.deliveryMultipliers = new Map(
+            config.deliveryMultipliers.map(([x, y, m]) => [`${x}_${y}`, Number(m)])
+        );
         fieldsSet.push('deliveryMultipliers');
     }
 
@@ -84,7 +78,7 @@ const FIELD_MAP = {
     avoidtiles:           ['Tile avoidance constraint', 'avoidTiles',           () => { missionConstraints.avoidTiles.clear(); }],
     maxparcelreward:      ['Parcel reward ceiling',     'maxParcelReward',      () => { missionConstraints.maxParcelReward = null; }],
     maxbundlevalue:       ['Bundle value ceiling',      'maxBundleValue',       () => { missionConstraints.maxBundleValue = null; }],
-    deliverymultipliers:  ['Delivery reward multiplier','deliveryMultipliers',  () => { missionConstraints.deliveryMultipliers = null; }],
+    deliverymultipliers:  ['Delivery multiplier bonus',  'deliveryMultipliers',  () => { missionConstraints.deliveryMultipliers = null; }],
 };
 
 /**

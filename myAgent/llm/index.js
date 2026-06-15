@@ -1,4 +1,4 @@
-import { socket, me, directive, trafficLight, manualHold } from '../context.js';
+import { socket, me, directive, trafficLight, manualHold, lightMission } from '../context.js';
 import { createLogger } from '../utils/logger.js';
 
 const log     = createLogger('llm');
@@ -70,6 +70,8 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         directive.aborted = true;
         directive.active  = false;
         manualHold.active = false;      // an operator abort also releases any hold
+        lightMission.active = false;    // and ends any red-light-green-light mission
+        trafficLight.red  = false;
         stopHandoff();                  // and ends the background handoff routine
         pending = null;                 // discard any pending directive
         myAgent.haltCurrent();          // reject the pending commandAndAwait (if any)
@@ -164,27 +166,6 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
             } catch { /* not JSON — fall through to normal routing */ }
         }
 
-        // Red/green-light fast-path: a 20s light cycle cannot afford LLM latency,
-        // so the light shouts bypass the model entirely. ANCHORED match ("RED
-        // LIGHT! ..."), because the mission ANNOUNCEMENT also contains the words
-        // "red light" mid-sentence and must still reach the LLM as a directive.
-        // Halt/resume BOTH agents (the worker also hears the shout itself — the
-        // relay is redundancy).
-        if (/^\s*red light\b/i.test(text)) {
-            trafficLight.red = true;
-            myAgent.haltCurrent();
-            sendHalt();
-            log('RED LIGHT — both agents holding');
-            return;
-        }
-        if (/^\s*green light\b/i.test(text)) {
-            trafficLight.red = false;
-            sendResume();
-            log('GREEN LIGHT — both agents resuming');
-            if (!directive.active && !manualHold.active) resumeAutonomy?.();
-            return;
-        }
-
         // Abort keywords bypass the queue entirely and execute immediately so the
         // operator never has to wait for the current directive to finish.
         if (ABORT_KEYWORDS.has(lower)) {
@@ -208,11 +189,46 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
             handleChat(text, sender);
             return;
         }
-        // Always classify: CHAT → fast-lane (reads history, sends reply, never moves
-        // the agent — safe to run concurrently even when idle).
-        // ACTION → action lane (queued; completion is silent by design).
+        // Always classify (ONE model call). The classifier interprets the live
+        // "red light, green light" signals per-shout (STOP/GO) instead of a hardcoded
+        // keyword reflex — the mission is LLM-driven. Trade-off: the model call sits on
+        // the critical path, so a slow proxy/VPN can let a move slip through during red
+        // (a penalty) before STOP lands; stopping is enforced the instant it returns.
+        //   STOP → red light: freeze BOTH agents (trafficLight.red stays the instant
+        //          enforcement flag, read by command()/orders/optionsGeneration).
+        //   GO   → green light: resume BOTH agents.
+        //   CHAT → read-only fast-lane (concurrent, never moves the agent).
+        //   ACTION → serialized action lane (incl. the mission ANNOUNCEMENT/setup).
         let kind = 'ACTION';
         try { kind = await classifyDirective(text); } catch { /* default ACTION */ }
+        // Live red/green-light signals only control the agents once the mission has
+        // been STARTED (the LLM read an announcement and called start_light_mission).
+        // Before that, a stray "red light"/"green light" in chat is recognised but
+        // IGNORED — it must not change behaviour.
+        if (kind === 'STOP' || kind === 'GO') {
+            if (!lightMission.active) {
+                log(`ignoring light signal "${text}" — no red-light-green-light mission started`);
+                return;
+            }
+            if (kind === 'STOP') {
+                trafficLight.red = true;
+                myAgent.haltCurrent();
+                sendHalt();
+                log('RED LIGHT (LLM) — both agents holding');
+            } else {
+                trafficLight.red = false;
+                // A GREEN LIGHT also releases a "wait for the light" hold: the
+                // announcement makes the agent hold()/halt_partner() to wait, and the
+                // green signal is exactly what ends that wait. Without clearing
+                // manualHold here, optionsGeneration keeps standing the agent down and
+                // it never moves again (a reported bug). sendResume() unfreezes the worker.
+                manualHold.active = false;
+                sendResume();
+                log('GREEN LIGHT (LLM) — both agents resuming');
+                if (!directive.active) resumeAutonomy?.();
+            }
+            return;
+        }
         if (kind === 'CHAT') handleChat(text, sender);
         else                 enqueue(text, sender);
     }

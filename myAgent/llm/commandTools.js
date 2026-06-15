@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, directive, trafficLight, manualHold, moveTiming } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, missionConstraints, directive, trafficLight, manualHold, lightMission, moveTiming } from '../context.js';
 import { reachableFrom, findRoute } from '../utils/astar.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
@@ -362,8 +362,12 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         },
         async release_hold() {
             manualHold.active = false;
+            // Also unfreeze the worker: a "wait for each other" hold (gather_near)
+            // froze it via halt_partner, so a single "resume" must release BOTH.
+            // Resuming an already-working worker just re-triggers its deliberation.
+            sendResume();
             resumeAutonomy?.();
-            return 'Hold released — autonomous work resumed.';
+            return 'Hold released — both agents resumed autonomous work.';
         },
         // chat
         async say(input) {
@@ -411,6 +415,101 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         async start_handoff() { return startHandoff(myAgent, resumeAutonomy); },
         async stop_handoff()  { return stopHandoff(); },
 
+        // Red-light-green-light mission control. ARM the mission when the admin
+        // ANNOUNCES the game ("let's begin a red light green light game …"); only
+        // once armed do the live "RED LIGHT!/GREEN LIGHT!" shouts (classified as
+        // STOP/GO) stop/resume the agents. This is what stops a stray "red light" in
+        // chat from freezing the agents before any mission has started.
+        async start_light_mission() {
+            lightMission.active = true;
+            return 'Red-light-green-light mission STARTED: live RED LIGHT / GREEN LIGHT shouts will now stop / resume both agents.';
+        },
+        async stop_light_mission() {
+            lightMission.active = false;
+            trafficLight.red = false;
+            return 'Red-light-green-light mission ended: light shouts no longer affect the agents.';
+        },
+
+        // "Move both agents near (x,y) within distance D and wait for each other".
+        // Deterministic end-to-end: enumerate the walkable tiles within Manhattan
+        // distance D of (x,y) (the centre itself may be a wall/forbidden — only the
+        // surrounding tiles matter), keep the ones each agent can actually reach,
+        // assign two DIFFERENT tiles (one per agent, never each other's current
+        // tile — two agents can't share a tile), park the worker on its tile, send
+        // B to the other, then make BOTH hold. The LLM only supplies (x,y[,D]) — it
+        // no longer has to guess tiles (it has no tool to enumerate them, which is
+        // why the prompt-only version picked walls / unreachable / identical tiles).
+        async gather_near(input) {
+            const nums = String(input ?? '').match(/-?\d+/g);
+            if (!nums || nums.length < 2)
+                return `Error: gather_near needs "x,y" or "x,y,distance" (got '${input}').`;
+            const cx = parseInt(nums[0], 10), cy = parseInt(nums[1], 10);
+            const dist = nums.length >= 3 ? Math.max(1, parseInt(nums[2], 10)) : 3;
+            if (trafficLight.red)
+                return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
+            if (!partner.id)
+                return 'Failed: no partner connected — this mission needs both agents in position.';
+
+            // Gate B's autonomy and stop any in-flight move NOW, so B waits put while
+            // the worker travels (the partner order below is awaited up to 45s — without
+            // this the autonomous strategy keeps driving B during that wait).
+            directive.active = true;
+            myAgent.haltCurrent();
+
+            // Refresh the worker's live position (it only streams while under an order,
+            // so a cached status can be stale) so its tile is chosen from where it
+            // actually is. status_req is answered immediately; bounded at 5s anyway.
+            await requestStatus().catch(() => {});
+            const aPos = partner.lastStatus?.x != null
+                ? { x: Math.round(partner.lastStatus.x), y: Math.round(partner.lastStatus.y) }
+                : null;
+
+            // 1. all walkable tiles within Manhattan distance `dist` of (cx,cy).
+            const inRange = walkableTiles.filter(t => Math.abs(t.x - cx) + Math.abs(t.y - cy) <= dist);
+            if (inRange.length < 2)
+                return `Failed: fewer than two walkable tiles within distance ${dist} of (${cx},${cy}).`;
+
+            // 2. keep only tiles each agent can actually reach (skip walled-off pockets).
+            const reachB = reachableFrom(me);
+            const candB  = inRange.filter(t => reachB.has(`${t.x}_${t.y}`));
+            if (candB.length === 0)
+                return `Failed: no tile within distance ${dist} of (${cx},${cy}) is reachable by you.`;
+            let candA = inRange;
+            if (aPos) {
+                const reachA = reachableFrom(aPos);
+                const f = inRange.filter(t => reachA.has(`${t.x}_${t.y}`));
+                if (f.length) candA = f;   // fall back to all in-range if the worker reaches none
+            }
+
+            // 3. pick two DIFFERENT tiles, neither being the other agent's current tile.
+            const meKey = `${Math.round(me.x)}_${Math.round(me.y)}`;
+            const aKey  = aPos ? `${aPos.x}_${aPos.y}` : null;
+            const nearestTo = p => (a, b) =>
+                (Math.abs(a.x - p.x) + Math.abs(a.y - p.y)) - (Math.abs(b.x - p.x) + Math.abs(b.y - p.y));
+            const tileB = [...candB].filter(t => `${t.x}_${t.y}` !== aKey).sort(nearestTo(me))[0];
+            if (!tileB) return `Failed: no reachable tile for you within distance ${dist} of (${cx},${cy}).`;
+            const tileA = [...candA]
+                .filter(t => !(t.x === tileB.x && t.y === tileB.y) && `${t.x}_${t.y}` !== meKey)
+                .sort(nearestTo(aPos ?? { x: cx, y: cy }))[0];
+            if (!tileA)
+                return `Failed: only one distinct tile is available within distance ${dist} of (${cx},${cy}); need two.`;
+
+            // 4. park the worker first (halt so it stays put after arriving), then move
+            //    B to its tile, then hold both. Worker first so it has vacated any tile
+            //    B is heading for before B moves.
+            sendHalt();
+            const aRes = await sendOrder(['go_to', tileA.x, tileA.y]);
+            if (directive.aborted) return null;            // abort handler already replied
+            try {
+                await withTimeout(myAgent.commandAndAwait(['go_to', tileB.x, tileB.y]), COMMAND_TIMEOUT_MS, 'go_to');
+            } catch (err) {
+                return `Partner ordered to (${tileA.x},${tileA.y}) [${aRes}], but I could not reach (${tileB.x},${tileB.y}): ${describeFailure(err)}`;
+            }
+            manualHold.active = true;                      // B holds indefinitely (survives directive end)
+            myAgent.haltCurrent();
+            return `Both agents in position within distance ${dist} of (${cx},${cy}): you at (${me.x},${me.y}), partner at (${tileA.x},${tileA.y}) [${aRes}]. Both holding — say "resume" to release.`;
+        },
+
         // Level-2 persistent mission management. The mutation logic lives in
         // missionState.js (shared with the worker); every change is mirrored to
         // the partner so persistent missions bind BOTH agents.
@@ -455,6 +554,70 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
                 description: `explore only ${zone}-half spawners`,
             });
             return `Spawner zone restricted to ${zone} half (${filtered.length} spawners).`;
+        },
+
+        // Deterministic executor for the whole "don't deliver here" family
+        // (penalty / 0-pts / never deliver in ...). Resolves a side keyword or
+        // explicit coordinates to real delivery tiles and EXCLUDES them by
+        // narrowing allowedDeliveryTiles — the LLM never does the arithmetic.
+        async forbid_delivery(input) {
+            const raw = String(input ?? '').trim();
+            if (!raw)
+                return 'Error: forbid_delivery needs a side keyword (leftmost|rightmost|top|bottom) or coordinates ("x,y", or a ";"-separated list).';
+            if (!deliveryTiles.length) return 'Error: delivery tiles not loaded yet.';
+
+            const SIDES = ['leftmost', 'rightmost', 'top', 'bottom'];
+            const side  = raw.toLowerCase();
+            let forbidden; // array of {x,y} delivery tiles to exclude
+
+            if (SIDES.includes(side)) {
+                // Resolve named edges over the FULL deliveryTiles (NOT the
+                // reachability-filtered sense_delivery_tiles) with the fixed
+                // convention: leftmost=min x, rightmost=max x, top=max y, bottom=min y.
+                // Ties → every tile sitting at that extreme.
+                const xs = deliveryTiles.map(t => t.x), ys = deliveryTiles.map(t => t.y);
+                const PICK = {
+                    leftmost:  { val: Math.min(...xs), key: t => t.x },
+                    rightmost: { val: Math.max(...xs), key: t => t.x },
+                    top:       { val: Math.max(...ys), key: t => t.y },
+                    bottom:    { val: Math.min(...ys), key: t => t.y },
+                }[side];
+                forbidden = deliveryTiles.filter(t => PICK.key(t) === PICK.val);
+            } else {
+                // Explicit coordinates: "x,y" or a ";"-separated list of them.
+                forbidden = [];
+                for (const part of raw.split(';').map(s => s.trim()).filter(Boolean)) {
+                    const { x, y } = parseXY(part);
+                    if (x == null)
+                        return `Error: '${part}' is not a coordinate. Use "x,y", a ";"-separated list, or a side keyword (leftmost|rightmost|top|bottom).`;
+                    if (!deliveryTiles.some(d => d.x === x && d.y === y))
+                        return `Error: (${x},${y}) is not a delivery tile. Call sense_delivery_tiles to list them.`;
+                    forbidden.push({ x, y });
+                }
+                if (!forbidden.length) return 'Error: no coordinates parsed.';
+            }
+
+            const forbiddenKeys = new Set(forbidden.map(t => `${t.x}_${t.y}`));
+            // Accumulate: subtract from the CURRENT allowed set (or all delivery
+            // tiles if none yet), so repeated forbids stack instead of clobbering.
+            const baseAllowed = missionConstraints.allowedDeliveryTiles?.size > 0
+                ? [...missionConstraints.allowedDeliveryTiles]
+                : deliveryTiles.map(t => `${t.x}_${t.y}`);
+            const newAllowedKeys = baseAllowed.filter(k => !forbiddenKeys.has(k));
+
+            const resolved = [...forbiddenKeys].map(k => `(${k.replace('_', ',')})`).join(', ');
+            // Guard: never strand the agent with zero deliverable tiles.
+            if (!newAllowedKeys.length)
+                return `Error: forbidding ${resolved} would leave NO delivery tile available — refusing so the agent isn't stranded. Report that the mission cannot be satisfied.`;
+
+            const newAllowed   = newAllowedKeys.map(k => k.split('_').map(Number));
+            const sideLabel    = SIDES.includes(side) ? `${side} delivery tile ` : '';
+            // Coordinate-bearing description → conversational recall can name the
+            // exact tiles regardless of how the mission was phrased.
+            const description  = `never deliver in ${sideLabel}${resolved}`;
+            applyMissionConfig({ allowedDeliveryTiles: newAllowed, description });
+            sendConstraint('apply', { allowedDeliveryTiles: newAllowed, description });
+            return `Delivery forbidden at ${resolved}. Allowed delivery tiles now: ${newAllowed.map(([x, y]) => `(${x},${y})`).join(', ')}.`;
         },
 
         async dropMission(input) {
