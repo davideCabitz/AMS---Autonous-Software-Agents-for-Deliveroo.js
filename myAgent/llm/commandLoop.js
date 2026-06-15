@@ -167,23 +167,35 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
 }
 
 const CLASSIFY_PROMPT =
-    'You route a chat message sent to a robot agent in a delivery game. ' +
-    'Reply with EXACTLY one word:\n' +
-    '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, stop, ' +
+    'You route a chat message sent to a robot agent in a delivery game where a ' +
+    '"red light, green light" mission may be running. Reply with EXACTLY one word:\n' +
+    '- STOP    if THIS message is a LIVE red-light / stop / freeze command the agent must obey NOW ' +
+    '(e.g. "RED LIGHT! Stop moving until the next green light!", "stop moving", "freeze", "everyone stop"). ' +
+    'A red-light command often ALSO mentions the green light ("stop until the next green light") — it is ' +
+    'STILL STOP; the leading RED/STOP is the active order. NOT the long mission announcement that explains the rules.\n' +
+    '- GO      if THIS message is a LIVE green-light / resume / you-may-move-again signal ' +
+    '(e.g. "GREEN LIGHT! You can move again!", "go", "you can move again").\n' +
+    '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, ' +
     'apply or remove a mission/constraint, abort/cancel/drop/clear a mission, ' +
     'or otherwise DO something in the game world. ALSO any mission offer or challenge ' +
     '(mentions a bonus/penalty/points, or asks to calculate/answer something for a reward) — ' +
-    'those must be handled with full mission tools, not as small talk.\n' +
+    'INCLUDING a "red light green light" mission ANNOUNCEMENT that starts/explains the game ' +
+    '(that is a setup directive, NOT a live light command). Announcements look like: ' +
+    '"Let\'s begin a red light green light game", "All agents prepare to stop at red light and wait ' +
+    'for the green light before moving, as in a red light green light game", "Red light green light: ' +
+    'move to an odd row and wait for our message. 700pts" — all ACTION.\n' +
     '- CHAT    if it is only a question, greeting, or status request answerable with words ' +
     '(e.g. "can you hear me?", "where are you?", "what are you doing?").\n' +
-    'Reply ACTION or CHAT only.';
+    'Reply STOP, GO, ACTION, or CHAT only.';
 
 /**
- * Decide whether a message needs to control the agent (ACTION) or is purely
- * conversational (CHAT). One cheap model call. Defaults to ACTION on anything
- * ambiguous or on error — the safe choice, since ACTION goes through the
- * serialized queue and never runs movement concurrently.
- * @returns {Promise<'ACTION'|'CHAT'>}
+ * Classify an incoming chat message. One cheap model call. Besides ACTION
+ * (control the agent, serialized) vs CHAT (verbal answer, concurrent), it also
+ * recognises the LIVE "red light"/"green light" signals as STOP/GO so the
+ * red-light-green-light mission is interpreted by the model on EVERY shout
+ * (no hardcoded keyword reflex). Defaults to ACTION on anything ambiguous or on
+ * error — the safe routing choice (serialized lane, never concurrent movement).
+ * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>}
  */
 export async function classifyDirective(text) {
     try {
@@ -191,7 +203,11 @@ export async function classifyDirective(text) {
             { role: 'system', content: CLASSIFY_PROMPT },
             { role: 'user',   content: text },
         ], { temperature: 0 });
-        return /\bchat\b/i.test(out) && !/\baction\b/i.test(out) ? 'CHAT' : 'ACTION';
+        const u = out.toUpperCase();
+        if (/\bSTOP\b/.test(u)) return 'STOP';
+        if (/\bGO\b/.test(u))   return 'GO';
+        if (/\bCHAT\b/.test(u) && !/\bACTION\b/.test(u)) return 'CHAT';
+        return 'ACTION';
     } catch {
         return 'ACTION';
     }

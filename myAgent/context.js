@@ -87,11 +87,19 @@ export const pddl = { busy: false };
  * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
 export const directive = { active: false, aborted: false };
 
-/* Red-light/green-light state ("red light, green light" mission). Set by a
- * keyword fast-path on incoming chat (NOT by the LLM — a 20s light cycle can't
- * afford model latency). While red: optionsGeneration stands down, LLM commands
- * are refused, and worker orders are refused — every movement costs points. */
+/* Red-light/green-light enforcement state ("red light, green light" mission).
+ * `red` is set by the LLM message classifier's STOP/GO verdict (see llm/index.js).
+ * While red: optionsGeneration stands down, LLM commands are refused, and worker
+ * orders are refused — every movement costs points. */
 export const trafficLight = { red: false };
+
+/* Whether a "red light, green light" mission has been STARTED. The live
+ * "RED LIGHT!/GREEN LIGHT!" shouts only stop/resume the agents once the LLM has
+ * read an announcement ("let's begin a red light green light game …") and armed
+ * the mission via the start_light_mission tool. Before that, a stray "red light"
+ * in chat is classified STOP but IGNORED — it must not freeze the agents. Cleared
+ * by stop_light_mission or an abort. */
+export const lightMission = { active: false };
 
 /* Indefinite position hold, set by the LLM hold() tool (e.g. "move there and
  * wait for each other"). Unlike directive.active — which is released when the

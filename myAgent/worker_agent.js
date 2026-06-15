@@ -188,19 +188,13 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         try { j = JSON.parse(text); } catch { /* not protocol JSON */ }
 
         if (!j?.type) {
-            // Red/green-light fast-path on the raw shout — no LLM, no relay needed.
-            // ANCHORED match: the mission announcement contains "red light" mid-
-            // sentence and must NOT freeze the worker; the real shouts start with it.
-            if (/^\s*red light\b/i.test(text)) {
-                trafficLight.red = true;
-                myAgent.haltCurrent();
-                log('RED LIGHT — holding position');
-            } else if (/^\s*green light\b/i.test(text)) {
-                trafficLight.red = false;
-                log('GREEN LIGHT — resuming');
-                if (!frozen && !directive.active) resumeAutonomy?.();
-            }
-            return; // all other plain chat is for the coordinator, not the worker
+            // Plain chat — INCLUDING the live "RED LIGHT!/GREEN LIGHT!" shouts — is
+            // for the coordinator to interpret with its LLM (one-brain design: the
+            // worker has no model). The worker reacts only to the coordinator's
+            // relayed halt/resume, so the red-light-green-light mission stays fully
+            // LLM-driven. (Trade-off: the worker now waits out the coordinator's
+            // classify-call latency + the relay hop before freezing.)
+            return;
         }
 
         switch (j.type) {
