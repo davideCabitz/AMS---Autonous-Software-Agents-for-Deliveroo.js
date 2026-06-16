@@ -3,6 +3,9 @@ import { createLogger } from '../utils/logger.js';
 
 const log     = createLogger('llm');
 const chatLog = createLogger('llm:chat');
+
+const adminId  = process.env.ADMIN_ID  ?? null;
+const workerId = process.env.WORKER_ID ?? null;
 import { runDirective, runConversation, classifyDirective } from './commandLoop.js';
 import { handlePartnerMessage, sendHalt, sendResume } from './partner.js';
 import { stopHandoff } from './handoff.js';
@@ -239,8 +242,14 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
     // Chat path: a message arrives from another agent / the admin.
     socket.onMsg((id, _name, msg, replyAck) => {
         const text = typeof msg === 'string' ? msg : (msg?.text ?? JSON.stringify(msg));
-        replyAck?.('ack');                 // acknowledge the SDK callback immediately
-        route(text, id);                   // the real answer is sent later via emitSay
+        replyAck?.('ack');
+        if (id === adminId) {
+            route(text, id);
+        } else if (id === workerId && text.startsWith('{')) {
+            route(text, id);
+        } else {
+            log(`ignoring message from ${id} — not admin or worker`);
+        }
     });
 
     // Local stdin test path: each line typed (TTY) or piped in is a message.

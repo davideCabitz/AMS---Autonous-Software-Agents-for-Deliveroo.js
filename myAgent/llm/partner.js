@@ -3,6 +3,8 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('llm:partner');
 
+const workerId = process.env.WORKER_ID ?? null;
+
 /*
  * Coordinator side of the partner link (see myAgent/worker_agent.js for the
  * worker side). The coordinator commands the worker over the normal chat channel
@@ -43,6 +45,10 @@ function sendJson(payload) {
 export function handlePartnerMessage(msg, sender) {
     switch (msg.type) {
         case 'hello': {
+            if (workerId && sender !== workerId) {
+                log(`rejected hello from unknown sender ${sender}`);
+                return false;
+            }
             const isNew = partner.id !== sender;
             partner.id   = sender;
             partner.name = msg.name ?? null;
