@@ -28,6 +28,8 @@ function optionsGeneration() {
         // The strategy declares its re-deliberation cadence; the loop owns the timer.
         // Needed for strategies that can idle with no event to wake them (e.g. blind,
         // stationary after a pickup, where own-tile sensing emits nothing).
+        // The handle is intentionally not stored: the strategy is selected exactly once
+        // per process lifetime, so the heartbeat never needs to be cleared or reset.
         if (runtime.strategy.tickIntervalMs > 0) setInterval(optionsGeneration, runtime.strategy.tickIntervalMs);
     }
 

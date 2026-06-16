@@ -3,7 +3,6 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('llm:partner');
 
-<<<<<<< HEAD
 const workerId = process.env.WORKER_ID ?? null;
 
 /*
@@ -22,15 +21,12 @@ const workerId = process.env.WORKER_ID ?? null;
  *
  * Orders are await-able: sendOrder resolves with the worker's `detail` string
  * (success or failure), which the ReAct loop uses directly as the observation.
-=======
-/**
- * @typedef { {id: string|null, name: string|null, lastStatus: Object|null} } PartnerState
->>>>>>> 3aa6dd90928bcd9bcdfc0853f58ebbfe3e391d12
  */
 
 /**
  * Coordinator-side partner agent link (JSON protocol over chat channel)
  * Commands worker with orders, constraints, halt/resume; receives results and status updates
+ * @typedef { {id: string|null, name: string|null, lastStatus: Object|null} } PartnerState
  */
 
 /** @type {PartnerState} Live state of the connected partner agent */

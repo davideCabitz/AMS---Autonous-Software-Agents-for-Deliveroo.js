@@ -1,7 +1,8 @@
 import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, otherAgents, directive, trafficLight, runtime, missionConstraints } from '../context.js';
-import { findRoute, navigateTo } from '../utils/astar.js';
+import { findRoute, navigateTo, getWalkable } from '../utils/astar.js';
 import { selectStrategy } from '../strategies/selectStrategy.js';
 import { partner, sendOrder, sendHalt, sendResume, requestStatus } from './partner.js';
+import { withTimeout as sharedWithTimeout } from './util.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('llm:handoff');
@@ -31,17 +32,14 @@ const DRIFT_MS = 500;
 let running = false;
 
 /**
- * Race a promise against a step timeout
+ * Race a promise against the handoff step timeout (defaults to STEP_TIMEOUT_MS).
+ * Thin wrapper over the shared withTimeout that supplies this module's default.
  * @param {Promise} promise - Promise to race
  * @param {number} [ms] - Timeout in milliseconds
  * @returns {Promise} Resolves with promise result or rejects with ['timeout']
  */
 function withTimeout(promise, ms = STEP_TIMEOUT_MS) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(['timeout']), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+    return sharedWithTimeout(promise, ms);
 }
 
 /**
@@ -79,7 +77,7 @@ function idle(ms) {
  * @returns {Array<{x: number, y: number}>|null} Path array or null if unreachable
  */
 function staticRoute(from, to) {
-    const walk  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+    const walk  = getWalkable();
     const start = `${Math.round(from.x)}_${Math.round(from.y)}`;
     const goal  = `${Math.round(to.x)}_${Math.round(to.y)}`;
     if (!walk.has(start) || !walk.has(goal)) return null;
@@ -106,7 +104,7 @@ function staticRoute(from, to) {
  * @returns {Map<string, number>|null} Map of "x_y" to step count, or null if start is off the map
  */
 function bfsDistances(from) {
-    const walk  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+    const walk  = getWalkable();
     const start = `${Math.round(from.x)}_${Math.round(from.y)}`;
     if (!walk.has(start)) return null;
     const dist = new Map([[start, 0]]);
@@ -276,7 +274,7 @@ function chooseMeetTarget(aPos, meetB, here) {
  * @returns {Array<{x: number, y: number}>} Array of valid neighbour tiles
  */
 function freeNeighbours(tile, { excludeDelivery = true } = {}) {
-    const walk  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+    const walk  = getWalkable();
     const deliv = deliveryKeys();
     const occupied = new Set(otherAgents.map(a => `${a.x}_${a.y}`));
     return [

@@ -1,16 +1,9 @@
 import { crateSpawnerTiles, crateTiles, directionalTiles, me, MOVEMENT_DURATION, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
-import { canEnterDir } from './directions.js';
+import { canEnterDir, STEP_DIRS as DIRS } from './directions.js';
 import { createLogger } from './logger.js';
 
 const navLog  = createLogger('nav');
 const moveLog = createLogger('move');
-
-const DIRS = [
-    { dx:  1, dy:  0, dir: 'right' },
-    { dx: -1, dy:  0, dir: 'left'  },
-    { dx:  0, dy:  1, dir: 'up'    },
-    { dx:  0, dy: -1, dir: 'down'  },
-];
 
 const BACKTRACK_PENALTY = 2;
 
@@ -35,7 +28,7 @@ let _walkable = null;
  * Get walkable tile set, rebuilding if the map changed
  * @returns {Set<string>} Set of "x_y" walkable tile keys
  */
-function getWalkable() {
+export function getWalkable() {
     if (!_walkable || _walkable.size !== walkableTiles.length)
         _walkable = new Set(walkableTiles.map(t => key(t.x, t.y)));
     return _walkable;

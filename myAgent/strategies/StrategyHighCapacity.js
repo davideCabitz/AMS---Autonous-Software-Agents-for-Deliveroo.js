@@ -1,7 +1,8 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { getWalkable } from '../utils/astar.js';
 import {
-    me, parcels, spawnerTiles, walkableTiles, deliveryTiles,
+    me, parcels, spawnerTiles, deliveryTiles,
     OBSERVATION_DISTANCE, CARRYING_CAPACITY, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
@@ -247,12 +248,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         this.#farmIdx = null;
         this.#patrolGroupIdx = null;
         this.#visitedDetours.clear();
-        let pool = spawnerTiles;
-        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
-            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) pool = f;
-        }
-        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+        const pool = this._allowedSpawnerPool(spawnerTiles);
+        const walkableSet = getWalkable();
         this.#groups = buildSpawnerGroups(pool, walkableSet, D_CLUSTER);
         log(`built ${this.#groups.length} group(s) from ${pool.length} spawner tiles: `
             + this.#groups.map((g, i) => `G${i}(n=${g.length})`).join(' '));
@@ -347,11 +344,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const directDist = this.pathLen(me, farmTarget);
         if (!Number.isFinite(directDist)) return null;
         // allowedDeliveryTiles mission: only constraint-approved tiles qualify.
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         const candidates = [];
         for (const d of tiles) {
             const toD   = this.pathLen(me, d);

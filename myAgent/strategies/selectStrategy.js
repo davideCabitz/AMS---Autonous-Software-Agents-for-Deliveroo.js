@@ -13,6 +13,7 @@ import { StrategyHighCapacity }        from './StrategyHighCapacity.js';
 import { StrategyHighCapacityRush }    from './StrategyHighCapacityRush.js';
 import { buildSpawnerGroups }          from '../beliefs/SpawnerGroups.js';
 import { detectCombTopology }           from '../beliefs/MapTopology.js';
+import { getWalkable }                  from '../utils/astar.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('strategy');
@@ -68,7 +69,7 @@ export function selectStrategy() {
     parcels.enableMemory(DECAY_INTERVAL_MS);
 
     // Build path-based spawner groups once — used by all remaining checks.
-    const walkableSet  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+    const walkableSet  = getWalkable();
     const groups       = buildSpawnerGroups(spawnerTiles, walkableSet, 2);
     const maxGroupSize = groups.reduce((m, g) => Math.max(m, g.length), 0);
 

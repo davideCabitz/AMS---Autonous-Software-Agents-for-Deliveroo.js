@@ -13,9 +13,13 @@ import {
     crateTiles, crateSpawnerTiles, walkableTiles
 } from '../context.js';
 import { findRoute, waitForArrival } from '../utils/astar.js';
+import { STEP_DIRS } from '../utils/directions.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const domain    = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'), 'utf8');
+
+/** @type {Object<string, [number, number]>} dir name -> [dx,dy], derived from the shared STEP_DIRS */
+const DIR_DELTA = Object.fromEntries(STEP_DIRS.map(({ dx, dy, dir }) => [dir, [dx, dy]]));
 
 // PDDL object names must start with a letter (a leading digit is read as a number
 // by the solver), so tiles are named t<x>_<y> and crates c<x>_<y>.
@@ -108,7 +112,6 @@ export class PddlMove extends PlanBase {
      * @returns {Promise<boolean>} True if a step was blocked (replan needed)
      */
     async #runPlan(plan) {
-        const DIR_DELTA = { right: [1,0], left: [-1,0], up: [0,1], down: [0,-1] };
         const ck = (x, y) => `${Math.round(x)}_${Math.round(y)}`;
 
         for (const step of plan) {

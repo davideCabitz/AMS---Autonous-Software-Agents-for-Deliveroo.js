@@ -99,16 +99,40 @@ export class Strategy {
     }
 
     /**
+     * Delivery tiles narrowed to the active allowedDeliveryTiles mission constraint.
+     * Returns the full deliveryTiles list when no constraint is active or when the
+     * constraint would leave nothing (graceful fallback). Idempotent: filtering the
+     * result again yields the same list.
+     * @returns {Array<{x: number, y: number}>} Allowed delivery tiles
+     */
+    _allowedDeliveryPool() {
+        const a = missionConstraints.allowedDeliveryTiles;
+        if (!(a?.size > 0)) return deliveryTiles;
+        const f = deliveryTiles.filter(t => a.has(`${t.x}_${t.y}`));
+        return f.length > 0 ? f : deliveryTiles;
+    }
+
+    /**
+     * Restrict an exploration pool to the active allowedSpawnerTiles mission constraint.
+     * Only narrows when the constraint is active AND there are spawner tiles; falls
+     * back to the given rawPool when the constraint is inactive or filters to empty.
+     * @param {Array<{x: number, y: number}>} rawPool - Pool to fall back to
+     * @returns {Array<{x: number, y: number}>} Allowed spawner pool
+     */
+    _allowedSpawnerPool(rawPool) {
+        const a = missionConstraints.allowedSpawnerTiles;
+        if (!(a?.size > 0 && spawnerTiles.length > 0)) return rawPool;
+        const f = spawnerTiles.filter(t => a.has(`${t.x}_${t.y}`));
+        return f.length > 0 ? f : rawPool;
+    }
+
+    /**
      * Find nearest A*-reachable delivery tile
      * @param {{x: number, y: number}} from - Starting position (default: agent position)
      * @returns {{x: number, y: number}|undefined} Nearest reachable delivery, or undefined if none
      */
     nearestDelivery(from = me) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         return [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
@@ -146,11 +170,7 @@ export class Strategy {
      * @returns {{x: number, y: number}|undefined} Delivery tile, or undefined if all unreachable
      */
     nearestEscapableDelivery(from = me) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         const reachable = [...tiles]
             .map(d => ({ d, len: this.deliveryCost(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
@@ -174,11 +194,7 @@ export class Strategy {
         // the load (return undefined → the strategies' "no reachable delivery →
         // reposition/idle" branch) and retry next tick instead of entering a trap we
         // can't escape. Only fall back to the trap when NO usable zone exists at all.
-        let tiles2 = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles2.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles2 = f;
-        }
+        const tiles2 = this._allowedDeliveryPool();
         const safeBlocked = tiles2.some(d =>
             usableDeliverySet.has(`${d.x}_${d.y}`) && reachableIgnoringAgents(from, d));
         if (safeBlocked) {
@@ -215,11 +231,7 @@ export class Strategy {
      * @returns {{d: {x: number, y: number}, len: number}|undefined} Best delivery and path cost
      */
     _bestDelivery(from, R, n) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         const reachable = [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len));
@@ -649,10 +661,7 @@ export class Strategy {
         // Apply spawner zone constraint: if active, restrict exploration targets to
         // the allowed set (e.g. left-half spawners only). Fall back to the full pool
         // if none of the allowed tiles happen to be reachable.
-        const zonedPool = (missionConstraints.allowedSpawnerTiles?.size > 0 && spawnerTiles.length > 0)
-            ? spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`))
-            : rawPool;
-        const pool      = zonedPool.length > 0 ? zonedPool : rawPool;
+        const pool      = this._allowedSpawnerPool(rawPool);
         const reachableAll = pool.filter(t => this.isReachable(t));
         if (reachableAll.length === 0) return null; // nothing reachable → stay idle
 

@@ -3,6 +3,7 @@ import { reachableFrom, findRoute } from '../utils/astar.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions, armedByNet } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
 import { startHandoff, stopHandoff } from './handoff.js';
+import { withTimeout } from './util.js';
 
 /**
  * LLM command tool catalogue
@@ -131,19 +132,18 @@ function abortableDelay(ms) {
 }
 
 /**
- * Race a promise against a timeout, rejecting with a tagged error on expiry
- * @param {Promise} promise - Promise to race
- * @param {number} ms - Timeout in milliseconds
- * @param {string} tag - Tag included in the timeout rejection value
- * @returns {Promise} Resolves with promise result or rejects with ['timeout', tag]
+ * Apply a mission config locally AND mirror it to the partner, so persistent
+ * missions bind both agents. Forgetting the mirror silently desyncs the two — so
+ * every "apply" pairs the two calls here.
+ * @param {Object} cfg - Mission config passed to both applyMissionConfig and the mirror
+ * @returns {string} The observation returned by applyMissionConfig
  */
-function withTimeout(promise, ms, tag) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(['timeout', tag]), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+function applyAndMirror(cfg) {
+    const obs = applyMissionConfig(cfg);
+    sendConstraint('apply', cfg);
+    return obs;
 }
+
 
 /**
  * Send a chat message that cannot throw or hang (best-effort, bounded by timeout)
@@ -304,11 +304,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
     // penalty can flip an armed routine off — see armedByNet (net >= 0 ⇒ armed).
     const applyRoutineNet = (field, input) => {
         const pts = parseRewardToken(input);
-        if (pts != null) {
-            const cfg = { [field]: pts };
-            applyMissionConfig(cfg);
-            sendConstraint('apply', cfg);
-        }
+        if (pts != null) applyAndMirror({ [field]: pts });
         return armedByNet(missionConstraints[field]);
     };
 
@@ -608,9 +604,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             try { config = JSON.parse(String(input ?? '{}')); }
             catch { return `Error: expected JSON — e.g. {"requiredStackSize":3}. Got: ${input}`; }
 
-            const obs = applyMissionConfig(config);
-            sendConstraint('apply', config);
-            return obs;
+            return applyAndMirror(config);
         },
 
         async dropMissions() {
@@ -635,11 +629,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             };
             const filtered = spawnerTiles.filter(FILTERS[zone]);
             if (!filtered.length) return `Error: no spawner tiles found in the ${zone} half.`;
-            applyMissionConfig({
-                allowedSpawnerTiles: filtered.map(t => [t.x, t.y]),
-                description: `explore only ${zone}-half spawners`,
-            });
-            sendConstraint('apply', {
+            applyAndMirror({
                 allowedSpawnerTiles: filtered.map(t => [t.x, t.y]),
                 description: `explore only ${zone}-half spawners`,
             });
@@ -705,8 +695,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             // Coordinate-bearing description → conversational recall can name the
             // exact tiles regardless of how the mission was phrased.
             const description  = `never deliver in ${sideLabel}${resolved}`;
-            applyMissionConfig({ allowedDeliveryTiles: newAllowed, description });
-            sendConstraint('apply', { allowedDeliveryTiles: newAllowed, description });
+            applyAndMirror({ allowedDeliveryTiles: newAllowed, description });
             return `Delivery forbidden at ${resolved}. Allowed delivery tiles now: ${newAllowed.map(([x, y]) => `(${x},${y})`).join(', ')}.`;
         },
 

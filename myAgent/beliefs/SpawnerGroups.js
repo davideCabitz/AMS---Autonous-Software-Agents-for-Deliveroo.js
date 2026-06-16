@@ -1,3 +1,5 @@
+import { STEP_DIRS as DIRS } from '../utils/directions.js';
+
 /**
  * Cluster spawners into groups using union-find and path-based distance
  * @param {Array<{x: number, y: number}>} tiles - Spawner tile positions
@@ -24,8 +26,6 @@ export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
         else if (rank[ra] > rank[rb]) parent[rb] = ra;
         else { parent[rb] = ra; rank[ra]++; }
     }
-
-    const DIRS = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
 
     /**
      * BFS to find tiles reachable within maxPathLen steps

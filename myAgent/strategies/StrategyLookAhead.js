@@ -2,9 +2,10 @@ import { StrategyMemory } from './StrategyMemory.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
 import {
     me, parcels, CARRYING_CAPACITY, missionConstraints,
-    spawnerTiles, walkableTiles, OBSERVATION_DISTANCE,
+    spawnerTiles, OBSERVATION_DISTANCE,
 } from '../context.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { getWalkable } from '../utils/astar.js';
 import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -389,12 +390,8 @@ export class StrategyLookAhead extends StrategyMemory {
         this._idleGroupsSig = sig;
         this._idlePatrolGroupIdx = null;
         if (spawnerTiles.length === 0) { this._idleGroups = []; return; }
-        let pool = spawnerTiles;
-        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
-            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) pool = f;
-        }
-        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+        const pool = this._allowedSpawnerPool(spawnerTiles);
+        const walkableSet = getWalkable();
         this._idleGroups = buildSpawnerGroups(pool, walkableSet, IDLE_D_CLUSTER);
         patrolLog(`built ${this._idleGroups.length} group(s) from ${pool.length} spawner tiles`);
     }

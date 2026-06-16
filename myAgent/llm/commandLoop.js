@@ -161,7 +161,8 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 if ((hasEndMarker(out) || final) && fn) return missionDeclined ? 'Mission declined.' : missionApplied ? 'Mission accepted.' : null;
 
                 // Failure budget: don't let the LLM keep retrying a stuck directive.
-                // After a few failed commands, give up and let the BDI agent carry on.
+                // After MAX_TOOL_FAILURES failed commands (currently 1), give up and
+                // let the BDI agent carry on.
                 if (/^Failed/.test(obs) && ++failures >= MAX_TOOL_FAILURES) {
                     return `Could not complete the directive after ${failures} failed attempts; resuming autonomous work.`;
                 }

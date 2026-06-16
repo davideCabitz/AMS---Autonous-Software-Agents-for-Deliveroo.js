@@ -1,5 +1,6 @@
 import { socket, me, parcels, directive, trafficLight } from './context.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions } from './llm/missionState.js';
+import { withTimeout } from './llm/util.js';
 import { createLogger } from './utils/logger.js';
 
 const log = createLogger('worker');
@@ -20,14 +21,6 @@ const log = createLogger('worker');
 const HELLO_RETRY_MS     = 5_000;   // until first ack
 const HELLO_KEEPALIVE_MS = 30_000;  // after ack — re-registers if the coordinator restarts
 const ORDER_TIMEOUT_MS   = 40_000;  // hard cap on one order (coordinator awaits 45s)
-
-function withTimeout(promise, ms) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(['timeout']), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 /** Map an intention rejection tag to a readable detail for the coordinator. */
 function describeFailure(err) {

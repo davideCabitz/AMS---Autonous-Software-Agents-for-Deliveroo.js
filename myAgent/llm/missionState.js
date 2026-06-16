@@ -172,20 +172,11 @@ export function dropMissionField(field) {
  * @returns {string} Observation confirming all missions cleared
  */
 export function dropAllMissions() {
-    missionConstraints.requiredStackSize    = null;
-    missionConstraints.maxStackSize         = null;
-    missionConstraints.forbiddenStackSizes.clear();
-    missionConstraints.allowedDeliveryTiles = null;
-    missionConstraints.allowedSpawnerTiles  = null;
-    missionConstraints.avoidTiles.clear();
-    missionConstraints.maxParcelReward      = null;
-    missionConstraints.maxBundleValue       = null;
-    missionConstraints.deliveryMultipliers  = null;
-    missionConstraints.oneShotBonus         = null;
-    missionConstraints.penaltyTiles.clear();
-    missionConstraints.handoffNet           = 0;
-    missionConstraints.gatherNet            = 0;
-    missionConstraints.lightNet             = 0;
-    missionConstraints.descriptions         = [];
+    // Run every field's clear() closure (the same per-field resets dropMissionField
+    // uses), so adding a constraint to FIELD_MAP automatically clears here too.
+    for (const [, [, , clear]] of Object.entries(FIELD_MAP)) clear();
+    // descriptions has no FIELD_MAP entry (it is reset per-field by tag in
+    // dropMissionField), so the bulk drop wipes it explicitly.
+    missionConstraints.descriptions = [];
     return 'All mission constraints cleared — agent restored to default behavior.';
 }

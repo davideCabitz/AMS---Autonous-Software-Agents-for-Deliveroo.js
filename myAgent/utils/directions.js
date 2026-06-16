@@ -1,3 +1,15 @@
+/**
+ * @type {Array<{dx: number, dy: number, dir: string}>} The four cardinal step vectors.
+ * Order is significant: A* expands neighbours in this order, so it participates in
+ * path tie-breaking (lowest-f, then earliest-expanded). Do not reorder.
+ */
+export const STEP_DIRS = [
+    { dx:  1, dy:  0, dir: 'right' },
+    { dx: -1, dy:  0, dir: 'left'  },
+    { dx:  0, dy:  1, dir: 'up'    },
+    { dx:  0, dy: -1, dir: 'down'  },
+];
+
 /** @type {Object<string, {dx: number, dy: number}>} Arrow tile direction vectors (y-up grid) */
 export const ARROW_VECTORS = {
     '↑': { dx: 0,  dy: 1 },
