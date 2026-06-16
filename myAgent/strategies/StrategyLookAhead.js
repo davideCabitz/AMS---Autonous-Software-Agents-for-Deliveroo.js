@@ -1,9 +1,15 @@
 import { StrategyMemory } from './StrategyMemory.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
-import { me, parcels, CARRYING_CAPACITY, missionConstraints } from '../context.js';
+import {
+    me, parcels, CARRYING_CAPACITY, missionConstraints,
+    spawnerTiles, walkableTiles, OBSERVATION_DISTANCE,
+} from '../context.js';
+import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('lookahead');
+const patrolLog = createLogger('patrol-idle');
 
 // Value band for the look-ahead decisions, in reward points:
 //  - the paired tour must beat taking the greedy parcel solo by ≥ this to bother
@@ -14,6 +20,19 @@ const log = createLogger('lookahead');
 //    tie-break is what gives sane ordering on low/no-decay maps, where the decay
 //    term can't separate the two orderings on value alone.
 const LOOKAHEAD_MARGIN = 1;
+
+// ─── idle group-patrol (anti-camping) ─────────────────────────────────────────
+const IDLE_D_CLUSTER         = 2;     // matches HighCapacity D_CLUSTER (identical group shapes)
+const IDLE_PATIENCE_MS       = 3000;  // sparse-map: patrol a dry group this long before leaving
+const IDLE_MAX_WAYPOINTS     = 6;     // matches HighCapacity patrol cap
+// Sparsity gate: patrol-and-wait only when the map has at most this many spawner
+// TILES total (waiting for a respawn is then the only way to get parcels). Above
+// this the map is "dense" — plenty of spawners spread around — so idle = move to
+// the next unvisited group's centroid immediately instead of camping. We gate on
+// total spawner-TILE count, not group COUNT: a long row of adjacent spawners
+// merges into ONE group, so a count-of-groups gate misfires (sees few groups and
+// camps) even when parcels are abundant elsewhere on the map.
+const IDLE_PATROL_MAX_SPAWNERS = 12;
 
 /**
  * Extends StrategyMemory with a 2-step look-ahead on pickup selection.
@@ -46,6 +65,28 @@ const LOOKAHEAD_MARGIN = 1;
  * parcels.enableMemory() before running, exactly like StrategyMemory.
  */
 export class StrategyLookAhead extends StrategyMemory {
+    /** Heartbeat so the idle patience timer fires even with no sensing event.
+     *  HighCapacity also sets 500; a subclass field initializer runs after this
+     *  one and wins, so its value is preserved. */
+    tickIntervalMs = 500;
+
+    /** @type {Array<Array<{x:number,y:number}>>|null} lazily built spawner groups. */
+    _idleGroups = null;
+    /** Signature of allowedSpawnerTiles the groups were built under. */
+    _idleGroupsSig = null;
+    /** Index of the group currently being idle-patrolled (sparse path). */
+    _idlePatrolGroupIdx = null;
+    /** Waypoint loop for the current idle group. */
+    _idlePatrol = [];
+    /** Index of the waypoint being walked to. */
+    _idlePatrolIdx = 0;
+    /** Timestamp the patience window started (reset on group arrival + pickup). */
+    _idlePatrolTs = 0;
+    /** Tiles of a just-abandoned group, excluded from the next explore selection. */
+    _idleLeftGroupKeys = null;
+    /** Dense path: group indices already visited this idle cycle. */
+    _idleVisitedGroups = new Set();
+
     decide(currentIntent) {
         const carrying   = parcels.carriedBy(me.id);
         const bankNow    = this.bankNowValue();
@@ -56,7 +97,7 @@ export class StrategyLookAhead extends StrategyMemory {
         // reward when capacity is finite.
         let allFree = [
             ...parcels.free(),
-            ...remembered.filter(r => !parcels.get(r.id)),
+            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
         ].filter(p => this.missionPickupOk(p));   // mission gates: maxParcelReward / maxBundleValue
         if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
             allFree = allFree
@@ -250,5 +291,221 @@ export class StrategyLookAhead extends StrategyMemory {
             const tag = parcels.get(choice.p.id) ? 'live' : 'remembered';
             log(`→ ${label} (${tag}) ${this.pickupDebug(choice.p)}`);
         }
+    }
+
+    // ── idle group-patrol (anti-camping) ──────────────────────────────────────
+
+    /**
+     * Idle behaviour that replaces the base single-tile ping-pong with a
+     * spawner-group-aware policy:
+     *   - SPARSE map (≤ IDLE_PATROL_MAX_SPAWNERS spawner tiles total): patrol the
+     *     whole group the agent is standing on as a smooth waypoint loop for
+     *     IDLE_PATIENCE_MS, then leave to a spawner OUTSIDE it. Waiting for a
+     *     respawn is worth it here.
+     *   - DENSE map (more spawner tiles): never camp — head straight to the CENTROID
+     *     tile of the nearest unvisited group so the agent crosses the middle of each
+     *     cluster and harvests, sweeping group→group. Gating on tile COUNT (not group
+     *     count) is deliberate: a row of adjacent spawners merges into one group, so a
+     *     group-count gate would wrongly treat a parcel-rich map as sparse and camp.
+     * Falls back to the base ranking (super.exploreIfIdle) whenever there is no
+     * group to act on, so HighCapacity's degenerate fallbacks are unaffected.
+     */
+    exploreIfIdle(currentIntent) {
+        this._initIdleGroups();
+
+        // Productive work in flight → no longer idle: drop all patrol/visited state
+        // and defer to the base (which also resets _lastExploreKey on these intents).
+        if (currentIntent && (currentIntent[0] === 'go_pick_up' || currentIntent[0] === 'go_deliver')) {
+            this._idlePatrolTs = 0;
+            this._idlePatrolGroupIdx = null;
+            this._idleLeftGroupKeys = null;
+            this._idleVisitedGroups.clear();
+            return super.exploreIfIdle(currentIntent);
+        }
+
+        // Non-spawner map (no groups) → unchanged base behaviour.
+        if (!this._idleGroups || this._idleGroups.length === 0)
+            return super.exploreIfIdle(currentIntent);
+
+        const dense = spawnerTiles.length > IDLE_PATROL_MAX_SPAWNERS;
+        const now   = Date.now();
+
+        if (dense) {
+            // Mark the group we're sitting on as visited so we don't re-pick it,
+            // then move to the next unvisited group's centroid.
+            const here = this._idleGroupHere();
+            if (here >= 0) this._idleVisitedGroups.add(here);
+            const step = this._nextUnvisitedGroup(currentIntent);
+            if (step) return step;
+            return super.exploreIfIdle(currentIntent);
+        }
+
+        // ── sparse map: patrol-and-wait ──
+        const here = this._idleGroupHere();
+        if (here >= 0) {
+            // (Re)start the patience window when arriving on a new group.
+            if (this._idlePatrolGroupIdx !== here || this._idlePatrolTs === 0) {
+                this._idlePatrolTs = now;
+                this._idleLeftGroupKeys = null;
+            }
+            if (now - this._idlePatrolTs < IDLE_PATIENCE_MS) {
+                const step = this._idlePatrolStep(here, currentIntent);
+                if (step !== null || currentIntent?.[0] === 'go_explore') return step;
+                // group had no reachable waypoint → fall through to ranking
+            } else {
+                // Patience expired: leave to a spawner OUTSIDE this group.
+                this._idleLeftGroupKeys = new Set(this._idleGroups[here].map(t => `${t.x}_${t.y}`));
+                patrolLog(`G${here} dry ${IDLE_PATIENCE_MS}ms → leaving to explore outside group`);
+                this._idlePatrolTs = 0;
+                this._idlePatrolGroupIdx = null;
+            }
+        }
+
+        return this._exploreOutsideLeftGroup(currentIntent);
+    }
+
+    /** Lazily build (and cache) spawner groups for idle patrol, rebuilding when the
+     *  allowedSpawnerTiles constraint changes. Mirrors HighCapacity#initGroups. */
+    _initIdleGroups() {
+        const sig = missionConstraints.allowedSpawnerTiles?.size > 0
+            ? [...missionConstraints.allowedSpawnerTiles].sort().join('|') : '';
+        if (this._idleGroups !== null && sig === this._idleGroupsSig) return;
+        this._idleGroupsSig = sig;
+        this._idlePatrolGroupIdx = null;
+        if (spawnerTiles.length === 0) { this._idleGroups = []; return; }
+        let pool = spawnerTiles;
+        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
+            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) pool = f;
+        }
+        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
+        this._idleGroups = buildSpawnerGroups(pool, walkableSet, IDLE_D_CLUSTER);
+        patrolLog(`built ${this._idleGroups.length} group(s) from ${pool.length} spawner tiles`);
+    }
+
+    /** Index of the reachable group with a tile within OBSERVATION_DISTANCE of the
+     *  agent (the group it is "idle on"), or -1. Mirrors HighCapacity#isAtFarm. */
+    _idleGroupHere() {
+        if (!this._idleGroups) return -1;
+        for (let i = 0; i < this._idleGroups.length; i++) {
+            if (this._idleGroups[i].some(t => distance(me, t) <= OBSERVATION_DISTANCE && this.isReachable(t)))
+                return i;
+        }
+        return -1;
+    }
+
+    /** Nearest tile of `group` from the agent, by A* path length. */
+    _nearestGroupTile(group) {
+        let best = { tile: null, dist: Infinity };
+        for (const t of group) {
+            const d = this.pathLen(me, t);
+            if (d < best.dist) best = { tile: t, dist: d };
+        }
+        return best;
+    }
+
+    /** The group tile nearest the group's centroid. The raw centroid can land on a
+     *  wall between spawners, so snap to the closest actual (walkable) group tile —
+     *  guarantees the agent crosses the MIDDLE of the cluster, not just its edge. */
+    _groupCentroidTile(group) {
+        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
+        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
+        let best = group[0], bestD = Infinity;
+        for (const t of group) {
+            const d = (t.x - cx) ** 2 + (t.y - cy) ** 2;
+            if (d < bestD) { bestD = d; best = t; }
+        }
+        return best;
+    }
+
+    /** Centroid-angle clockwise waypoint loop. Port of HighCapacity#buildPatrol. */
+    _buildIdlePatrol(group) {
+        if (group.length === 1) return [group[0]];
+        if (group.length === 2) return [...group];
+        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
+        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
+        const byAngle = [...group].sort((a, b) =>
+            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+        if (byAngle.length <= IDLE_MAX_WAYPOINTS) return byAngle;
+        const step = byAngle.length / IDLE_MAX_WAYPOINTS;
+        return Array.from({ length: IDLE_MAX_WAYPOINTS },
+            (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+    }
+
+    /** Issue the next patrol waypoint for groupIdx (rebuilds patrol on group change,
+     *  starts at the nearest waypoint, advances on arrival). Returns ['go_explore',
+     *  x,y] or null to keep walking. Port of the #goFarm patrol body. */
+    _idlePatrolStep(groupIdx, currentIntent) {
+        if (this._idlePatrolGroupIdx !== groupIdx) {
+            this._idlePatrol = this._buildIdlePatrol(this._idleGroups[groupIdx]);
+            this._idlePatrolGroupIdx = groupIdx;
+            let bestI = 0, bestD = Infinity;
+            for (let i = 0; i < this._idlePatrol.length; i++) {
+                const d = this.pathLen(me, this._idlePatrol[i]);
+                if (d < bestD) { bestD = d; bestI = i; }
+            }
+            this._idlePatrolIdx = bestI;
+            patrolLog(`idle patrol G${groupIdx}: ${this._idlePatrol.length} wp `
+                + this._idlePatrol.map(t => `(${t.x},${t.y})`).join(' '));
+        }
+        const cur = this._idlePatrol[this._idlePatrolIdx];
+        if (Math.round(me.x) === cur.x && Math.round(me.y) === cur.y)
+            this._idlePatrolIdx = (this._idlePatrolIdx + 1) % this._idlePatrol.length;
+
+        for (let tries = 0; tries < this._idlePatrol.length; tries++) {
+            const target = this._idlePatrol[this._idlePatrolIdx];
+            if (this.isReachable(target)) {
+                if (currentIntent?.[0] === 'go_explore'
+                        && currentIntent[1] === target.x && currentIntent[2] === target.y)
+                    return null;                     // already walking there
+                patrolLog(`idle patrol G${groupIdx} → wp ${this._idlePatrolIdx + 1}/${this._idlePatrol.length} (${target.x},${target.y})`);
+                return ['go_explore', target.x, target.y];
+            }
+            this._idlePatrolIdx = (this._idlePatrolIdx + 1) % this._idlePatrol.length;
+        }
+        return null;   // nothing reachable in this group
+    }
+
+    /** Dense path: head to the centroid tile of the nearest unvisited group. When
+     *  all groups are visited, clear the set and restart the sweep. Returns null
+     *  while still walking toward the chosen centroid. */
+    _nextUnvisitedGroup(currentIntent) {
+        let cands = this._idleGroups
+            .map((g, idx) => ({ idx, ...this._nearestGroupTile(g) }))
+            .filter(e => Number.isFinite(e.dist) && !this._idleVisitedGroups.has(e.idx));
+        if (cands.length === 0) {
+            // Swept every group — restart, excluding the one we're on so we move.
+            this._idleVisitedGroups.clear();
+            const here = this._idleGroupHere();
+            cands = this._idleGroups
+                .map((g, idx) => ({ idx, ...this._nearestGroupTile(g) }))
+                .filter(e => Number.isFinite(e.dist) && e.idx !== here);
+            if (cands.length === 0) return null;
+        }
+        const pick = cands.sort((a, b) => a.dist - b.dist)[0];
+        const centroid = this._groupCentroidTile(this._idleGroups[pick.idx]);
+
+        // Already sensing the chosen group's centre → mark visited, re-deliberate.
+        if (distance(me, centroid) <= OBSERVATION_DISTANCE) {
+            this._idleVisitedGroups.add(pick.idx);
+            return null;
+        }
+        // Already walking toward it → keep going.
+        if (currentIntent?.[0] === 'go_explore'
+                && currentIntent[1] === centroid.x && currentIntent[2] === centroid.y)
+            return null;
+        patrolLog(`dense (#spawners=${spawnerTiles.length}>${IDLE_PATROL_MAX_SPAWNERS}) → G${pick.idx} centroid (${centroid.x},${centroid.y})`);
+        return ['go_explore', centroid.x, centroid.y];
+    }
+
+    /** Call super.exploreIfIdle but exclude a just-abandoned group's tiles so the
+     *  next target is the next-nearest spawner OUTSIDE that group. */
+    _exploreOutsideLeftGroup(currentIntent) {
+        const left = this._idleLeftGroupKeys;
+        if (!left || left.size === 0) return super.exploreIfIdle(currentIntent);
+        this._idleExcludeKeys = left;
+        const result = super.exploreIfIdle(currentIntent);
+        this._idleExcludeKeys = null;
+        return result;
     }
 }

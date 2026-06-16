@@ -98,6 +98,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
 
     let failures = 0;                              // failed command attempts (budget)
     let missionApplied = false;                    // a mission tool succeeded → ack with "Mission accepted."
+    let missionDeclined = false;                   // a Level-3 routine refused a net-penalty offer → reply "Mission declined."
 
     try {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -128,7 +129,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
             // Bare "End" with no Action: the model declares the directive already
             // complete. A pure action directive ends silently; a mission directive
             // (a mission tool ran earlier this turn-sequence) acks "Mission accepted.".
-            if (!act && hasEndMarker(out)) return missionApplied ? 'Mission accepted.' : null;
+            if (!act && hasEndMarker(out)) return missionDeclined ? 'Mission declined.' : missionApplied ? 'Mission accepted.' : null;
 
             // If both appear, run the Action first.
             if (act) {
@@ -141,7 +142,15 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 // Remember a successful mission change so the directive acks with
                 // "Mission accepted." when it ends (a mission tool that fails leaves
                 // this false → the failure stays silent, as the operator wants).
-                if (MISSION_TOOLS.has(act.action) && fn && !/^(Error|Failed)/i.test(obs))
+                // A tool that returns "Mission declined." (a points-bearing Level-3
+                // routine refusing a net-penalty offer) is NOT an applied mission — it
+                // must NOT flip this true, or the End/final path below would override
+                // its decline with a bogus "Mission accepted." ack.
+                const declinedNow = MISSION_TOOLS.has(act.action) && fn
+                    && /^Mission declined\.?$/i.test(obs.trim());
+                if (declinedNow) missionDeclined = true;
+                if (MISSION_TOOLS.has(act.action) && fn
+                    && !/^(Error|Failed)/i.test(obs) && !declinedNow)
                     missionApplied = true;
 
                 if (directive.aborted)
@@ -150,7 +159,7 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                 // "End" marker with the Action = "this is my last step": the
                 // directive ends the INSTANT the action completes. Action directives
                 // end silently; a mission directive acks "Mission accepted.".
-                if ((hasEndMarker(out) || final) && fn) return missionApplied ? 'Mission accepted.' : null;
+                if ((hasEndMarker(out) || final) && fn) return missionDeclined ? 'Mission declined.' : missionApplied ? 'Mission accepted.' : null;
 
                 // Failure budget: don't let the LLM keep retrying a stuck directive.
                 // After a few failed commands, give up and let the BDI agent carry on.

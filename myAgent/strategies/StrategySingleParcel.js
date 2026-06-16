@@ -16,11 +16,15 @@ const log = createLogger('single-parcel');
  *
  * No tickIntervalMs heartbeat is needed: the server's onSensing event fires
  * the moment a parcel spawns, which triggers optionsGeneration() and the
- * agent reacts immediately via the inherited decide() logic.
+ * agent reacts immediately via the inherited decide() logic. This camps on a
+ * fixed tile (no patrol), so we pin tickIntervalMs back to 0 — the 500ms idle
+ * heartbeat StrategyLookAhead adds for its group patrol is unnecessary here.
  *
  * Selected automatically by selectStrategy() when spawnerTiles.length === 1.
  */
 export class StrategySingleParcel extends StrategyLookAhead {
+    tickIntervalMs = 0;
+
     exploreIfIdle(currentIntent) {
         const [intent] = currentIntent ?? [];
 

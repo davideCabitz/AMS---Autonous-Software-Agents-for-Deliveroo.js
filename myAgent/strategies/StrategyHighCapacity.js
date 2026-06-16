@@ -27,6 +27,12 @@ const ENROUTE_DELIVERY_SLACK = 3;
 // A hop while carrying is viable only when the decay it inflicts on the load
 // stays below this fraction of the carried reward.
 const HOP_MAX_LOSS_FRACTION = 0.25;
+// En-route farm switch: while walking to the chosen farm group, re-target a
+// different group only when its yield-per-distance score (count / A* dist from the
+// CURRENT position) beats the committed group's by at least this factor. The
+// margin (>1) is hysteresis — it stops two comparable groups from flip-flopping
+// the farm target every tick as the agent moves between them.
+const FARM_SWITCH_MARGIN = 1.3;
 
 /**
  * Strategy for high-capacity maps (CARRYING_CAPACITY > 5).
@@ -73,6 +79,10 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     #patrolGroupIdx = null;
     /** Whether the agent was inside the farm group's sensing area last tick. */
     #wasAtFarm = false;
+    /** Group we just hopped AWAY from because it went dry. Excluded from en-route
+     *  farm switching (it's still nearby, so its score is high) until the agent
+     *  reaches a farm group, so a dry group can't immediately pull us back. */
+    #hopFromIdx = null;
     /** Group indices already speculatively visited during the current delivery trip. */
     #visitedDetours = new Set();
     /** Signature of the allowedSpawnerTiles constraint the groups were built
@@ -108,6 +118,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         if (this.#phase === 'deliver' && carrying.length === 0) {
             this.#phase   = 'farm';
             this.#farmIdx = null;
+            this.#hopFromIdx = null;
             this.#visitedDetours.clear();
             this.#lastParcelTs = now;
             log('load banked → FARM, groups re-ranked');
@@ -226,16 +237,55 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         return best;
     }
 
-    /** Group to farm: most spawner cells, ties broken by A* distance. */
+    /** Yield-per-distance score of a group from the agent's current position:
+     *  cell count / A* distance. Higher = a richer and/or closer group. Matches
+     *  the score #bestNeighbourGroup uses for hops, so farm selection, en-route
+     *  switching and hopping all agree on what "best" means. */
+    #farmScore(e) {
+        return e.count / Math.max(1, e.dist);
+    }
+
+    /**
+     * Group to farm, by yield-per-distance (count / A* distance) — NOT raw cell
+     * count, which would always lock onto the single biggest group even when it's
+     * across the map and a nearly-as-big one sits on the way.
+     *
+     * The chosen group is cached in #farmIdx so the agent commits to a target, but
+     * while still travelling to it we re-evaluate from the CURRENT position: as the
+     * agent approaches another large group its distance shrinks, its score climbs,
+     * and once it beats the committed group's score by FARM_SWITCH_MARGIN we switch
+     * to it. The margin is hysteresis against flip-flopping between comparable
+     * groups. Re-evaluation stops once the agent is actually at the farm (#isAtFarm)
+     * so it doesn't abandon a group it just arrived to patrol.
+     */
     #selectFarmGroup() {
-        if (this.#farmIdx !== null) return this.#farmIdx;
         const ranked = this.#groups
             .map((g, idx) => ({ idx, count: g.length, ...this.#nearestTile(g) }))
             .filter(e => Number.isFinite(e.dist))
-            .sort((a, b) => b.count - a.count || a.dist - b.dist);
-        this.#farmIdx = ranked[0]?.idx ?? null;
-        if (this.#farmIdx !== null)
-            log(`farm group → G${this.#farmIdx} (n=${ranked[0].count}, dist=${ranked[0].dist})`);
+            .sort((a, b) => this.#farmScore(b) - this.#farmScore(a));
+        if (ranked.length === 0) return this.#farmIdx;
+
+        if (this.#farmIdx === null) {
+            this.#farmIdx = ranked[0].idx;
+            log(`farm group → G${this.#farmIdx} (n=${ranked[0].count}, dist=${ranked[0].dist}, score=${this.#farmScore(ranked[0]).toFixed(2)})`);
+            return this.#farmIdx;
+        }
+
+        // En-route switch: not yet at the committed group, and a different group
+        // now scores clearly higher from where we are → re-target it. The group we
+        // just hopped away from (dry) is excluded so it can't immediately pull us
+        // back; the exclusion clears once we actually reach a farm.
+        if (this.#isAtFarm()) {
+            this.#hopFromIdx = null;
+        } else {
+            const best = ranked.find(e => e.idx !== this.#hopFromIdx);
+            const cur  = ranked.find(e => e.idx === this.#farmIdx);
+            if (best && best.idx !== this.#farmIdx && cur
+                    && this.#farmScore(best) >= FARM_SWITCH_MARGIN * this.#farmScore(cur)) {
+                log(`farm switch G${this.#farmIdx}(score=${this.#farmScore(cur).toFixed(2)}) → G${best.idx}(n=${best.count}, dist=${best.dist}, score=${this.#farmScore(best).toFixed(2)}) en route`);
+                this.#farmIdx = best.idx;
+            }
+        }
         return this.#farmIdx;
     }
 
@@ -384,6 +434,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             const hop = this.#bestNeighbourGroup(carrying);
             if (hop) {
                 log(`HOP G${this.#farmIdx ?? '?'} dry for ${PATIENCE_MS}ms → G${hop.idx} (n=${hop.count}, dist=${hop.dist})`);
+                this.#hopFromIdx = this.#farmIdx; // don't let the dry group pull us back en route
                 this.#farmIdx = hop.idx;
                 this.#lastParcelTs = Date.now();
                 return this.#goFarm(currentIntent);
@@ -480,7 +531,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const remembered = parcels.remembered();
         const all = [
             ...parcels.free(),
-            ...remembered.filter(r => !parcels.get(r.id)),
+            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
         ];
         // missionPickupOk (LLM layer): maxParcelReward / maxBundleValue ceilings.
         return all.filter(p => this.missionPickupOk(p) && this.isReachable(p) && this.inSafe(p));

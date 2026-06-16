@@ -32,7 +32,7 @@ export class StrategyMemory extends StrategyGreedy {
         // never be picked up, for live and remembered candidates alike.
         let allFree = [
             ...parcels.free(),
-            ...remembered.filter(r => !parcels.get(r.id)),
+            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
         ].filter(p => this.missionPickupOk(p));
 
         // Pre-filter to topN by raw reward when carrying capacity is finite.

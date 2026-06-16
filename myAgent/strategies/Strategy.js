@@ -53,6 +53,15 @@ const CONTEST_DEADBAND = 1;
 // enough to send us across the map.
 const SPAWNER_CAMP_PENALTY = EXPLORE_NEARBY_MARGIN;
 
+// ─── remembered-parcel pursuit cap ────────────────────────────────────────────
+// A remembered (out-of-sensing) parcel is abandoned once it is more than this many
+// A* tiles from the agent's CURRENT position: chasing it back across the map (e.g.
+// a forced directional-tile loop) costs more than it's worth. The absolute tile cap
+// is the load-bearing gate on low/no-decay maps, where decayRate≈0 makes pickupValue's
+// distance term vanish and a far parcel looks as good as a near one.
+const MAX_REMEMBERED_DETOUR_TILES   = 20;
+const REMEMBERED_MAX_DECAY_FRACTION = 0.5;  // also abandon if decay would eat >50% of its reward
+
 /**
  * Base class for option-generation strategies.
  *
@@ -71,6 +80,12 @@ export class Strategy {
     /** Key "x_y" of the spawner committed to just before _lastExploreKey.
      *  Hard-excluded on the next selection to prevent ping-pong. */
     _prevExploreKey = null;
+
+    /** Optional Set of "x_y" spawner keys to exclude from the next exploreIfIdle
+     *  selection. Null for every caller except StrategyLookAhead's idle group
+     *  patrol (which sets it to leave a just-patrolled group), so this is a no-op
+     *  everywhere else. */
+    _idleExcludeKeys = null;
 
     /**
      * Re-deliberation cadence in ms, owned by the agent loop. 0 = no heartbeat
@@ -577,6 +592,26 @@ export class Strategy {
     }
 
     /**
+     * True when a REMEMBERED (out-of-sensing) parcel is still worth pursuing from
+     * the agent's CURRENT position. Never call on live parcels — only on snapshots
+     * from parcels.remembered() (reward already decayed).
+     *
+     * The absolute tile cap is the primary gate: on low/no-decay maps decayRate≈0,
+     * so pickupValue's distance term vanishes and a parcel 20+ tiles away looks as
+     * good as a near one, making the agent commit a long round-trip (e.g. a forced
+     * directional-tile loop) back to a memorized spawner. Re-evaluated every tick,
+     * so a far parcel naturally re-qualifies once the agent moves within range.
+     */
+    rememberedWorthPursuing(p) {
+        const d = this.pathLen(me, p);                       // A* from current position
+        if (!Number.isFinite(d)) return false;               // unreachable
+        if (d > MAX_REMEMBERED_DETOUR_TILES) return false;   // too far — drop it
+        const rho = this.decayRate();
+        if (rho > 0 && rho * d > REMEMBERED_MAX_DECAY_FRACTION * p.reward) return false;
+        return true;
+    }
+
+    /**
      * Value of the bank-first alternative: deliver the current load immediately
      * at the nearest delivery D, then pick up `parcel` as a solo trip.
      *   A_first = (R − n·ρ·d0) + max(0, reward_p − ρ·(d0 + d3 + d4))
@@ -692,8 +727,18 @@ export class Strategy {
             ? spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`))
             : rawPool;
         const pool      = zonedPool.length > 0 ? zonedPool : rawPool;
-        const reachable = pool.filter(t => this.isReachable(t));
-        if (reachable.length === 0) return null; // nothing reachable → stay idle
+        const reachableAll = pool.filter(t => this.isReachable(t));
+        if (reachableAll.length === 0) return null; // nothing reachable → stay idle
+
+        // Idle group-patrol may ask us to leave the group it just patrolled: drop
+        // that group's tiles so the next target is OUTSIDE it. Fall back to the
+        // full set if the exclusion would leave nothing reachable.
+        const excluded  = this._idleExcludeKeys;
+        const reachable = excluded
+            ? (reachableAll.filter(t => !excluded.has(`${t.x}_${t.y}`)).length > 0
+                ? reachableAll.filter(t => !excluded.has(`${t.x}_${t.y}`))
+                : reachableAll)
+            : reachableAll;
 
         // Prefer tiles in the sustainable-loop region (don't explore into a one-way
         // trap); fall back to all reachable only if none are safe (all-traps map).
