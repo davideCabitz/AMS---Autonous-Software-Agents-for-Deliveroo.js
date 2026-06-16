@@ -96,20 +96,11 @@ export class StrategyLookAhead extends StrategyMemory {
     decide(currentIntent) {
         const carrying   = parcels.carriedBy(me.id);
         const bankNow    = this.bankNowValue();
-        const remembered = parcels.remembered();
 
-        // Same merged candidate pool as StrategyMemory: free live parcels plus
-        // remembered ones that are not live again, pre-screened to topN by raw
-        // reward when capacity is finite.
-        let allFree = [
-            ...parcels.free(),
-            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
-        ].filter(p => this.missionPickupOk(p));   // mission gates: maxParcelReward / maxBundleValue
-        if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
-            allFree = allFree
-                .sort((a, b) => b.reward - a.reward)
-                .slice(0, CARRYING_CAPACITY);
-        }
+        // Same merged candidate pool as StrategyMemory (inherited _eligiblePool):
+        // free live parcels plus remembered ones not live again, mission-gated and
+        // pre-screened to topN by raw reward when capacity is finite.
+        const allFree = this._eligiblePool();
         const eligible = allFree.filter(p => this.isReachable(p) && this.inSafe(p));
 
         if (carrying.length > 0) {

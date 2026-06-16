@@ -18,24 +18,8 @@ export class StrategyMemory extends StrategyGreedy {
     decide(currentIntent) {
         const carrying  = parcels.carriedBy(me.id);
         const bankNow   = this.bankNowValue();
-        const remembered = parcels.remembered();  // current-reward snapshots, decay applied
 
-        // Build merged candidate pool (free live + remembered that aren't live again).
-        // Mission gates (maxParcelReward / maxBundleValue) exclude parcels that may
-        // never be picked up, for live and remembered candidates alike.
-        let allFree = [
-            ...parcels.free(),
-            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
-        ].filter(p => this.missionPickupOk(p));
-
-        // Pre-filter to topN by raw reward when carrying capacity is finite.
-        // This is a cheap O(n log n) screen; the full A*-based scoring runs next.
-        // N = CARRYING_CAPACITY matches the user requirement "topN where N = agent.capacity".
-        if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
-            allFree = allFree
-                .sort((a, b) => b.reward - a.reward)
-                .slice(0, CARRYING_CAPACITY);
-        }
+        const allFree = this._eligiblePool();
 
         if (carrying.length > 0) {
             // Multi-pickup candidates from full pool — no OBSERVATION_DISTANCE cap.
@@ -90,6 +74,28 @@ export class StrategyMemory extends StrategyGreedy {
         }
 
         return this.exploreIfIdle(currentIntent);
+    }
+
+    /**
+     * Merged candidate pool: free live parcels plus remembered ones that aren't
+     * live again and are still worth pursuing, gated by the mission pickup rules
+     * (maxParcelReward / maxBundleValue), then pre-screened to topN by raw reward
+     * when carrying capacity is finite (N = capacity). Shared by StrategyMemory and
+     * StrategyLookAhead (which inherits it).
+     * @returns {Array<Object>} Candidate parcels (live + remembered)
+     */
+    _eligiblePool() {
+        const remembered = parcels.remembered();  // current-reward snapshots, decay applied
+        let allFree = [
+            ...parcels.free(),
+            ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
+        ].filter(p => this.missionPickupOk(p));
+        if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
+            allFree = allFree
+                .sort((a, b) => b.reward - a.reward)
+                .slice(0, CARRYING_CAPACITY);
+        }
+        return allFree;
     }
 
     /**
