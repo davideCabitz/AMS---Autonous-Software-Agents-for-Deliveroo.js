@@ -1,5 +1,6 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { SpawnerGroupPatrol } from './SpawnerGroupPatrol.js';
 import { getWalkable } from '../utils/astar.js';
 import {
     me, parcels, spawnerTiles, deliveryTiles,
@@ -98,6 +99,9 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     /** @type {string|null} Signature of the allowedSpawnerTiles constraint the groups were built
      *  under — a restrict_exploration mission applied mid-run rebuilds them */
     #groupsSig = null;
+
+    /** @type {SpawnerGroupPatrol} Shared pure patrol primitives (nearestTile / buildPatrol) */
+    #patrolHelper = new SpawnerGroupPatrol();
 
     // ── constructor config (set once, not virtual) ───────────────────────────
 
@@ -261,12 +265,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
      * @returns {{tile: {x: number, y: number}|null, dist: number}} Nearest tile and its path cost
      */
     #nearestTile(group) {
-        let best = { tile: null, dist: Infinity };
-        for (const t of group) {
-            const d = this.pathLen(me, t);
-            if (d < best.dist) best = { tile: t, dist: d };
-        }
-        return best;
+        return this.#patrolHelper.nearestTile(group, t => this.pathLen(me, t));
     }
 
     /**
@@ -447,26 +446,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
      * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
      */
     #buildPatrol(group) {
-        if (group.length === 1) return [group[0]];
-
-        // Centroid of all group spawner tiles.
-        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
-        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
-
-        // If the group has only 2 tiles just use both.
-        if (group.length === 2) return [...group];
-
-        // Sort by angle around centroid → clockwise loop.
-        const byAngle = [...group].sort((a, b) =>
-            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
-        );
-
-        // Cap the patrol length so the agent doesn't spend forever on large
-        // groups: keep every k-th tile so we get at most MAX_WAYPOINTS stops.
-        const MAX_WAYPOINTS = 6;
-        if (byAngle.length <= MAX_WAYPOINTS) return byAngle;
-        const step = byAngle.length / MAX_WAYPOINTS;
-        return Array.from({ length: MAX_WAYPOINTS }, (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+        return this.#patrolHelper.buildPatrol(group);
     }
 
     // ── HOP / bank decision ──────────────────────────────────────────────────

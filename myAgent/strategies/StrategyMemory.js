@@ -1,5 +1,5 @@
 import { StrategyGreedy } from './StrategyGreedy.js';
-import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
+import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
 import { me, parcels, CARRYING_CAPACITY } from '../context.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -50,7 +50,7 @@ export class StrategyMemory extends StrategyGreedy {
                 .filter(({ p, value }) => this.mustStack(carrying) || value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
                 .sort((a, b) => b.value - a.value);
 
-            if (!this.atCapacity() && this.#shouldKeepWithMemory(currentIntent, worthwhile[0]))
+            if (!this.atCapacity() && this.shouldKeepCurrentPickup(currentIntent, worthwhile[0]))
                 return null;
             if (!this.atCapacity() && worthwhile.length > 0) {
                 const { p } = worthwhile[0];
@@ -83,7 +83,7 @@ export class StrategyMemory extends StrategyGreedy {
             .sort((a, b) => b.value - a.value)[0];
 
         if (best) {
-            if (this.#shouldKeepWithMemory(currentIntent, best)) return null;
+            if (this.shouldKeepCurrentPickup(currentIntent, best)) return null;
             const tag = parcels.get(best.p.id) ? 'live' : 'remembered';
             log(`→ go_pick_up (${tag}) ${this.pickupDebug(best.p)}`);
             return ['go_pick_up', best.p.x, best.p.y, best.p.id];
@@ -93,18 +93,14 @@ export class StrategyMemory extends StrategyGreedy {
     }
 
     /**
-     * Hysteresis for pickup commitment, extended to cover remembered targets.
-     * The base shouldKeepCurrentPickup() calls parcels.get(curId) only — it returns
-     * undefined for a remembered parcel, losing the SWITCH_MARGIN protection.
+     * Extend pickup-hysteresis target resolution to remembered parcels. The base
+     * shouldKeepCurrentPickup() resolves parcels.get(curId) only — undefined for a
+     * remembered parcel, which would lose the SWITCH_MARGIN protection — so fall
+     * back to the remembered snapshot (mirrors the #isValid() pattern).
+     * @param {string} id - Parcel id from the current intention
+     * @returns {Object|undefined}
      */
-    #shouldKeepWithMemory(currentIntent, candidate) {
-        if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
-        const curId = currentIntent[3];
-        // Check live map first, then memory — mirrors the #isValid() pattern.
-        const cur = parcels.get(curId) ?? parcels.getRemembered(curId);
-        if (!cur || cur.carriedBy) return false;
-        if (!this.isReachable(cur)) return false;
-        if (!candidate || candidate.p.id === curId) return true;
-        return candidate.value - this.pickupValue(cur) < SWITCH_MARGIN;
+    _resolveTarget(id) {
+        return parcels.get(id) ?? parcels.getRemembered(id);
     }
 }

@@ -419,6 +419,29 @@ export class Strategy {
     }
 
     /**
+     * Resolve the parcel a pickup intention currently targets. Base resolves the
+     * live belief only; subclasses that track out-of-range parcels (memory) override
+     * to add a remembered-parcel fallback.
+     * @param {string} id - Parcel id from the current intention
+     * @returns {Object|undefined} The parcel belief, or undefined if gone
+     */
+    _resolveTarget(id) {
+        return parcels.get(id);
+    }
+
+    /**
+     * Hook: may a switch to `candidate` skip the SWITCH_MARGIN hysteresis? Base
+     * never allows it. The look-ahead strategy overrides this so re-ordering the
+     * two stops of one chained trip isn't penalised as a destination change.
+     * @param {string} curId - Current pickup target id
+     * @param {{p: Object, value: number}} candidate - Candidate pickup
+     * @returns {boolean}
+     */
+    _allowSwitchWithoutMargin(curId, candidate) {
+        return false;
+    }
+
+    /**
      * Check if current pickup target should be kept
      * @param {Array|null} currentIntent - Current intention predicate
      * @param {{p: Object, value: number}|undefined} candidate - Best new pickup option
@@ -427,11 +450,13 @@ export class Strategy {
     shouldKeepCurrentPickup(currentIntent, candidate) {
         if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
         const curId = currentIntent[3];
-        const cur   = parcels.get(curId);
+        const cur   = this._resolveTarget(curId);
         // Drop the current target if its parcel is gone, taken, or now unreachable.
         if (!cur || cur.carriedBy || !this.isReachable(cur)) return false;
         // No alternative, or candidate IS the current target → keep going.
         if (!candidate || candidate.p.id === curId) return true;
+        // A re-ordering of the same chained trip (look-ahead) may switch freely.
+        if (this._allowSwitchWithoutMargin(curId, candidate)) return false;
         // Keep unless the candidate beats the current target's value by the margin.
         return candidate.value - this.pickupValue(cur) < SWITCH_MARGIN;
     }

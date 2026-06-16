@@ -1,10 +1,11 @@
 import { StrategyMemory } from './StrategyMemory.js';
-import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
+import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN } from './Strategy.js';
 import {
     me, parcels, CARRYING_CAPACITY, missionConstraints,
     spawnerTiles, OBSERVATION_DISTANCE,
 } from '../context.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { SpawnerGroupPatrol } from './SpawnerGroupPatrol.js';
 import { getWalkable } from '../utils/astar.js';
 import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
@@ -25,7 +26,6 @@ const LOOKAHEAD_MARGIN = 1;
 // ─── idle group-patrol (anti-camping) ─────────────────────────────────────────
 const IDLE_D_CLUSTER         = 2;     // matches HighCapacity D_CLUSTER (identical group shapes)
 const IDLE_PATIENCE_MS       = 3000;  // sparse-map: patrol a dry group this long before leaving
-const IDLE_MAX_WAYPOINTS     = 6;     // matches HighCapacity patrol cap
 // Sparsity gate: patrol-and-wait only when the map has at most this many spawner
 // TILES total (waiting for a respawn is then the only way to get parcels). Above
 // this the map is "dense" — plenty of spawners spread around — so idle = move to
@@ -59,6 +59,9 @@ export class StrategyLookAhead extends StrategyMemory {
      *  HighCapacity also sets 500; a subclass field initializer runs after this
      *  one and wins, so its value is preserved */
     tickIntervalMs = 500;
+
+    /** @type {SpawnerGroupPatrol} Shared pure patrol primitives (nearestTile / buildPatrol) */
+    _patrolHelper = new SpawnerGroupPatrol();
 
     /** @type {Array<Array<{x: number, y: number}>>|null} Lazily built spawner groups */
     _idleGroups = null;
@@ -136,10 +139,10 @@ export class StrategyLookAhead extends StrategyMemory {
                     : this.#chooseTarget(worthwhile, carrying.length))
                 : undefined;
             // When no further pickup is allowed we must NOT keep an in-flight extra
-            // pickup: #shouldKeep(_, undefined) would otherwise return true for any
-            // pending go_pick_up and the agent would overshoot the stack. Skip the
-            // hysteresis so the next branch delivers what we already hold.
-            if (!noMorePickups && !this.atCapacity() && this.#shouldKeep(currentIntent, choice))
+            // pickup: shouldKeepCurrentPickup(_, undefined) would otherwise return true
+            // for any pending go_pick_up and the agent would overshoot the stack. Skip
+            // the hysteresis so the next branch delivers what we already hold.
+            if (!noMorePickups && !this.atCapacity() && this.shouldKeepCurrentPickup(currentIntent, choice))
                 return null;
             if (choice) {
                 this.#logChoice('multi-pickup', choice);
@@ -178,7 +181,7 @@ export class StrategyLookAhead extends StrategyMemory {
             const choice = missionConstraints.maxStackSize === 1
                 ? { p: ranked[0].p, value: ranked[0].value, via: 'direct' }
                 : this.#chooseTarget(ranked, carrying.length);
-            if (this.#shouldKeep(currentIntent, choice)) return null;
+            if (this.shouldKeepCurrentPickup(currentIntent, choice)) return null;
             this.#logChoice('go_pick_up', choice);
             return ['go_pick_up', choice.p.x, choice.p.y, choice.p.id];
         }
@@ -266,24 +269,16 @@ export class StrategyLookAhead extends StrategyMemory {
     }
 
     /**
-     * Hysteresis covering live + remembered targets, replicated from
-     * StrategyMemory.#shouldKeepWithMemory (private there, so not inheritable),
-     * with one look-ahead twist: when the chained plan's SECOND stop is the
-     * current target, switching to the near parcel is a re-ordering of the same
-     * trip, not a change of destination — allow it without the SWITCH_MARGIN
-     * @param {Array|null} currentIntent - Current intention predicate
-     * @param {{p: Object, value: number, via?: string, second?: Object}|undefined} choice - Candidate pickup
-     * @returns {boolean} True to keep the current pickup target
+     * Look-ahead twist on the base pickup hysteresis: when the chained plan's SECOND
+     * stop is the current target, switching to the near parcel is a re-ordering of
+     * the same trip, not a change of destination — so allow it without SWITCH_MARGIN.
+     * Target resolution (live + remembered) is inherited from StrategyMemory.
+     * @param {string} curId - Current pickup target id
+     * @param {{p: Object, value: number, via?: string, second?: Object}} choice - Candidate pickup
+     * @returns {boolean}
      */
-    #shouldKeep(currentIntent, choice) {
-        if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
-        const curId = currentIntent[3];
-        const cur = parcels.get(curId) ?? parcels.getRemembered(curId);
-        if (!cur || cur.carriedBy) return false;
-        if (!this.isReachable(cur)) return false;
-        if (!choice || choice.p.id === curId) return true;
-        if (choice.via === 'lookahead' && choice.second?.id === curId) return false;
-        return choice.value - this.pickupValue(cur) < SWITCH_MARGIN;
+    _allowSwitchWithoutMargin(curId, choice) {
+        return choice.via === 'lookahead' && choice.second?.id === curId;
     }
 
     /**
@@ -421,12 +416,7 @@ export class StrategyLookAhead extends StrategyMemory {
      * @returns {{tile: {x: number, y: number}|null, dist: number}} Nearest tile and its explore cost
      */
     _nearestGroupTile(group) {
-        let best = { tile: null, dist: Infinity };
-        for (const t of group) {
-            const d = this.exploreCost(t);
-            if (d < best.dist) best = { tile: t, dist: d };
-        }
-        return best;
+        return this._patrolHelper.nearestTile(group, t => this.exploreCost(t));
     }
 
     /**
@@ -453,16 +443,7 @@ export class StrategyLookAhead extends StrategyMemory {
      * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
      */
     _buildIdlePatrol(group) {
-        if (group.length === 1) return [group[0]];
-        if (group.length === 2) return [...group];
-        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
-        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
-        const byAngle = [...group].sort((a, b) =>
-            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-        if (byAngle.length <= IDLE_MAX_WAYPOINTS) return byAngle;
-        const step = byAngle.length / IDLE_MAX_WAYPOINTS;
-        return Array.from({ length: IDLE_MAX_WAYPOINTS },
-            (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+        return this._patrolHelper.buildPatrol(group);
     }
 
     /**
