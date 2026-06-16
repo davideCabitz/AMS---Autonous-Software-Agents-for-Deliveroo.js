@@ -43,9 +43,52 @@ function agentKeys() {
 }
 
 /**
- * Shared A* search core. Runs the open/closed/gScore/fScore loop with the same
- * linear-scan open-set selection both callers historically used (lowest f, and on
- * ties the earliest-inserted Map key) so returned paths/costs are byte-identical.
+ * Binary min-heap of A* open-set entries ordered by (f ascending, seq ascending).
+ * `seq` is the monotonic order a tile was FIRST discovered (added to the open set);
+ * keeping it as the tie-break reproduces the old linear scan's "lowest f, then
+ * earliest-inserted" choice exactly. Relaxations push a fresh entry (lazy deletion);
+ * stale entries are skipped on pop, so the heap never needs decrease-key.
+ */
+class OpenHeap {
+    #a = [];
+    get size() { return this.#a.length; }
+    #less(i, j) {
+        const x = this.#a[i], y = this.#a[j];
+        return x.f < y.f || (x.f === y.f && x.seq < y.seq);
+    }
+    push(entry) {
+        const a = this.#a;
+        a.push(entry);
+        let i = a.length - 1;
+        while (i > 0) {
+            const p = (i - 1) >> 1;
+            if (this.#less(i, p)) { [a[i], a[p]] = [a[p], a[i]]; i = p; } else break;
+        }
+    }
+    pop() {
+        const a = this.#a;
+        const top = a[0];
+        const last = a.pop();
+        if (a.length > 0) {
+            a[0] = last;
+            let i = 0;
+            for (;;) {
+                const l = 2 * i + 1, r = 2 * i + 2;
+                let s = i;
+                if (l < a.length && this.#less(l, s)) s = l;
+                if (r < a.length && this.#less(r, s)) s = r;
+                if (s === i) break;
+                [a[i], a[s]] = [a[s], a[i]]; i = s;
+            }
+        }
+        return top;
+    }
+}
+
+/**
+ * Shared A* search core. Uses a binary min-heap open set ordered by (f, then the
+ * tile's first-discovery sequence) — byte-identical pop order to the old linear
+ * "lowest f, earliest-inserted on ties" scan, but O(n log n) instead of O(n²).
  * The two variants (plain route vs. crate-push cost) differ only in how a node's
  * neighbours and step costs are produced and what is reconstructed at the goal —
  * both are injected via `expand` and read off the returned cameFrom/gScore.
@@ -61,21 +104,21 @@ function aStarCore(start, goalKey, heuristicOf, expand) {
 
     const gScore   = new Map([[startKey, 0]]);
     const fScore   = new Map([[startKey, heuristicOf(start)]]);
+    const seqOf    = new Map([[startKey, 0]]);   // first-discovery order (tie-break)
     const cameFrom = new Map();
-    const open     = new Map([[startKey, start]]);
     const closed   = new Set();
+    const open     = new OpenHeap();
+    open.push({ key: startKey, node: start, f: fScore.get(startKey), seq: 0 });
+    let nextSeq = 1;
 
     while (open.size > 0) {
-        let currentKey = null, lowestF = Infinity;
-        for (const k of open.keys()) {
-            const f = fScore.get(k) ?? Infinity;
-            if (f < lowestF) { lowestF = f; currentKey = k; }
-        }
+        const { key: currentKey, node: cur, f } = open.pop();
+        // Lazy deletion: skip an entry that was superseded by a lower-f relaxation
+        // (its f no longer matches the live fScore) or whose tile is already settled.
+        if (closed.has(currentKey) || f !== fScore.get(currentKey)) continue;
 
         if (currentKey === goalKey) return { found: true, goalKey, cameFrom, gScore };
 
-        const cur = open.get(currentKey);
-        open.delete(currentKey);
         closed.add(currentKey);
 
         const g      = gScore.get(currentKey);
@@ -87,8 +130,13 @@ function aStarCore(start, goalKey, heuristicOf, expand) {
             if (tentativeG < (gScore.get(nk) ?? Infinity)) {
                 cameFrom.set(nk, { parentKey: currentKey, dir });
                 gScore.set(nk, tentativeG);
-                fScore.set(nk, tentativeG + heuristicOf({ x: nx, y: ny }));
-                if (!open.has(nk)) open.set(nk, { x: nx, y: ny });
+                const nf = tentativeG + heuristicOf({ x: nx, y: ny });
+                fScore.set(nk, nf);
+                // seq is assigned once, at first discovery, and reused on every
+                // relaxation so the tie-break matches the old insertion order.
+                let seq = seqOf.get(nk);
+                if (seq === undefined) { seq = nextSeq++; seqOf.set(nk, seq); }
+                open.push({ key: nk, node: { x: nx, y: ny }, f: nf, seq });
             }
         }
     }
