@@ -200,12 +200,16 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
 const CLASSIFY_PROMPT =
     'You route a chat message sent to a robot agent in a delivery game where a ' +
     '"red light, green light" mission may be running. Reply with EXACTLY one word:\n' +
-    '- STOP    if THIS message is a LIVE red-light / stop / freeze command the agent must obey NOW ' +
+    '- STOP    if THIS message is a LIVE red-light / stop / freeze command targeting ALL agents NOW ' +
     '(e.g. "RED LIGHT! Stop moving until the next green light!", "stop moving", "freeze", "everyone stop"). ' +
     'A red-light command often ALSO mentions the green light ("stop until the next green light") — it is ' +
-    'STILL STOP; the leading RED/STOP is the active order. NOT the long mission announcement that explains the rules.\n' +
-    '- GO      if THIS message is a LIVE green-light / resume / you-may-move-again signal ' +
-    '(e.g. "GREEN LIGHT! You can move again!", "go", "you can move again").\n' +
+    'STILL STOP; the leading RED/STOP is the active order. NOT the long mission announcement that explains the rules. ' +
+    'IMPORTANT: if the command targets a SPECIFIC agent ("freeze the worker", "halt the worker", "freeze worker", ' +
+    '"stop the partner") it is ACTION, not STOP — the coordinator must decide how to handle it.\n' +
+    '- GO      if THIS message is a LIVE green-light / resume / you-may-move-again signal targeting ALL agents ' +
+    '(e.g. "GREEN LIGHT! You can move again!", "go", "you can move again"). ' +
+    'IMPORTANT: if the command targets a SPECIFIC agent ("resume the worker", "unfreeze worker", "resume partner") ' +
+    'it is ACTION, not GO.\n' +
     '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, ' +
     'apply or remove a mission/constraint, abort/cancel/drop/clear a mission, ' +
     'or otherwise DO something in the game world. ALSO any mission offer or challenge ' +

@@ -3,30 +3,11 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('llm:partner');
 
-<<<<<<< HEAD
-const workerId = process.env.WORKER_ID ?? null;
-
-/*
- * Coordinator side of the partner link (see myAgent/worker_agent.js for the
- * worker side). The coordinator commands the worker over the normal chat channel
- * with small JSON payloads:
- *
- *   -> {"type":"order","orderId":"o1","predicate":["go_to",5,3]}
- *   -> {"type":"putdown","orderId":"o2"}
- *   -> {"type":"halt"} / {"type":"resume"}
- *   -> {"type":"constraint","op":"apply"|"drop"|"dropAll", ...}
- *   -> {"type":"status_req"}
- *   <- {"type":"hello","role":"worker","name":...}            (worker, shouted until acked)
- *   <- {"type":"result","orderId":"o1","ok":true,"detail":...}
- *   <- {"type":"status","x":..,"y":..,"score":..,"carrying":[...],"frozen":..}
- *
- * Orders are await-able: sendOrder resolves with the worker's `detail` string
- * (success or failure), which the ReAct loop uses directly as the observation.
-=======
 /**
  * @typedef { {id: string|null, name: string|null, lastStatus: Object|null} } PartnerState
->>>>>>> 3aa6dd90928bcd9bcdfc0853f58ebbfe3e391d12
  */
+
+const workerId = process.env.WORKER_ID ?? null;
 
 /**
  * Coordinator-side partner agent link (JSON protocol over chat channel)

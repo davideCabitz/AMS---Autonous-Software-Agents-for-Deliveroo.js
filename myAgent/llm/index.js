@@ -244,7 +244,19 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         // IGNORED — it must not change behaviour.
         if (kind === 'STOP' || kind === 'GO') {
             if (!lightMission.active) {
-                log(`ignoring light signal "${text}" — no red-light-green-light mission started`);
+                // Outside a red-light/green-light mission, STOP/GO are plain
+                // freeze/resume commands (e.g. "freeze worker", "resume worker").
+                if (kind === 'STOP') {
+                    manualHold.active = true;
+                    myAgent.haltCurrent();
+                    sendHalt();
+                    log(`freeze command "${text}" — coordinator and worker halted`);
+                } else {
+                    manualHold.active = false;
+                    sendResume();
+                    log(`resume command "${text}" — both agents resuming BDI`);
+                    if (!directive.active) resumeAutonomy?.();
+                }
                 return;
             }
             if (kind === 'STOP') {
