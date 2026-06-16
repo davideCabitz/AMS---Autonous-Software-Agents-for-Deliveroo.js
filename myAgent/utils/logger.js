@@ -1,18 +1,8 @@
 /**
- * Centralised logging. Each module calls createLogger('namespace') once and gets
- * a tagged log/warn/error interface. Which namespaces actually print is controlled
- * by the LOG_NAMESPACES environment variable:
- *
- *   LOG_NAMESPACES=*           → everything (default when unset)
- *   LOG_NAMESPACES=pddl,nav    → only those two namespaces
- *   LOG_NAMESPACES=            → silent run
- *
- * Known namespaces: config, map, crate, sensing, explore, delivery, pathlen,
- * contest (competitor-aware pickup scoring — Phase 1), pddl, nav.
- *
- * warn/error are always emitted regardless of the filter (they signal problems).
+ * Create a namespaced logger controlled by LOG_NAMESPACES environment variable
+ * @param {string} ns - Namespace name (e.g. 'nav', 'pddl', 'delivery')
+ * @returns {{(message: any): void, warn: (message: any): void, error: (message: any): void}} Tagged logger with log/warn/error methods
  */
-
 const raw     = process.env.LOG_NAMESPACES;
 const ALL     = raw === undefined || raw.trim() === '*';
 const ENABLED = ALL ? null : new Set(raw.split(',').map(s => s.trim()).filter(Boolean));

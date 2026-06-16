@@ -1,20 +1,38 @@
 import { planLibrary } from '../plans/planLibrary.js';
 
+/**
+ * @class IntentionDeliberation
+ * Execute a single intention by trying plans from the library
+ */
 export class IntentionDeliberation {
+    /** @type {boolean} Whether execution has been stopped */
     #stopped = false;
+
+    /** @type {boolean} Whether achieve() has been called */
     #started = false;
+
+    /** @type {Object|null} Currently executing plan instance */
     #current_plan = null;
+
+    /** @type {Array} Intention predicate (e.g., ['go_to', x, y]) */
     #predicate;
+
+    /** @type {Object} Parent intention context */
     #parent;
+
+    /** @type {Function} Promise resolver */
     #resolveDone;
+
+    /** @type {Function} Promise rejecter */
     #rejectDone;
 
-    /* Resolves with the plan result when achieve() succeeds, rejects with the
-     * thrown tag (['stopped',...] / ['no plan for',...]) otherwise. Used only by
-     * the LLM command path (IntentionRevisionReplace.commandAndAwait) to await a
-     * specific pushed intention; the autonomous loop never reads it. */
+    /** @type {Promise} Resolves when intention completes, rejects on failure */
     completion;
 
+    /**
+     * @param {Object} parent - Parent intention context
+     * @param {Array} predicate - Intention predicate
+     */
     constructor(parent, predicate) {
         this.#parent = parent;
         this.#predicate = predicate;
@@ -26,26 +44,40 @@ export class IntentionDeliberation {
         this.completion.catch(() => {});
     }
 
+    /** @type {Array} Intention predicate */
     get predicate() { return this.#predicate; }
+
+    /** @type {boolean} Whether this intention has been stopped */
     get stopped()   { return this.#stopped; }
 
+    /**
+     * Stop this intention and its current plan
+     */
     stop() {
         this.#stopped = true;
         this.#current_plan?.stop();
     }
 
-    /** Drop an intention that will never be achieved (stale-validity check in
-     *  the loop). Settles the completion promise so a commandAndAwait awaiter
-     *  (LLM tool, partner order, handoff cycle) is never left hanging forever. */
+    /**
+     * Cancel intention due to staleness (settles completion promise for awaiters)
+     */
     cancel() {
         this.#stopped = true;
         this.#rejectDone(['stopped', ...this.#predicate]);
     }
 
+    /**
+     * Log message through parent
+     * @param {...any} args - Log arguments
+     */
     log(...args) {
         this.#parent?.log?.('\t', ...args);
     }
 
+    /**
+     * Execute this intention by trying applicable plans
+     * @returns {Promise<*>} Plan result
+     */
     async achieve() {
         if (this.#started) return false;
         this.#started = true;

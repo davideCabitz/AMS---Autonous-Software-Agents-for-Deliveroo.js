@@ -5,26 +5,18 @@ import { createLogger } from '../utils/logger.js';
 const log = createLogger('single-parcel');
 
 /**
- * Strategy for maps with exactly one parcel spawner.
- *
- * The only sensible idle behaviour on such maps is to camp on the single
- * spawner and react the instant a parcel appears.  The agent needs no timer
- * and no exploration tour — it just navigates to the spawner once and stays.
- *
- * All pickup / delivery / memory / look-ahead logic is inherited from
- * StrategyLookAhead unchanged.  Only exploreIfIdle() is overridden.
- *
- * No tickIntervalMs heartbeat is needed: the server's onSensing event fires
- * the moment a parcel spawns, which triggers optionsGeneration() and the
- * agent reacts immediately via the inherited decide() logic. This camps on a
- * fixed tile (no patrol), so we pin tickIntervalMs back to 0 — the 500ms idle
- * heartbeat StrategyLookAhead adds for its group patrol is unnecessary here.
- *
- * Selected automatically by selectStrategy() when spawnerTiles.length === 1.
+ * @class StrategySingleParcel
+ * Single-spawner maps: camp on sole spawner and react to spawn events
  */
 export class StrategySingleParcel extends StrategyLookAhead {
+    /** @type {number} No heartbeat needed (event-driven via onSensing) */
     tickIntervalMs = 0;
 
+    /**
+     * Camp on single spawner (no exploration)
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to stay idle
+     */
     exploreIfIdle(currentIntent) {
         const [intent] = currentIntent ?? [];
 

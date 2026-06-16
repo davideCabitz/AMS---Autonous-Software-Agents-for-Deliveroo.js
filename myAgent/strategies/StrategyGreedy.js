@@ -6,12 +6,15 @@ import { createLogger } from '../utils/logger.js';
 const log = createLogger('greedy');
 
 /**
- * Accumulate parcels still worth picking up within sensing range, then deliver
- * when nothing nearby is worthwhile. The intuition: it can be better to gather
- * several parcels and deliver them together before the reward decays, rather
- * than delivering immediately after each pickup.
+ * @class StrategyGreedy
+ * Greedy strategy: accumulate parcels within sensing range, deliver when no nearby value
  */
 export class StrategyGreedy extends Strategy {
+    /**
+     * Decide next intention
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const carrying = parcels.carriedBy(me.id);
         const bankNow  = this.bankNowValue(); // value A: deliver current load now

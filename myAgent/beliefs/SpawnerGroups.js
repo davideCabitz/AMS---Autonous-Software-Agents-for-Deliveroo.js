@@ -1,15 +1,9 @@
 /**
- * Spatial clustering of spawner tiles into groups.
- *
- * Two spawners belong to the same group when there exists a walkable path of at
- * most maxPathLen steps connecting them. Tiles separated only by a wall therefore
- * end up in distinct groups even if their Euclidean distance is ≤ maxPathLen.
- *
- * Built once at map-load time — spawner positions are static.
- *
- * @param {Array<{x:number,y:number}>} tiles      - spawner tile list
- * @param {Set<string>}               walkableSet - set of "x_y" walkable tile keys
- * @param {number}                    maxPathLen  - max walkable steps to merge two spawners (default 2)
+ * Cluster spawners into groups using union-find and path-based distance
+ * @param {Array<{x: number, y: number}>} tiles - Spawner tile positions
+ * @param {Set<string>} walkableSet - Set of "x_y" walkable tile keys
+ * @param {number} maxPathLen - Max walkable steps to merge two spawners (default 2)
+ * @returns {Array<Array<{x: number, y: number}>>} Array of spawner groups
  */
 export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
     if (tiles.length === 0) return [];
@@ -33,8 +27,11 @@ export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
 
     const DIRS = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
 
-    // BFS from tile t, expanding through walkableSet up to maxPathLen steps.
-    // Returns a Set of "x_y" keys reachable within that depth.
+    /**
+     * BFS to find tiles reachable within maxPathLen steps
+     * @param {{x: number, y: number}} t - Start tile
+     * @returns {Map<string, number>} Map of "x_y" keys to distance
+     */
     function reachableWithin(t) {
         const seen  = new Map([[`${t.x}_${t.y}`, 0]]);
         const queue = [{ x: t.x, y: t.y, d: 0 }];

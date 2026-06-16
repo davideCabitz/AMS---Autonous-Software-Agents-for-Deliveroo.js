@@ -9,14 +9,18 @@ const log = createLogger('not-too-greedy');
 const DETOUR_SPAWNER_MAX_DIST = 5;
 
 /**
- * Like greedy, but before delivering it does a one-time detour to peek at the
- * closest spawner just outside sensing range. Useful on wide maps where a second
- * spawner sits just beyond the sensing radius. `#detourDone` is per-trip state
- * (reset whenever the agent is empty-handed).
+ * @class StrategyNotTooGreedy
+ * Greedy with one-time detour to spawner just outside sensing range
  */
 export class StrategyNotTooGreedy extends Strategy {
+    /** @type {boolean} Whether detour has been made in current trip */
     #detourDone = false;
 
+    /**
+     * Decide next intention
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const carrying = parcels.carriedBy(me.id);
         const bankNow  = this.bankNowValue(); // value A: deliver current load now

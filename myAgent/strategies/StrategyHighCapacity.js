@@ -35,9 +35,8 @@ const HOP_MAX_LOSS_FRACTION = 0.25;
 const FARM_SWITCH_MARGIN = 1.3;
 
 /**
- * Strategy for high-capacity maps (CARRYING_CAPACITY > 5).
- *
- * LookAhead weighs every pickup against banking now, so it delivers with small
+ * @class StrategyHighCapacity
+ * High-capacity maps: farm spawner group, deliver in bulk
  * loads — wasted trips when the hold is large. This strategy farms instead:
  *
  *  FARM    — head to the spawner group with the most cells (ties broken by A*

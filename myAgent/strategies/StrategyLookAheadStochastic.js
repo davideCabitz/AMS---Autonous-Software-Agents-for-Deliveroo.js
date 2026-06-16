@@ -21,13 +21,8 @@ const ALPHA = 1.5;
 const BETA = 3.0;
 
 /**
- * Extends StrategyLookAhead with probabilistic group-based exploration.
- *
- * Spawner tiles are clustered into spatial groups at first use (static map
- * geometry, built once).  At each idle deliberation the agent samples a group
- * from a distribution that:
- *
- *   weight(G) = 1 / (1 + α·normDist(G) + β·recentCount(G))
+ * @class StrategyLookAheadStochastic
+ * LookAhead with probabilistic group sampling (distance + recency penalties)
  *
  * where normDist is distance to the group's nearest reachable spawner
  * normalised to [0,1] across all active groups, and recentCount is how many

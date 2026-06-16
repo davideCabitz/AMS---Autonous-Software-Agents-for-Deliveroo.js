@@ -16,18 +16,8 @@ export const RUSH_REWARD_MARGIN   = 10;
 export const RUSH_HIGH_AVG_FLOOR  = 20;
 
 /**
- * Variant of StrategyHighCapacity for abundance maps: high capacity AND fast
- * parcel spawning (generation interval ≤ 1s) AND a high population cap
- * (PARCELS_MAX ≥ 10). Parcels are so plentiful that detour/early-banking logic
- * only wastes movement — the score-maximising loop is to fill the hold
- * completely and then go straight to delivery.
- *
- * Only the two parent hooks are overridden:
- *  - the delivery cap is the real capacity, or RUSH_INFINITE_CAP (10) when the
- *    capacity is infinite;
- *  - en-route detours (parcel or speculative group visits) are disabled, so
- *    once the cap is reached the delivery run is a straight line.
- *
+ * @class StrategyHighCapacityRush
+ * Abundance maps: high capacity + fast spawn + high population → fill and bank straight
  * FARM greedy filling, the 3s patience HOP between groups, and the no-viable-hop
  * bank fallback (so a dried-up map can't deadlock the agent) are all inherited.
  */

@@ -22,32 +22,27 @@ export { StrategySimple }       from './StrategySimple.js';
 export { StrategyNotTooGreedy } from './StrategyNotTooGreedy.js';
 export { StrategyGreedy, StrategyBlind, StrategyHurry, StrategyMemory, StrategyLookAhead };
 
-// Fraction of walkable tiles that must be spawners to switch to StrategyHurry.
+/** @type {number} Fraction of walkable tiles that must be spawners to trigger StrategyHurry */
 const HURRY_SPAWNER_RATIO = 0.5;
-// Carrying capacity above which the farm-then-bank StrategyHighCapacity is used.
+
+/** @type {number} Carrying capacity above which the farm-then-bank StrategyHighCapacity is used */
 const HIGH_CAPACITY_MIN = 5;
-// Abundance gates for StrategyHighCapacityRush: parcels must spawn at least
-// this fast AND the map population cap must be at least this high.
-const RUSH_MAX_GENERATION_MS = 1000; // '1s' or 'frame'
+
+/** @type {number} Maximum parcel generation interval (ms) for StrategyHighCapacityRush */
+const RUSH_MAX_GENERATION_MS = 1000;
+
+/** @type {number} Minimum parcels-max population cap for StrategyHighCapacityRush */
 const RUSH_MIN_PARCELS_MAX   = 15;
-// Minimum spawner cells in the largest group to justify farming strategies.
-// Below these thresholds the agent can't fill its hold efficiently at one spot
-// and is better served by a hopping / stochastic approach.
-const RUSH_MIN_GROUP_SIZE = 5; // Rush: needs a dense group to fill the hold
-const HC_MIN_GROUP_SIZE   = 3; // HighCapacity: needs at least a small cluster
+
+/** @type {number} Minimum spawner tiles in the largest group to justify StrategyHighCapacityRush */
+const RUSH_MIN_GROUP_SIZE = 5;
+
+/** @type {number} Minimum spawner tiles in the largest group to justify StrategyHighCapacity */
+const HC_MIN_GROUP_SIZE   = 3;
 
 /**
- * Pick the strategy for the current game. Called once the agent is ready (so the
- * server config — and thus OBSERVATION_DISTANCE — has arrived).
- *
- * Order matters:
- *   1. Blind map (OBSERVATION_DISTANCE in -1..1)      → StrategyBlind
- *   2. Single spawner                                  → StrategySingleParcel
- *   3. Spawner-dense map (spawnerRatio > 0.5)          → StrategyHurry
- *   4. High capacity + fast spawn + parcelsMax ≥ 10    → StrategyHighCapacityRush
- *   5. High capacity (CARRYING_CAPACITY > 5)           → StrategyHighCapacity
- *   6. ≥3 spawner groups                               → StrategyLookAheadStochastic
- *   7. Default                                         → StrategyLookAhead
+ * Select the best strategy based on game map properties and server configuration
+ * @returns {import('./Strategy.js').Strategy} Instantiated strategy appropriate for the current map
  */
 export function selectStrategy() {
     const blind = OBSERVATION_DISTANCE >= -1 && OBSERVATION_DISTANCE <= 1;

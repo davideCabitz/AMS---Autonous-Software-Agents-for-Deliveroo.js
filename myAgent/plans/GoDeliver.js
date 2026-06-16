@@ -1,9 +1,25 @@
 import { PlanBase }        from './PlanBase.js';
 import { socket, me, parcels } from '../context.js';
 
+/**
+ * @class GoDeliver
+ * Navigate to delivery zone and drop all carried parcels
+ */
 export class GoDeliver extends PlanBase {
+    /**
+     * Check if delivery applies
+     * @param {string} intent - Intention type
+     * @returns {boolean}
+     */
     static isApplicableTo(intent) { return intent === 'go_deliver'; }
 
+    /**
+     * Navigate to delivery zone and drop parcels
+     * @param {string} intent - 'go_deliver'
+     * @param {number} x - Delivery zone x coordinate
+     * @param {number} y - Delivery zone y coordinate
+     * @returns {Promise<boolean>}
+     */
     async execute(intent, x, y) {
         if (this.stopped) throw ['stopped'];
         await this.subIntention(['go_to', x, y]);

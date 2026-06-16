@@ -3,13 +3,27 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('agent');
 
+/**
+ * @class IntentionRevision
+ * Base intention loop managing a queue of intentions
+ */
 export class IntentionRevision {
+    /** @type {Array<IntentionDeliberation>} Queue of intentions to execute */
     #queue = [];
 
+    /** @type {Array<IntentionDeliberation>} Intention queue (read-only access) */
     get intention_queue() { return this.#queue; }
 
+    /**
+     * Log message through module logger
+     * @param {...any} args - Log arguments
+     */
     log(...args) { log(...args); }
 
+    /**
+     * Main intention execution loop
+     * @returns {Promise<void>}
+     */
     async loop() {
         while (true) {
             await new Promise(res => setImmediate(res));
@@ -39,8 +53,18 @@ export class IntentionRevision {
         }
     }
 
+    /**
+     * Push a new intention to the queue
+     * @param {Array} _predicate - Intention predicate
+     * @returns {Promise<void>}
+     */
     async push(_predicate) {}
 
+    /**
+     * Check if an intention should continue executing
+     * @param {IntentionDeliberation} intention - Intention to validate
+     * @returns {boolean}
+     */
     #isValid(intention) {
         const [intent, , , id] = intention.predicate;
         if (intent === 'go_pick_up') {

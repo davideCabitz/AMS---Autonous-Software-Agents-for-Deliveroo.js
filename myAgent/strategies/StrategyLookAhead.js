@@ -35,19 +35,8 @@ const IDLE_MAX_WAYPOINTS     = 6;     // matches HighCapacity patrol cap
 const IDLE_PATROL_MAX_SPAWNERS = 12;
 
 /**
- * Extends StrategyMemory with a 2-step look-ahead on pickup selection.
- *
- * StrategyMemory (like StrategyGreedy) scores each parcel in isolation with
- * pickupValue(), so a high-reward distant parcel (P_greedy) wins even when a
- * decent parcel (P_near) sits a couple of tiles away, almost on the route. The
- * agent walks straight past it and never comes back.
- *
- * This strategy keeps the exact candidate pool, filters and thresholds of
- * StrategyMemory (live + remembered parcels, MULTI_PICKUP_MIN / MIN_DELIVERY_REWARD
- * gates, safe-region and reachability checks). It diverges only after the greedy
- * winner G is known: when there is room to carry two, it pairs G with the best
- * complementary parcel C and scores BOTH visit orders as full tours, all distances
- * via A* (pathLen):
+ * @class StrategyLookAhead
+ * 2-step look-ahead on pickup pairs + idle group patrol with spawner clustering
  *
  *   me → C → G → delivery     vs     me → G → C → delivery
  *   value = (R + reward_C + reward_G) − (n+2)·ρ·(d1 + d2 + d3)
