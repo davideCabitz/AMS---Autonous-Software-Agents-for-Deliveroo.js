@@ -394,11 +394,17 @@ export class StrategyLookAhead extends StrategyMemory {
         return -1;
     }
 
-    /** Nearest tile of `group` from the agent, by A* path length. */
+    /** Nearest tile of `group` from the agent, ranked by exploreCost (A* path
+     *  length plus the Case-6 competitor camping penalty) rather than plain
+     *  pathLen. This is what keeps idle multi-agent spreading alive: a group whose
+     *  nearest tile is camped by a competitor loses a near-tie, so two of our own
+     *  agents don't both sweep to the same cluster. Degrades to plain pathLen when
+     *  no agents are sensed (otherAgentDistTo → Infinity). `dist` stays Infinite
+     *  for an unreachable group, so callers' Number.isFinite filters still hold. */
     _nearestGroupTile(group) {
         let best = { tile: null, dist: Infinity };
         for (const t of group) {
-            const d = this.pathLen(me, t);
+            const d = this.exploreCost(t);
             if (d < best.dist) best = { tile: t, dist: d };
         }
         return best;
@@ -439,9 +445,11 @@ export class StrategyLookAhead extends StrategyMemory {
         if (this._idlePatrolGroupIdx !== groupIdx) {
             this._idlePatrol = this._buildIdlePatrol(this._idleGroups[groupIdx]);
             this._idlePatrolGroupIdx = groupIdx;
+            // Start at the cheapest waypoint by exploreCost, not raw pathLen, so the
+            // entry point shifts off a competitor-camped tile (Case-6 anti-camping).
             let bestI = 0, bestD = Infinity;
             for (let i = 0; i < this._idlePatrol.length; i++) {
-                const d = this.pathLen(me, this._idlePatrol[i]);
+                const d = this.exploreCost(this._idlePatrol[i]);
                 if (d < bestD) { bestD = d; bestI = i; }
             }
             this._idlePatrolIdx = bestI;

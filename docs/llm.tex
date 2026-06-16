@@ -1,116 +1,114 @@
+%% ─────────────────────────────────────────────
 \section{LLM Command Layer}
-This layer provides high-level cognitive decision-making capabilities within the Deliveroo.js multi-agent environment, operating on a foundational design principle: the Large Language Model (LLM) decides \textit{what} to do, while the Belief-Desire-Intention (BDI) architecture decides \textit{how} to do it. Rather than micro-managing step-by-step movements, the LLM emits abstract operational directives (e.g., \texttt{go\_to}, \texttt{go\_pickup}, \texttt{deliver}) which are executed by the BDI plan library via $A^*$ pathfinding or PDDL tracking. This prevents typical LLM failures such as obstacle collisions, high latency, and lack of systemic path exploration.
+The LLM command layer endows the BDI coordinator with natural-language directive processing under a strict division of labour: the model decides \textit{what} to do; the BDI plan library decides \textit{how}. The coordinator is the only agent with an LLM instance; the worker executes structured JSON orders over the chat channel.
 
-The system uses a "one brain, two bodies" topology consisting of two distinct roles:
-\begin{itemize}
-    \item \textbf{Coordinator} (\texttt{TOKEN\_COORDINATOR}): A comprehensive BDI agent augmented with the LLM command layer. It intercepts natural-language special missions from the game chat, processes them via a reasoning loop, and issues structured orders to itself and the worker.
-    \item \textbf{Worker} (\texttt{TOKEN\_WORKER}): A streamlined BDI agent integrated with a lightweight JSON-based partner-order handler. It operates without an independent LLM instance, eliminating multi-model friction and saving computational overhead while executing deterministic instructions.
-\end{itemize}
-Time-critical reactions (such as immediate halts on red lights) are processed via keyword fast-paths in the runtime, bypassing the LLM completely to guarantee sub-second reflex times.
+\subsection{Routing, Classification, and Directive Lifecycle}
+Every incoming message is passed to a one-call \texttt{classifyDirective} returning one of four labels: \texttt{STOP} (freeze both agents), \texttt{GO} (resume), \texttt{ACTION} (serialized lane), or \texttt{CHAT} (concurrent read-only lane). The classifier replaced an earlier anchored-regex approach because the same words appear in opposite contexts: the live ``RED LIGHT!'' command (\texttt{STOP}) and the mission announcement ``\textit{Let's begin a red light green light game}'' (\texttt{ACTION}, routing the LLM to call \texttt{start\_light\_mission}). \texttt{STOP}/\texttt{GO} signals only take effect after \texttt{lightMission.active} is armed, preventing stray mentions from freezing the agents. A \texttt{pending} slot (not a queue) ensures the latest directive always wins.
 
-\subsection{Architecture and LiteLLM Proxy}
-The multi-agent system is initialized through separate execution pathways using a centralized launcher:
+\texttt{runDirective} runs a flat ReAct loop (up to 30 iterations). A pre-computed planner was rejected: BDI tools abstract navigation into atomic calls (\texttt{deliver()} navigates and scores), so plan depth rarely exceeds 3--5 steps, and pre-computed plans expire the instant a parcel is claimed by a competitor. Action directives terminate via an \texttt{End} marker on the model's last action — not a \texttt{Final Answer} — preventing post-action confirmations from reaching chat. When a tool in the \texttt{MISSION\_TOOLS} set succeeds, the loop auto-emits ``Mission accepted.'' on directive end, resolving a live bug where missions were applied silently. \texttt{MAX\_TOOL\_FAILURES}~= 1 triggers abort and BDI handback after a single failed command.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    >={Stealth[round]},
+    every node/.style={font=\scriptsize, align=center},
+    % Standard gray rounded boxes
+    box/.style={draw, rounded corners, fill=black!4, text width=28mm, minimum height=10mm},
+    % Light blue process boxes
+    init/.style={draw, fill=blue!5, text width=28mm, minimum height=10mm},
+    % Plain white process boxes
+    proc/.style={draw, fill=white, text width=28mm, minimum height=10mm},
+    % Diamond decision gates
+    gate/.style={draw, diamond, aspect=1.6, inner sep=2pt, fill=white},
+    flow/.style={->, thick},
+    off/.style={->, thick, densely dashed, gray!80}
+]
+
+%% ═══════════════════════════ NODE PLACEMENT ═══════════════════════════
+
+%% ── Column 1: Left Input / Operations ──
+\node[box] at (0, 0)     (msg)  {Incoming\\message};
+\node[proc] at (2.0, -9.8) (tool) {invoke tool()\\observation};
+
+%% ── Column 2: Central Router & ReAct Loop ──
+\node[init] at (3.5, 0)    (cls)  {\texttt{classifyDirective}\\1 LLM call};
+\node[gate] at (6.8, 0)    (lbl)  {label?};
+\node[box] at (6.8, -2.2) (pen)  {\texttt{pending} slot\\latest-wins,\\abort if busy};
+\node[init] at (6.8, -4.2) (rd)   {\texttt{runDirective}\\flat ReAct\\MAX\_ITER = 30};
+\node[proc] at (6.8, -6.2) (llm)  {\texttt{callModel()}};
+\node[gate] at (6.8, -8.2) (prs)  {response?};
+\node[box] at (6.8, -10.5) (endn) {End marker\\silent / Mission\\accepted.};
+
+%% ── Column 3: Right Fast-Lane & Autonomy Gate ──
+\node[box] at (10.8, 1.0)   (sg)   {halt or resume\\both agents};
+\node[proc] at (10.8, -0.8) (chat) {\texttt{runConversation}\\read-only,\\fast-lane};
+\node[box] at (10.8, -4.2)  (act)  {\texttt{directive.active}\\true on cmd entry\\false in finally};
+\node[init] at (10.8, -6.2)  (bdi)  {BDI plan library\\A\textsuperscript{*} / PDDL};
+\node[proc] at (10.8, -9.8)  (fin)  {Final Answer\\reply to sender};
+
+
+%% ═══════════════════════════ EDGE ROUTING ═══════════════════════════
+
+%% ── Top Row Routing ──
+\draw[flow] (msg) -- (cls);
+\draw[flow] (cls) -- (lbl);
+\draw[flow] (lbl.north) |- node[pos=0.5, above]{\tiny STOP/GO} (sg.west);
+\draw[flow] (lbl.east)  |- node[pos=0.5, right, yshift=4pt]{\tiny CHAT} (chat.west);
+\draw[flow] (lbl.south) -- node[right]{\tiny ACTION} (pen.north);
+
+%% ── Main Vertical ReAct Flow ──
+\draw[flow] (pen) -- (rd);
+\draw[flow] (rd) -- (llm);
+\draw[flow] (llm) -- (prs);
+
+%% ── Response Diamond Branches ──
+\draw[flow] (prs.west) -| node[pos=0.2, above]{\tiny action} (tool.north);
+\draw[flow] (prs.south) -- node[right]{\tiny end} (endn.north);
+\draw[flow] (prs.east) -| node[pos=0.2, above]{\tiny final} (fin.north);
+
+%% ── Observation Feedback Loop (Left Side) ──
+\draw[off] (tool.west) -- ++(-0.8, 0) |- node[pos=0.75, above]{\tiny observation} (llm.west);
+
+%% ── Autonomy Gate Connections (Right Side) ──
+\draw[flow] (rd.east) -- node[above]{\tiny cmd tool} (act.west);
+\draw[flow] (act) -- (bdi);
+\draw[off] (bdi.east) -- ++(0.5, 0) |- node[pos=0.25, right]{\tiny done} (act.east);
+
+%% ── Next Directive Global Loop (Outer Boundary) ──
+\draw[off] (endn.south) -- ++(0, -0.6) -| node[pos=0.12, below]{\tiny next directive} (13.0, -2.2) -- (pen.east);
+
+\end{tikzpicture}
+\caption{Cleaned LLM layer execution flow architecture.}
+\label{fig:llmloop_clean}
+\end{figure}
+
+\subsection{Autonomy Gate: Optimistic Release}
+Initially the gate (\texttt{directive.active}) was held across the full directive, suppressing BDI through every inter-command model call. The coordinator would idle at a delivery tile for a full LLM round-trip instead of resuming parcel work. The gate is now released in each command's \texttt{finally} block:
 \begin{verbatim}
-node myAgent/launch.js coordinator     (npm run start:coordinator)
-node myAgent/launch.js worker          (npm run start:worker)
+directive.active = true;       // re-take on entry
+commandAndAwait(predicate);    // BDI executes the intention
+finally { directive.active = false; resumeAutonomy?.(); }
 \end{verbatim}
-The \texttt{launch.js} entry point configures environmental parameters (\texttt{AGENT\_ROLE} and \texttt{TOKEN}) before loading the core context, establishing isolated socket connections for both roles. 
+A follow-up command re-acquires the gate and calls \texttt{haltCurrent()} to cancel any BDI work started in the gap. \texttt{handoffRunning()} suppresses this release so the background handoff loop retains the gate beyond the directive that started it.
 
-The codebase follows a modular layout within the \texttt{myAgent/llm/} directory:
+\subsection{Tool Design: BDI–LLM Interface}
+Tools are split into three categories by their relationship to the autonomy gate. \textbf{Reasoning tools} (\texttt{calculate}, \texttt{get\_current\_time}) have no world effect. \textbf{Read tools} (\texttt{get\_my\_position}, \texttt{sense\_parcels}, \texttt{sense\_delivery\_tiles}, \texttt{path\_cost}, \texttt{get\_map\_info}) observe beliefs without touching the gate, so they run safely on the concurrent CHAT lane while a directive is active. \textbf{Command tools} push a BDI intention via \texttt{commandAndAwait} and block until the plan library completes it — the LLM supplies the intent, A*/PDDL supplies the execution path.
+
+Three tools embody distinct points on the BDI–LLM control spectrum:
 \begin{itemize}
-    \item \texttt{index.js}: Core router channeling chat messages and standard input. It prioritizes the partner protocol, followed by reflex keywords, abort signals, administration commands, and final classification.
-    \item \texttt{commandLoop.js}: Manages the dual-lane ReAct loops, driving \texttt{runDirective} (action lane) and \texttt{runConversation} (conversational lane).
-    \item \texttt{commandTools.js}: Implements the high-level tool catalogue, safeguarding navigation endpoints and filtering illegal operations.
-    \item \texttt{prompt.js}: Composes context-aware dynamic prompts containing real-time environmental topology, partner state, and evaluation metrics.
-    \item \texttt{llmClient.js}: Provides an OpenAI-compatible interface wrapper routing to the centralized university LiteLLM proxy.
-    \item \texttt{missionState.js}, \texttt{partner.js}, and \texttt{handoff.js}: Maintain synchronized persistent constraints, handle inter-agent RPC-like JSON orders, and govern the background handoff loop.
+    \item \textbf{\texttt{pickup\_next\_parcel}}: releases \texttt{directive.active} and polls until a new parcel ID appears in \texttt{parcels.carriedBy}. The BDI strategy handles trap avoidance, decay scoring, and spawner touring — capabilities no LLM polling loop can match without saturating the proxy.
+    \item \textbf{\texttt{gather\_near(x,y,D)}}: encodes all geometry in code — reachability BFS per agent, selection of two distinct walkable tiles within distance~$D$, worker parking, coordinator movement, \texttt{manualHold} on both — so the model issues one call instead of a fragile multi-step sequence prone to picking walls or occupied tiles.
+    \item \textbf{\texttt{forbid\_delivery}}: resolves a side keyword (\texttt{leftmost}/\texttt{rightmost}/\texttt{top}/\texttt{bottom}) or explicit coordinates to actual delivery tiles, then narrows \texttt{allowedDeliveryTiles} additively. It refuses if the result would leave zero deliverable tiles, preventing the agent from being stranded.
 \end{itemize}
+Live position and cargo count are injected into every observation so the model cannot act on stale carry state (e.g., issuing \texttt{deliver()} after a \texttt{put\_down()} that already emptied its hands).
 
-The network infrastructure leverages a LiteLLM proxy hosted at the University of Trento (\texttt{https://llm.bears.disi.unitn.it/v1}), accessible exclusively via a mandatory institutional VPN. The proxy client is configured with a strict 90-second request timeout to prevent system-wide blocking. To circumvent false-positives triggered by Azure's content filtration system, the client features an automated retry policy that fails over from the primary model (\texttt{gpt-4o}) to a secondary model (\texttt{llama-3.3-70b}) after two consecutive failures.
+\subsection{Mission Evaluation: Wiring Points into the BDI Cost Function}
+Deciding whether a mission is \textit{worth doing} is the crux of challenge 2: special missions score more than ordinary delivery but may not pay for the work they cost. Rather than have the LLM judge worth from English, the system pushes a mission's literal $+N$/$-N$ points onto the \textbf{same value scale the BDI cost function already maximizes}. That cost function (\texttt{Strategy.js}) ranks options in points net of travel decay --- \texttt{bankNowValue()}~$=\texttt{scale}\cdot R - n\rho d_0$ (deliver the current load now), \texttt{pickupValue()} (detour to grab one more), \texttt{bankFirstValue()} --- so a mission's reward must compete head-to-head with parcel income.
 
-\subsection{ReAct Loop: Thought, Tool, Observation, Answer}
-Directives routed to the action lane undergo a serialized execution loop managed by \texttt{runDirective}, constrained to a maximum of 30 iterations (\texttt{MAX\_ITERATIONS}). Each iteration executes a strict sequential cycle:
-\begin{enumerate}
-    \item \textbf{Thought/Abortion Check}: The system screens for manual abort signals (\texttt{directive.aborted}). If clear, it submits the rolling conversation history to the LLM.
-    \item \textbf{Tool Execution}: The model's response is parsed via regular expressions for explicit \texttt{Action:} and \texttt{Action Input:} tags. The designated tool is invoked, and its deterministic outcome is returned to the model as an \texttt{Observation:}.
-    \item \textbf{Failure Management}: The loop enforces a strict command failure budget of 3. If 3 tools return an error prefix (\texttt{Failed:}), the loop is broken and BDI control is restored.
-    \item \textbf{Answer Formulation}: Upon discovering a \texttt{Final Answer:} token, the loop completes, delivering the solution back to the directive's sender. This is essential for solving mathematical or textual quiz missions (e.g., \texttt{QuestionAnswer}), where automated scorers expect an exact, unadorned alphanumeric match.
-\end{enumerate}
+The model's first-pass screen uses \textbf{\texttt{path\_cost(x,y)}} (step count, EMA-tracked travel time, decay loss per carried parcel), comparing the stated bonus against \textit{steps}~$\times$~10 (approximate forgone income per detour step): a 700-pt bonus 8 steps away is an easy accept, a 5-pt one a decline. But the binding decision is numeric and made by the BDI, not the prompt. A \texttt{oneShotBonus} go-there reward is valued by \texttt{bonusGoalValue()}~$= \texttt{points} - n\rho d$ and diverted to only when \texttt{bonusDiversion()} finds it beats banking the current load by a margin (\texttt{net}~$-$~\texttt{bankNowValue()}~$>$~\texttt{SWITCH\_MARGIN}); this hook runs once before each \texttt{decide()}, so every strategy is bonus-aware and a negative ``bonus'' is simply never chosen --- the penalty is avoided as a \textit{byproduct of maximization}, not a hard rule.
 
-The choice of a flat ReAct structure over a traditional pre-computed planner/executor framework (such as Lab 08B) was a deliberate architectural decision. First, \texttt{gpt-4o} displays sufficient reasoning density to map out 3--6 step trajectories internally within a single trace, and the abstraction level of the BDI tools (where a single \texttt{deliver} call handles complex pathing) renders elaborate multi-level planning redundant. Second, a pre-computed plan quickly becomes invalid within highly dynamic grid environments (e.g., parcels being taken by competing agents); flat ReAct naturally adapts by ingesting fresh grid observations at every single reasoning step. Finally, this approach significantly reduces latency, minimizing LLM proxy overhead by a factor of $2\times$ to $4\times$.
+Accepted missions map to two levels. \textbf{Level-2} persistent constraints (\texttt{apply\_mission}, \texttt{forbid\_delivery}, \texttt{restrict\_exploration}) are enforced by \texttt{Strategy.js} gates wired into all strategy variants so they survive autonomy-gate transitions. Stacking is a FLOOR/CAP pair --- \texttt{requiredStackSize} (``at least $N$''), \texttt{maxStackSize} (``at most $N$''), both set for ``exactly $N$''; \texttt{deliveryMultipliers} scale a tile's delivery reward inside \texttt{bankNowValue}/\texttt{pickupValue}; \texttt{penaltyTiles} record the magnitude and fold the key into \texttt{avoidTiles} so A* never routes there. Every constraint is mirrored to the worker. \textbf{Level-3} routines (\texttt{start\_handoff}, \texttt{gather\_near}, \texttt{start\_light\_mission}) have no single tile to price, so each keeps a signed running net (\texttt{handoffNet}/\texttt{gatherNet}/\texttt{lightNet}): every fresh offer \textit{adds} its $\pm N$ to the type's total, and \texttt{armedByNet} arms the routine while net~$\geq 0$. Cumulative penalties thus stop a running routine and a later positive offer re-arms it without explicit cancel logic (e.g.\ a $-500$ then a $+1000$ offer of the same mission nets $+500$ and arms).
 
-\subsection{Tool Catalogue and Mission Constraints}
-The LLM command layer interfaces with the environment through a specialized, abstracted tool catalogue divided into distinct functional categories:
-\begin{itemize}
-    \item \textbf{Reasoning Tools}: \texttt{calculate(expr)} parses sanitised mathematical structures (vital for resolving coordinate offsets); \texttt{get\_current\_time(location)} returns temporal data.
-    \item \textbf{Read Tools}: \texttt{get\_my\_position()} exposes coordinates and score; \texttt{sense\_parcels()} evaluates visible packages; \texttt{sense\_delivery\_tiles()} and \texttt{sense\_spawn\_tiles()} filter reachable cells via $A^*$ checks (\texttt{reachableFrom}); \texttt{get\_map\_info()} extracts bounds; \texttt{path\_cost(x,y)} calculates distance, time, and parcel decay.
-    \item \textbf{Command Tools}: \texttt{go\_to(x,y)} inserts a BDI navigation target; \texttt{go\_pickup(x,y)} moves to collect high-value parcels; \texttt{deliver()} directs the agent to optimal scoring tiles; \texttt{put\_down()} drops cargo in place; \texttt{wait(seconds)} introduces an abort-aware pause; \texttt{hold()} and \texttt{release\_hold()} manage persistent cross-directive state.
-    \item \textbf{Partner \& Chat Tools}: \texttt{order\_partner\_*()} serializes remote tasks for the worker; \texttt{halt\_partner()} and \texttt{resume\_partner()} toggle worker freezing; \texttt{ask\_partner\_status()} queries remote state; \texttt{start\_handoff()} initiates Level-3 collaborative cycling; \texttt{say(message)} emits localized chat broadcasts.
-    \item \textbf{Mission Tools}: \texttt{apply\_mission(json)} updates global state parameters; \texttt{restrict\_exploration(zone)} subsets spawner targets; \texttt{dropMission(field)} or \texttt{dropMissions()} clears specific or all constraints.
-\end{itemize}
-
-Persistent Level-2 environmental missions are ingested via \texttt{apply\_mission} using a strict structured schema:
-\begin{verbatim}
-{
-  "requiredStackSize": N,       // Restricts delivery until N items are collected
-  "allowedDeliveryTiles": [...], // Excludes forbidden scoring destinations
-  "allowedSpawnerTiles": [...],  // Focuses exploration fields
-  "avoidTiles": [[x,y],...],    // Injected into A* as blocked nodes
-  "maxParcelReward": N,         // Caps package pickup value
-  "maxBundleValue": N,          // Ensures bundle values stay below thresholds
-  "description": "string"       // Human-readable identifier for tracking
-}
-\end{verbatim}
-These rules are enforced globally via specific execution gates inside \texttt{Strategy.js} (\texttt{missionPickupOk}, \texttt{stackReady}, \texttt{mustStack}, \texttt{singleParcelBundles}). This design ensures that all architectural configurations (\texttt{Greedy}, \texttt{Memory}, \texttt{LookAhead}, and \texttt{Blind}) strictly adhere to operational constraints. To ensure synchronization, all constraint applications are automatically mirrored to the worker node via the partner link protocol.
-
-\subsection{Autonomy Gate: LLM Override vs.\ BDI Deferral}
-The integration of cognitive reasoning and automated BDI reflexes is governed by a state-driven autonomy gate implemented inside \texttt{context.js} under the \texttt{directive = \{ active, aborted \}} state object. The control flow operates on an asymmetrical deferral pattern:
-\begin{itemize}
-    \item \textbf{LLM Thinking Mode}: While the coordinator is actively invoking model endpoints or processing read-only tracking tools via the conversation lane, the underlying BDI framework remains fully autonomous, allowing standard parcel gathering to proceed uninterrupted.
-    \item \textbf{LLM Override Mode}: The moment the ReAct loop executes its first operational \textbf{command tool}, \texttt{directive.active} is toggled to \texttt{true}. This state alters the behavior of \texttt{optionsGeneration} in \texttt{agent.js}, forcing the BDI plan loop to suspend self-directed option synthesis and exclusively defer execution to the LLM's explicit objectives.
-\end{itemize}
-The gate remains securely locked throughout multi-step traces to avoid environmental state drift. Upon natural completion, control is returned to the BDI system, unless the Level-3 handoff routine is executing.
-
-An absolute override is provided via the synchronous \textbf{abort mechanism}. If an explicit cancel keyword (e.g., \texttt{"abort"}, \texttt{"exit directive"}) is detected within the routing infrastructure, the system immediately executes \texttt{abortCurrent()}:
-\begin{enumerate}
-    \item Sets \texttt{directive.aborted} to true, causing the active ReAct loop to terminate instantly.
-    \item Flushes the serialized action queue and disables background routines (such as collaborative handoffs).
-    \item Triggers \texttt{haltCurrent()}, which forces the immediate rejection of pending \texttt{commandAndAwait} promises, stopping the physical agent in its tracks.
-    \item Resets \texttt{directive.active = false} and invokes \texttt{resumeAutonomy()}, returning the system to standard BDI control within the same execution frame.
-\end{enumerate}
-
-\subsection{Chat Interface and Directive Routing}
-All incoming signals from the standard input or the socket chat interface pass through a single gateway function named \texttt{route()}. The routing sequence evaluates messages deterministically:
-\begin{verbatim}
-Incoming Message
-   |
-   +--> 1. Partner JSON Link? -----> [handlePartnerMessage()] (Bypass LLM)
-   |
-   +--> 2. Anchored Red Light? ----> [trafficLight.red = true; haltCurrent()]
-   |
-   +--> 3. Anchored Green Light? --> [trafficLight.red = false; resumeAutonomy()]
-   |
-   +--> 4. Abort Keyword? ---------> [abortCurrent()] (Instant Reset)
-   |
-   +--> 5. Control Macros? ---------> [/reset or /memory handling]
-   |
-   +--> 6. Directive Classifier ---> ACTION Lane (Serialized ReAct Queue)
-                                ---> CHAT Lane (Concurrent Read-Only Lane)
-\end{verbatim}
-The red/green light regexes are strictly anchored (\texttt{/\^{}\textbackslash s*red light\textbackslash b/i}) to differentiate an administrative shout command from a text-based mission announcement text containing those words mid-sentence.
-
-The classification step separates inputs into two execution lanes:
-\begin{itemize}
-    \item \textbf{ACTION Lane}: Used for messages requiring physical manipulation of the agent or its partner. Requests are enqueued and processed sequentially via \texttt{runDirective} using the full tool suite (\texttt{buildTools}). Administrative mission offers are forced directly into this lane.
-    \item \textbf{CHAT Lane}: A fast, non-blocking conversational lane running concurrently via \texttt{runConversation}. It utilizes a restricted, read-only toolset (\texttt{buildChatTools}) that physically cannot modify agent velocity or position, allowing immediate query answering (e.g., map size, position information) without stalling active operations.
-\end{itemize}
-Contextual awareness is maintained via a rolling memory queue that tracks the last 5 directive-answer pairs per distinct sender, which can be modified via the \texttt{/reset} and \texttt{/memory} chat macros.
-
-\subsection{Fallback: BDI-Only Mode}
-The architecture is designed to degrade gracefully under degraded environmental or systemic conditions, providing a robust fallback framework:
-\begin{itemize}
-    \item \textbf{Key Unset Fallback}: If the required environment variable \texttt{LITELLM\_API\_KEY} is completely absent during setup, the coordinator skips LLM layer registration (\texttt{registerLlm}) and operates in an autonomous, BDI-only mode.
-    \item \textbf{Execution Failure Budget}: If an in-flight directive encounters 3 tool exceptions (such as navigating to a tile blocked by a dynamic obstacle or a wall, returning a \texttt{Failed:} observation), the ReAct loop cuts its losses, breaks execution, and returns control to the underlying BDI pathing algorithms.
-    \item \textbf{Promise Safeguards}: A major failure mode in asynchronous multi-agent coordination is hanging awaiters caused by dropped intentions. The system modifies \texttt{IntentionRevision.js} and \texttt{IntentionDeliberation.js} such that when an intention is discarded as stale (\texttt{"dropping stale intention"}), its underlying completion promise is explicitly settled via \texttt{cancel()}, preventing execution freezes.
-    \item \textbf{Network Disconnection Resilience}: Socket.io connections are prone to server-side drops, which can lead to inactive zombie processes. The system actively captures \texttt{'io server disconnect'} events to force immediate reconnection. Once reconnected, the worker's 30-second background hello keepalive automatically re-establishes the partner link and mirrors active mission constraints without requiring a manual restart.
-\end{itemize}
+\subsection{Cross-Agent Handoff Routine}
+\texttt{handoff.js} implements the ``one picks up, another delivers'' mission via an emergent meet-in-the-middle protocol. The coordinator (B) drives the map's chosen strategy to acquire parcels — same decay-weighted decisions as autonomous mode — until the strategy stops returning \texttt{go\_pick\_up} while loaded. B then re-steers the worker (A) toward the live geometric midpoint of their positions every navigation pass, computed over the static walkable map so narrow corridors do not pin A onto B's delivery line. B drops only on Manhattan-adjacency to A detected from live sensing (\texttt{otherAgents}), not the streamed status which lags by one tile. A delivers detached while B restarts acquisition. A deadlock-break parks the frozen worker on a delivery tile when it is the sole obstacle between B and the spawners.
+%% ─────────────────────────────────────────────
