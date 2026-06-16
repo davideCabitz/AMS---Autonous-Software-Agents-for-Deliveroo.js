@@ -22,12 +22,28 @@ export class StrategyHurry extends StrategyGreedy {
 
     /** @type {string|null} "x_y" key of current frontier target */
     #commitKey   = null;
-    #commitSince = 0;           // when we committed to it
-    #lastPos     = null;        // last observed agent tile
-    #lastMoved   = 0;           // when the agent tile last changed
-    #visited     = new Set();   // "x_y" of spawners observed this sweep (persistent)
-    #blacklist   = new Map();   // "x_y" -> expiry timestamp (only for stuck/unreachable)
 
+    /** @type {number} Timestamp when committed to the current target */
+    #commitSince = 0;
+
+    /** @type {{x: number, y: number}|null} Last observed agent tile */
+    #lastPos     = null;
+
+    /** @type {number} Timestamp when the agent tile last changed */
+    #lastMoved   = 0;
+
+    /** @type {Set<string>} "x_y" of spawners observed this sweep (persistent coverage memory) */
+    #visited     = new Set();
+
+    /** @type {Map<string, number>} "x_y" → expiry timestamp for stuck/unreachable targets */
+    #blacklist   = new Map();
+
+    /**
+     * Persistent frontier sweep: keep heading to the nearest unobserved spawner,
+     * with stall detection and a coverage-memory visited set
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
+     */
     exploreIfIdle(currentIntent) {
         // A pickup/deliver currently running takes priority — let it finish.
         if (currentIntent && (currentIntent[0] === 'go_pick_up' || currentIntent[0] === 'go_deliver')) {

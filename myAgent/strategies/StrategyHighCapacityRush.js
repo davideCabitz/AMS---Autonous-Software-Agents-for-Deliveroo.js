@@ -22,6 +22,10 @@ export const RUSH_HIGH_AVG_FLOOR  = 20;
  * bank fallback (so a dried-up map can't deadlock the agent) are all inherited.
  */
 export class StrategyHighCapacityRush extends StrategyHighCapacity {
+    /**
+     * Configure the inherited farm→bank cycle for abundance maps: a concrete
+     * delivery cap (10 when capacity is infinite) and no speculative detours
+     */
     constructor() {
         super({
             deliveryCap:       Number.isFinite(CARRYING_CAPACITY) ? CARRYING_CAPACITY : RUSH_INFINITE_CAP,
@@ -30,10 +34,13 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
         });
     }
 
-    /** Minimum reward a parcel must currently have to be worth picking up.
-     *  mustStack (LLM layer): while a requiredStackSize mission still needs
-     *  parcels, the bar is dropped — a mandated stack must be filled even
-     *  with parcels the quality filter would normally discard. */
+    /**
+     * Minimum reward a parcel must currently have to be worth picking up.
+     * mustStack (LLM layer): while a requiredStackSize mission still needs
+     * parcels, the bar is dropped — a mandated stack must be filled even
+     * with parcels the quality filter would normally discard
+     * @returns {number} Reward threshold (-Infinity while a stack must be filled)
+     */
     _rewardBar() {
         if (this.mustStack(parcels.carriedBy(me.id))) return -Infinity;
         return PARCEL_REWARD_AVG > 30
@@ -44,7 +51,9 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     /**
      * Delivery pickup policy: only parcels already within sensing range
      * (no off-route detour) that meet the quality bar. Sorted by closest first
-     * so the agent grabs the least disruptive one and keeps moving.
+     * so the agent grabs the least disruptive one and keeps moving
+     * @param {Array<Object>} eligible - Candidate parcels
+     * @returns {{p: Object, value: number, d: number}|undefined} Closest qualifying pickup, or undefined
      */
     _pickDeliveryTarget(eligible) {
         const minReward = this._rewardBar();
@@ -56,12 +65,10 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * Pickup policy: instead of greedily chasing the best-value parcel, accept
-     * ONLY parcels whose reward is ≥ (map average spawn reward − RUSH_REWARD_MARGIN)
-     * and go for the CLOSEST one (A* path length). With abundant spawns this
-     * fills the hold faster than crossing the area for marginally better
-     * parcels. Below-bar parcels are never taken — when nothing qualifies the
-     * agent keeps patrolling and the patience timer decides hop/bank.
+     * Abandon an in-flight pickup whose parcel has decayed below the reward bar,
+     * then defer to the inherited farm→bank cycle
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
      */
     decide(currentIntent) {
         // Mid-trip abandonment: if we're walking to a parcel that has decayed
@@ -76,6 +83,17 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
         return super.decide(currentIntent);
     }
 
+    /**
+     * FARM pickup policy: instead of greedily chasing the best-value parcel,
+     * accept ONLY parcels whose reward is ≥ (map average spawn reward −
+     * RUSH_REWARD_MARGIN) and go for the CLOSEST one (A* path length). With
+     * abundant spawns this fills the hold faster than crossing the area for
+     * marginally better parcels. Below-bar parcels are never taken — when
+     * nothing qualifies the agent keeps patrolling and the patience timer
+     * decides hop/bank
+     * @param {Array<Object>} eligible - Candidate parcels
+     * @returns {{p: Object, value: number, d: number}|undefined} Closest good parcel, or undefined
+     */
     _pickFarmTarget(eligible) {
         const minReward = this._rewardBar();
         const good = eligible
@@ -90,8 +108,12 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
         return undefined;
     }
 
-    /** Below-bar parcels don't reset the dry-spell timer either — a group
-     *  spawning only trash must still trigger a hop after PATIENCE_MS. */
+    /**
+     * Below-bar parcels don't reset the dry-spell timer either — a group
+     * spawning only trash must still trigger a hop after PATIENCE_MS
+     * @param {Object} parcel - Parcel sighted
+     * @returns {boolean} True if the parcel meets the reward bar
+     */
     _countsForPatience(parcel) {
         return parcel.reward >= this._rewardBar();
     }

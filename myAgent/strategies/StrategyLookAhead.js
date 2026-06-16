@@ -54,28 +54,41 @@ const IDLE_PATROL_MAX_SPAWNERS = 12;
  * parcels.enableMemory() before running, exactly like StrategyMemory.
  */
 export class StrategyLookAhead extends StrategyMemory {
-    /** Heartbeat so the idle patience timer fires even with no sensing event.
+    /** @type {number} Heartbeat so the idle patience timer fires even with no sensing event.
      *  HighCapacity also sets 500; a subclass field initializer runs after this
-     *  one and wins, so its value is preserved. */
+     *  one and wins, so its value is preserved */
     tickIntervalMs = 500;
 
-    /** @type {Array<Array<{x:number,y:number}>>|null} lazily built spawner groups. */
+    /** @type {Array<Array<{x: number, y: number}>>|null} Lazily built spawner groups */
     _idleGroups = null;
-    /** Signature of allowedSpawnerTiles the groups were built under. */
+
+    /** @type {string|null} Signature of allowedSpawnerTiles the groups were built under */
     _idleGroupsSig = null;
-    /** Index of the group currently being idle-patrolled (sparse path). */
+
+    /** @type {number|null} Index of the group currently being idle-patrolled (sparse path) */
     _idlePatrolGroupIdx = null;
-    /** Waypoint loop for the current idle group. */
+
+    /** @type {Array<{x: number, y: number}>} Waypoint loop for the current idle group */
     _idlePatrol = [];
-    /** Index of the waypoint being walked to. */
+
+    /** @type {number} Index of the waypoint being walked to */
     _idlePatrolIdx = 0;
-    /** Timestamp the patience window started (reset on group arrival + pickup). */
+
+    /** @type {number} Timestamp the patience window started (reset on group arrival + pickup) */
     _idlePatrolTs = 0;
-    /** Tiles of a just-abandoned group, excluded from the next explore selection. */
+
+    /** @type {Set<string>|null} Tiles of a just-abandoned group, excluded from the next explore selection */
     _idleLeftGroupKeys = null;
-    /** Dense path: group indices already visited this idle cycle. */
+
+    /** @type {Set<number>} Dense path: group indices already visited this idle cycle */
     _idleVisitedGroups = new Set();
 
+    /**
+     * Decide next intention using the 2-step pickup look-ahead over the merged
+     * live + remembered parcel pool
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const carrying   = parcels.carriedBy(me.id);
         const bankNow    = this.bankNowValue();
@@ -256,7 +269,10 @@ export class StrategyLookAhead extends StrategyMemory {
      * StrategyMemory.#shouldKeepWithMemory (private there, so not inheritable),
      * with one look-ahead twist: when the chained plan's SECOND stop is the
      * current target, switching to the near parcel is a re-ordering of the same
-     * trip, not a change of destination — allow it without the SWITCH_MARGIN.
+     * trip, not a change of destination — allow it without the SWITCH_MARGIN
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @param {{p: Object, value: number, via?: string, second?: Object}|undefined} choice - Candidate pickup
+     * @returns {boolean} True to keep the current pickup target
      */
     #shouldKeep(currentIntent, choice) {
         if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
@@ -269,6 +285,12 @@ export class StrategyLookAhead extends StrategyMemory {
         return choice.value - this.pickupValue(cur) < SWITCH_MARGIN;
     }
 
+    /**
+     * Emit a diagnostic log line for the chosen pickup (chained or direct)
+     * @param {string} label - Log label (e.g. 'go_pick_up', 'multi-pickup')
+     * @param {{p: Object, value: number, via?: string, second?: Object, legs?: Object}} choice - Chosen pickup
+     * @returns {void}
+     */
     #logChoice(label, choice) {
         if (choice.via === 'lookahead') {
             const { d1, d2, d3 } = choice.legs;
@@ -297,7 +319,9 @@ export class StrategyLookAhead extends StrategyMemory {
      *     count) is deliberate: a row of adjacent spawners merges into one group, so a
      *     group-count gate would wrongly treat a parcel-rich map as sparse and camp.
      * Falls back to the base ranking (super.exploreIfIdle) whenever there is no
-     * group to act on, so HighCapacity's degenerate fallbacks are unaffected.
+     * group to act on, so HighCapacity's degenerate fallbacks are unaffected
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
      */
     exploreIfIdle(currentIntent) {
         this._initIdleGroups();
@@ -353,8 +377,11 @@ export class StrategyLookAhead extends StrategyMemory {
         return this._exploreOutsideLeftGroup(currentIntent);
     }
 
-    /** Lazily build (and cache) spawner groups for idle patrol, rebuilding when the
-     *  allowedSpawnerTiles constraint changes. Mirrors HighCapacity#initGroups. */
+    /**
+     * Lazily build (and cache) spawner groups for idle patrol, rebuilding when the
+     * allowedSpawnerTiles constraint changes. Mirrors HighCapacity#initGroups
+     * @returns {void}
+     */
     _initIdleGroups() {
         const sig = missionConstraints.allowedSpawnerTiles?.size > 0
             ? [...missionConstraints.allowedSpawnerTiles].sort().join('|') : '';
@@ -372,8 +399,11 @@ export class StrategyLookAhead extends StrategyMemory {
         patrolLog(`built ${this._idleGroups.length} group(s) from ${pool.length} spawner tiles`);
     }
 
-    /** Index of the reachable group with a tile within OBSERVATION_DISTANCE of the
-     *  agent (the group it is "idle on"), or -1. Mirrors HighCapacity#isAtFarm. */
+    /**
+     * Index of the reachable group with a tile within OBSERVATION_DISTANCE of the
+     * agent (the group it is "idle on"), or -1. Mirrors HighCapacity#isAtFarm
+     * @returns {number} Group index, or -1 if not idle on any group
+     */
     _idleGroupHere() {
         if (!this._idleGroups) return -1;
         for (let i = 0; i < this._idleGroups.length; i++) {
@@ -389,7 +419,10 @@ export class StrategyLookAhead extends StrategyMemory {
      *  nearest tile is camped by a competitor loses a near-tie, so two of our own
      *  agents don't both sweep to the same cluster. Degrades to plain pathLen when
      *  no agents are sensed (otherAgentDistTo → Infinity). `dist` stays Infinite
-     *  for an unreachable group, so callers' Number.isFinite filters still hold. */
+     *  for an unreachable group, so callers' Number.isFinite filters still hold
+     * @param {Array<{x: number, y: number}>} group - Spawner group
+     * @returns {{tile: {x: number, y: number}|null, dist: number}} Nearest tile and its explore cost
+     */
     _nearestGroupTile(group) {
         let best = { tile: null, dist: Infinity };
         for (const t of group) {
@@ -399,9 +432,13 @@ export class StrategyLookAhead extends StrategyMemory {
         return best;
     }
 
-    /** The group tile nearest the group's centroid. The raw centroid can land on a
-     *  wall between spawners, so snap to the closest actual (walkable) group tile —
-     *  guarantees the agent crosses the MIDDLE of the cluster, not just its edge. */
+    /**
+     * The group tile nearest the group's centroid. The raw centroid can land on a
+     * wall between spawners, so snap to the closest actual (walkable) group tile —
+     * guarantees the agent crosses the MIDDLE of the cluster, not just its edge
+     * @param {Array<{x: number, y: number}>} group - Spawner group
+     * @returns {{x: number, y: number}} Group tile nearest the centroid
+     */
     _groupCentroidTile(group) {
         const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
         const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
@@ -413,7 +450,11 @@ export class StrategyLookAhead extends StrategyMemory {
         return best;
     }
 
-    /** Centroid-angle clockwise waypoint loop. Port of HighCapacity#buildPatrol. */
+    /**
+     * Centroid-angle clockwise waypoint loop. Port of HighCapacity#buildPatrol
+     * @param {Array<{x: number, y: number}>} group - Spawner group
+     * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
+     */
     _buildIdlePatrol(group) {
         if (group.length === 1) return [group[0]];
         if (group.length === 2) return [...group];
@@ -427,9 +468,14 @@ export class StrategyLookAhead extends StrategyMemory {
             (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
     }
 
-    /** Issue the next patrol waypoint for groupIdx (rebuilds patrol on group change,
-     *  starts at the nearest waypoint, advances on arrival). Returns ['go_explore',
-     *  x,y] or null to keep walking. Port of the #goFarm patrol body. */
+    /**
+     * Issue the next patrol waypoint for a group (rebuilds patrol on group change,
+     * starts at the nearest waypoint, advances on arrival). Port of the #goFarm
+     * patrol body
+     * @param {number} groupIdx - Index of the group to patrol
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} ['go_explore', x, y], or null to keep walking / nothing reachable
+     */
     _idlePatrolStep(groupIdx, currentIntent) {
         if (this._idlePatrolGroupIdx !== groupIdx) {
             this._idlePatrol = this._buildIdlePatrol(this._idleGroups[groupIdx]);
@@ -463,9 +509,12 @@ export class StrategyLookAhead extends StrategyMemory {
         return null;   // nothing reachable in this group
     }
 
-    /** Dense path: head to the centroid tile of the nearest unvisited group. When
-     *  all groups are visited, clear the set and restart the sweep. Returns null
-     *  while still walking toward the chosen centroid. */
+    /**
+     * Dense path: head to the centroid tile of the nearest unvisited group. When
+     * all groups are visited, clear the set and restart the sweep
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} ['go_explore', x, y], or null while walking / nothing to do
+     */
     _nextUnvisitedGroup(currentIntent) {
         let cands = this._idleGroups
             .map((g, idx) => ({ idx, ...this._nearestGroupTile(g) }))
@@ -495,8 +544,12 @@ export class StrategyLookAhead extends StrategyMemory {
         return ['go_explore', centroid.x, centroid.y];
     }
 
-    /** Call super.exploreIfIdle but exclude a just-abandoned group's tiles so the
-     *  next target is the next-nearest spawner OUTSIDE that group. */
+    /**
+     * Call super.exploreIfIdle but exclude a just-abandoned group's tiles so the
+     * next target is the next-nearest spawner OUTSIDE that group
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Exploration predicate, or null to stay idle
+     */
     _exploreOutsideLeftGroup(currentIntent) {
         const left = this._idleLeftGroupKeys;
         if (!left || left.size === 0) return super.exploreIfIdle(currentIntent);
