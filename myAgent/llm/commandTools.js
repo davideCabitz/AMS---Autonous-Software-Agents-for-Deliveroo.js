@@ -4,28 +4,23 @@ import { applyMissionConfig, dropMissionField, dropAllMissions, armedByNet } fro
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
 import { startHandoff, stopHandoff } from './handoff.js';
 
-/*
- * Tool catalogue for the LLM command layer. Every tool returns a STRING
- * observation (including failures) so the ReAct loop can reason about the result.
- *
- * Three kinds of tools:
- *  - reasoning (pure): calculate, get_current_time — no world effect.
- *  - read: get_my_position, sense_parcels, sense_delivery_tiles — read beliefs.
- *  - command: go_to, go_pickup, deliver — push a BDI intention and AWAIT its
- *    completion (the BDI plan library does the actual A-star/PDDL navigation). There
- *    is deliberately NO raw move/pick_up actuator: the LLM commands, BDI executes.
- *  - chat: say — reply to the directive sender.
+/**
+ * LLM command tool catalogue
+ * Every tool returns a STRING observation for ReAct loop reasoning
+ * Tool categories: Reasoning (calculate, time), Read (position, parcels), Command (go_to/pickup/deliver), Chat (say)
  */
 
-// Safety net: a wedged navigation must never block the agent for long. The agent
-// is only "gated" (BDI paused) while a command actually runs, so keep this short.
+/** @type {number} Max milliseconds a single command may run before timing out */
 const COMMAND_TIMEOUT_MS = 30_000;
-// Cap on the wait tool so a bad number can't freeze the agent indefinitely.
+
+/** @type {number} Max seconds the wait tool will hold position (prevents indefinite freeze) */
 const MAX_WAIT_SECONDS = 30;
 
-// ---- reasoning tools (copied from llmAgent/tools.js; that module must NOT be
-// imported because it opens a second socket via its own context.js) ------------
-
+/**
+ * Evaluate a math expression and return the result as a string
+ * @param {string} expression - Math expression using +, -, *, /, () — may be comma-separated
+ * @returns {string} Numeric result(s) or an error message
+ */
 function calculate(expression) {
     // Strip surrounding quotes, then allow several comma-separated expressions in
     // one call (e.g. "(0+18)/2, (0+19)/2" for a centre tile -> "9, 9.5").
@@ -48,6 +43,11 @@ function calculate(expression) {
     return results.join(', ');
 }
 
+/**
+ * Return current local time in Rome as a JSON string
+ * @param {string} location - Location label for the response (cosmetic only)
+ * @returns {string} JSON with location, timezone, and time fields
+ */
 function get_current_time(location) {
     const where = String(location ?? 'Rome').trim() || 'Rome';
     const timezone = 'Europe/Rome';
@@ -59,7 +59,11 @@ function get_current_time(location) {
 
 // ---- helpers ------------------------------------------------------------------
 
-/** Parse "5,3" / "(5, 3)" / "x=5 y=3" / "5 3" into {x,y} (numbers) or {x:null}. */
+/**
+ * Parse coordinate input in various formats into {x, y} numbers
+ * @param {string} input - Input string, e.g. "5,3" / "(5, 3)" / "x=5 y=3" / "5 3"
+ * @returns {{x: number|null, y: number|null}} Parsed coordinates, or nulls if parsing fails
+ */
 function parseXY(input) {
     const nums = String(input ?? '').match(/-?\d+/g);
     if (!nums || nums.length < 2) return { x: null, y: null };
@@ -67,34 +71,42 @@ function parseXY(input) {
 }
 
 /**
- * Parse an OPTIONAL signed reward from a Level-3 mission's input — only an explicit
- * "pts=N" / "points=N" token (N may be negative). A bare coordinate number is NOT a
- * reward, so "x,y,D" never accidentally reads its geometry as points. Returns the
- * number, or null when no reward token is present (⇒ neutral, contributes 0).
+ * Parse an optional signed reward token from Level-3 mission input
+ * @param {string} input - Raw tool input string, may contain "pts=N" or "points=N"
+ * @returns {number|null} Parsed reward value, or null when no reward token is present
  */
 function parseRewardToken(input) {
     const m = String(input ?? '').match(/(?:pts|points)\s*=\s*(-?\d+)/i);
     return m ? parseInt(m[1], 10) : null;
 }
 
-/** A known free parcel sitting on (x,y), highest reward first; null if none. */
+/**
+ * Find the highest-reward free parcel sitting on tile (x, y)
+ * @param {number} x - Tile x coordinate
+ * @param {number} y - Tile y coordinate
+ * @returns {string|null} Parcel ID or null if no free parcel is at that tile
+ */
 function resolveParcelId(x, y) {
     const here = parcels.free().filter(p => Math.round(p.x) === x && Math.round(p.y) === y);
     if (!here.length) return null;
     return here.sort((a, b) => b.reward - a.reward)[0].id;
 }
 
-/** Keep only tiles the agent can actually reach from its current position, so
- *  "leftmost/rightmost/nearest X" directives never resolve to a walled-off tile.
- *  Falls back to the full list if nothing is reachable (so a tool never lies by
- *  returning empty when tiles do exist). */
+/**
+ * Filter a tile list to only those the agent can currently A*-reach
+ * @param {Array<{x: number, y: number}>} tiles - Full tile list
+ * @returns {Array<{x: number, y: number}>} Reachable subset, or original list when nothing is reachable
+ */
 function onlyReachable(tiles) {
     const reach = reachableFrom(me);
     const filtered = tiles.filter(t => reach.has(`${t.x}_${t.y}`));
     return filtered.length ? filtered : tiles;
 }
 
-/** Nearest delivery tile to the agent (Manhattan), or null if none known. */
+/**
+ * Find the delivery tile nearest to the agent by Manhattan distance
+ * @returns {{x: number, y: number}|null} Nearest delivery tile, or null if none known
+ */
 function nearestDelivery() {
     if (!deliveryTiles.length) return null;
     return deliveryTiles
@@ -102,8 +114,11 @@ function nearestDelivery() {
         .sort((a, b) => a.d - b.d)[0].t;
 }
 
-/** Sleep for `ms` milliseconds, but resolve early if directive.aborted is set.
- *  Returns how many ms actually elapsed. */
+/**
+ * Sleep for ms milliseconds, resolving early if directive.aborted is set
+ * @param {number} ms - Maximum sleep duration in milliseconds
+ * @returns {Promise<number>} Actual elapsed time in milliseconds
+ */
 function abortableDelay(ms) {
     return new Promise(resolve => {
         const start = Date.now();
@@ -115,6 +130,13 @@ function abortableDelay(ms) {
     });
 }
 
+/**
+ * Race a promise against a timeout, rejecting with a tagged error on expiry
+ * @param {Promise} promise - Promise to race
+ * @param {number} ms - Timeout in milliseconds
+ * @param {string} tag - Tag included in the timeout rejection value
+ * @returns {Promise} Resolves with promise result or rejects with ['timeout', tag]
+ */
 function withTimeout(promise, ms, tag) {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -123,10 +145,13 @@ function withTimeout(promise, ms, tag) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** emitSay that can neither throw nor hang. The SDK promise resolves only when
- *  the server acks; a disconnected recipient can leave it pending FOREVER, which
- *  wedged the whole serialized directive lane. The chat is best-effort — bound
- *  it and move on. @returns {Promise<boolean>} delivered (ack within timeout) */
+/**
+ * Send a chat message that cannot throw or hang (best-effort, bounded by timeout)
+ * @param {string} target - Recipient socket ID
+ * @param {string} text - Message text to send
+ * @param {number} [ms] - Max wait time for server ack in milliseconds
+ * @returns {Promise<boolean>} True if the ack arrived within the timeout
+ */
 async function safeSay(target, text, ms = 5_000) {
     if (!target) return false;
     try {
@@ -137,7 +162,11 @@ async function safeSay(target, text, ms = 5_000) {
     }
 }
 
-/** Map an intention rejection tag to a readable observation. */
+/**
+ * Map an intention rejection tag to a human-readable failure observation
+ * @param {Array|string} err - Rejection value from commandAndAwait
+ * @returns {string} Readable failure string prefixed with "Failed:"
+ */
 function describeFailure(err) {
     const tag = Array.isArray(err) ? err[0] : err;
     switch (tag) {
@@ -156,9 +185,10 @@ function describeFailure(err) {
 
 // ---- tool catalogue -----------------------------------------------------------
 
-/* Reasoning + read tools — safe to expose anywhere because they have NO world
- * effect. Shared by the action toolset (buildTools) and the read-only
- * conversational toolset (buildChatTools). */
+/**
+ * Build the read-only tool subset safe to expose in any context (no world effects)
+ * @returns {Object} Map of tool name to async function
+ */
 function readTools() {
     return {
         // reasoning
@@ -211,9 +241,10 @@ function readTools() {
     };
 }
 
-/** Read-only toolset for the conversational fast-lane: observe + answer, but
- *  NEVER move the agent or touch the autonomy gate, so it is safe to run
- *  concurrently with an action directive. */
+/**
+ * Build the read-only toolset for the conversational fast-lane
+ * @returns {Object} Map of tool name to async function (no movement or gate changes)
+ */
 export function buildChatTools() {
     return {
         ...readTools(),
@@ -224,6 +255,13 @@ export function buildChatTools() {
     };
 }
 
+/**
+ * Build the full action toolset for the directive execution lane
+ * @param {Object} myAgent - The IntentionRevisionReplace instance
+ * @param {string|null} replySender - Chat ID of the directive sender (for say())
+ * @param {Function} [resumeAutonomy] - Called when the gate is released after each command
+ * @returns {Object} Map of tool name to async function
+ */
 export function buildTools(myAgent, replySender, resumeAutonomy) {
     // Run a BDI command. The gate is released OPTIMISTICALLY the instant each
     // command finishes (see finally) rather than being held through the whole

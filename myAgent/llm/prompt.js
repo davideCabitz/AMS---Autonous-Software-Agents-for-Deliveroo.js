@@ -1,16 +1,11 @@
 import { me, parcels, deliveryTiles, missionConstraints, directive, manualHold, trafficLight } from '../context.js';
 import { partner } from './partner.js';
 
-/*
- * Command-interpreter prompt for the LLM layer.
- *
- * Unlike the standalone llmAgent (which drove the player tile-by-tile), this LLM
- * COMMANDS the BDI agent: go_to/go_pickup/deliver each push a high-level intention
- * that the BDI plan library (A-star/PDDL) executes and returns from. The LLM never
- * moves one tile at a time. The prompt fuses the directive with a live belief
- * snapshot and the strict ReAct output contract the runtime parser expects.
+/**
+ * Build the system prompt for the LLM command interpreter
+ * @param {string} objective - Directive text to execute
+ * @returns {string} Fully assembled system prompt string
  */
-
 export function buildSystemPrompt(objective) {
     const free    = parcels.free();
     const carried = parcels.carriedBy(me.id);
@@ -351,11 +346,10 @@ export function buildSystemPrompt(objective) {
     ].join('\n');
 }
 
-/*
- * Conversational prompt for the fast-lane (myAgent/llm/commandLoop runConversation).
- * This handles chat messages that need only a verbal reply (questions, greetings,
- * status). It runs CONCURRENTLY with any action the agent is doing, so it must
- * NEVER move the agent — only read tools are available. The answer is the reply.
+/**
+ * Build the conversational chat prompt for read-only concurrent answering
+ * @param {string} message - User chat message to respond to
+ * @returns {string} Fully assembled chat prompt string
  */
 export function buildChatPrompt(message) {
     const ps = partner.lastStatus;

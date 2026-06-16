@@ -45,11 +45,11 @@ const SEP_WALL_FRAC = 0.7;
 const MIN_TOOTH_WALK = 0.85;
 
 /**
- * @param {Array<{x:number,y:number}>} spawnerTiles
- * @param {Array<{x:number,y:number}>} walkableTiles
- * @param {Array<Array<{x:number,y:number}>>} groups  spawner groups (accepted for
- *        call-site convenience; not used by the histogram tests).
- * @returns {{isComb:boolean, axis:('horizontal'|'vertical'|'both'|null), reason:string}}
+ * Detect comb/hallway topology from spawner and walkable tile distributions
+ * @param {Array<{x: number, y: number}>} spawnerTiles - Spawner positions
+ * @param {Array<{x: number, y: number}>} walkableTiles - Walkable tile positions
+ * @param {Array<Array<{x: number, y: number}>>|null} groups - Spawner groups (unused, for convenience)
+ * @returns {{isComb: boolean, axis: ('horizontal'|'vertical'|'both'|null), reason: string}} Comb detection result
  */
 export function detectCombTopology(spawnerTiles, walkableTiles, groups = null) {
     if (!spawnerTiles || spawnerTiles.length < MIN_LINES)
@@ -79,11 +79,12 @@ export function detectCombTopology(spawnerTiles, walkableTiles, groups = null) {
 }
 
 /**
- * Test for teeth aligned on `toothAxis` ('x' → vertical teeth in columns,
- * 'y' → horizontal teeth in rows). Between consecutive tooth-lines there must be
- * a wall band — that periodic wall separation is the comb signature.
- *
- * @returns {{pass:boolean, reason:string}}
+ * Test if spawners form comb pattern along a given axis
+ * @param {Array<{x: number, y: number}>} spawnerTiles - Spawner positions
+ * @param {Set<string>} walkableSet - Set of "x_y" walkable tile keys
+ * @param {{minX: number, maxX: number, minY: number, maxY: number}} bounds - Map bounds
+ * @param {'x'|'y'} toothAxis - Axis for tooth lines ('x' for vertical, 'y' for horizontal)
+ * @returns {{pass: boolean, reason: string}} Whether pattern matches comb signature
  */
 function testAxis(spawnerTiles, walkableSet, bounds, toothAxis) {
     const crossAxis = toothAxis === 'x' ? 'y' : 'x';

@@ -34,15 +34,17 @@ const ACTION_DIR = {
 const MAX_REPLANS = 6;
 
 /**
- * Reach a target tile, pushing crates out of the way when (and only when) a crate
- * actually blocks the route. A single solver call returns the full macro-plan
- * (every push + move needed); we only contact the solver again if a new, unforeseen
- * crate blocks a step mid-execution.
+ * @class PddlMove
+ * Navigate to target using PDDL crate-pushing when crates block the route
  */
 export class PddlMove extends PlanBase {
-    // Only engage the online solver when a crate genuinely blocks the route:
-    // - if a crate-free path exists, return false → AStarMove handles it cheaply
-    // - if crates block all paths but a topological path exists → true → plan pushes
+    /**
+     * Check if PDDL planning is needed (crates block all paths)
+     * @param {string} intent - Intention type
+     * @param {number} x - Target x coordinate
+     * @param {number} y - Target y coordinate
+     * @returns {boolean}
+     */
     static isApplicableTo(intent, x, y) {
         if (intent !== 'go_to' || !mapHasCrates || crateTiles.length === 0) return false;
         const crateKeys = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
@@ -50,6 +52,13 @@ export class PddlMove extends PlanBase {
         return !!findRoute(me, { x, y });                     // reachable if crates move
     }
 
+    /**
+     * Execute PDDL crate-pushing plan
+     * @param {string} intent - 'go_to'
+     * @param {number} x - Target x coordinate
+     * @param {number} y - Target y coordinate
+     * @returns {Promise<boolean>}
+     */
     async execute(intent, x, y) {
         if (this.stopped) throw ['stopped'];
         if (!beliefset || beliefset.objects.length === 0) throw ['pddl-beliefset-empty'];
@@ -93,7 +102,11 @@ export class PddlMove extends PlanBase {
         throw ['pddl-too-many-replans'];
     }
 
-    /** Run the plan step by step. Returns true if a step was blocked (replan needed). */
+    /**
+     * Execute plan steps, detecting mid-plan obstacles
+     * @param {Array<Object>} plan - PDDL plan actions
+     * @returns {Promise<boolean>} True if a step was blocked (replan needed)
+     */
     async #runPlan(plan) {
         const DIR_DELTA = { right: [1,0], left: [-1,0], up: [0,1], down: [0,-1] };
         const ck = (x, y) => `${Math.round(x)}_${Math.round(y)}`;
@@ -189,7 +202,11 @@ export class PddlMove extends PlanBase {
         return false;
     }
 
-    /** Encode the current world (agent, crates, free/pushable tiles) as a PDDL problem. */
+    /**
+     * Build PDDL problem from current world state
+     * @param {string} goalTile - PDDL tile name of goal
+     * @returns {string} PDDL problem definition
+     */
     #buildProblem(goalTile) {
         const myTile       = pTile(me.x, me.y);
         const crateSet     = new Set(crateTiles.map(c => rawKey(c.x, c.y)));

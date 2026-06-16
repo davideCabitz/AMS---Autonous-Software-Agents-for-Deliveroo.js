@@ -3,6 +3,7 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('llm:partner');
 
+<<<<<<< HEAD
 const workerId = process.env.WORKER_ID ?? null;
 
 /*
@@ -21,15 +22,34 @@ const workerId = process.env.WORKER_ID ?? null;
  *
  * Orders are await-able: sendOrder resolves with the worker's `detail` string
  * (success or failure), which the ReAct loop uses directly as the observation.
+=======
+/**
+ * @typedef { {id: string|null, name: string|null, lastStatus: Object|null} } PartnerState
+>>>>>>> 3aa6dd90928bcd9bcdfc0853f58ebbfe3e391d12
  */
 
+/**
+ * Coordinator-side partner agent link (JSON protocol over chat channel)
+ * Commands worker with orders, constraints, halt/resume; receives results and status updates
+ */
+
+/** @type {PartnerState} Live state of the connected partner agent */
 export const partner = { id: null, name: null, lastStatus: null };
 
+/** @type {number} Counter for unique order IDs */
 let nextOrderId = 1;
-// orderId -> { resolve, timer }; one extra well-known key for the status request.
+
+/** @type {Map<string, {resolve: Function, timer: any}>} Pending orders awaiting result callbacks */
 const pending = new Map();
+
+/** @type {string} Well-known key used to track in-flight status requests */
 const STATUS_KEY = '__status__';
 
+/**
+ * Send a JSON payload to the partner over the chat channel (fire-and-forget)
+ * @param {Object} payload - JSON-serializable message object
+ * @returns {boolean} False if no partner is connected
+ */
 function sendJson(payload) {
     if (!partner.id) return false;
     socket.emitSay(partner.id, JSON.stringify(payload))
@@ -38,9 +58,10 @@ function sendJson(payload) {
 }
 
 /**
- * Handle a partner-protocol JSON message addressed to the coordinator.
- * Called from the route() JSON intercept in llm/index.js.
- * @returns {boolean} true when the message was a partner message and was consumed
+ * Handle a partner-protocol JSON message addressed to the coordinator
+ * @param {Object} msg - Parsed JSON message with a type field
+ * @param {string} sender - Socket ID of the sender
+ * @returns {boolean} True when the message was a recognized partner message and was consumed
  */
 export function handlePartnerMessage(msg, sender) {
     switch (msg.type) {
@@ -85,7 +106,13 @@ export function handlePartnerMessage(msg, sender) {
     }
 }
 
-/** Await a keyed reply, resolving with a readable string on timeout. */
+/**
+ * Await a keyed reply, resolving with a readable timeout message if the partner does not respond
+ * @param {string} key - Map key to register the pending promise under
+ * @param {number} timeoutMs - Milliseconds before timing out
+ * @param {string} timeoutMsg - Message to resolve with on timeout
+ * @returns {Promise<string>} Partner reply or timeout message
+ */
 function awaitReply(key, timeoutMs, timeoutMsg) {
     return new Promise(resolve => {
         const timer = setTimeout(() => {
@@ -97,9 +124,10 @@ function awaitReply(key, timeoutMs, timeoutMsg) {
 }
 
 /**
- * Send a BDI predicate to the worker and await its result observation.
- * @param {Array} predicate e.g. ['go_to', 5, 3] — or the special ['putdown']
- * @returns {Promise<string>} the worker's detail string (success or failure)
+ * Send a BDI predicate to the worker and await its result observation
+ * @param {Array} predicate - Predicate to execute, e.g. ['go_to', 5, 3] or ['putdown']
+ * @param {number} [timeoutMs] - Max wait time in milliseconds
+ * @returns {Promise<string>} Worker's result detail string (success or failure)
  */
 export async function sendOrder(predicate, timeoutMs = 45_000) {
     if (!partner.id) return 'No partner connected yet.';
@@ -113,14 +141,20 @@ export async function sendOrder(predicate, timeoutMs = 45_000) {
         `Failed: partner did not report back on '${predicate.join(' ')}' within ${timeoutMs / 1000}s.`);
 }
 
-/** Freeze the worker: halts its current plan and gates its autonomy. */
+/**
+ * Freeze the worker by halting its current plan and gating its autonomy
+ * @returns {string} Confirmation message or no-partner notice
+ */
 export function sendHalt() {
     return sendJson({ type: 'halt' })
         ? 'Partner halted (frozen until resume_partner).'
         : 'No partner connected yet.';
 }
 
-/** Unfreeze the worker: clears the gate and re-triggers its deliberation. */
+/**
+ * Unfreeze the worker and re-trigger its deliberation
+ * @returns {string} Confirmation message or no-partner notice
+ */
 export function sendResume() {
     return sendJson({ type: 'resume' })
         ? 'Partner resumed autonomous work.'
@@ -128,10 +162,9 @@ export function sendResume() {
 }
 
 /**
- * Mirror a mission-constraint mutation to the worker (fire-and-forget — the
- * coordinator already applied it locally and reported to the chat).
- * @param {'apply'|'drop'|'dropAll'} op
- * @param {object|string} [payload] config object for apply, field name for drop
+ * Mirror a mission-constraint mutation to the worker (fire-and-forget)
+ * @param {'apply'|'drop'|'dropAll'} op - Operation type
+ * @param {Object|string} [payload] - Config object for apply, field name for drop
  */
 export function sendConstraint(op, payload) {
     if (!partner.id) return;
@@ -140,7 +173,11 @@ export function sendConstraint(op, payload) {
     else                       sendJson({ type: 'constraint', op: 'dropAll' });
 }
 
-/** Ask the worker for a live status snapshot (position, carrying, frozen). */
+/**
+ * Request a live status snapshot from the worker (position, carrying, frozen state)
+ * @param {number} [timeoutMs] - Max wait time in milliseconds
+ * @returns {Promise<string>} JSON status string or timeout/no-partner message
+ */
 export async function requestStatus(timeoutMs = 5_000) {
     if (!partner.id) return 'No partner connected yet.';
     sendJson({ type: 'status_req' });

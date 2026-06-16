@@ -6,22 +6,15 @@ import { createLogger } from '../utils/logger.js';
 const log = createLogger('memory');
 
 /**
- * Extends StrategyGreedy with a persistent parcel memory: high-value parcels that
- * exit the sensing zone are kept in belief memory (managed by Parcels.sync) and
- * remain eligible targets until their decayed reward hits zero, another agent picks
- * them up, or a better candidate appears.
- *
- * BDI separation is preserved:
- *   - Beliefs: Parcels.#memory is written exclusively by sync() / remove()
- *     (perception / plan-outcome), never by this strategy.
- *   - Desires: decide() reads beliefs and returns a predicate — it never writes.
- *   - Intentions: IntentionRevision.#isValid() checks getRemembered() so an
- *     intention for a remembered parcel stays valid while the agent travels.
- *
- * Backward compatibility: enableMemory() must be called (by selectStrategy) before
- * this strategy runs. All existing strategies are unaffected.
+ * @class StrategyMemory
+ * Greedy with persistent memory for out-of-range parcels with decay
  */
 export class StrategyMemory extends StrategyGreedy {
+    /**
+     * Decide next intention with memory-augmented candidate pool
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const carrying  = parcels.carriedBy(me.id);
         const bankNow   = this.bankNowValue();

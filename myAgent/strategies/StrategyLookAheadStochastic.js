@@ -21,13 +21,8 @@ const ALPHA = 1.5;
 const BETA = 3.0;
 
 /**
- * Extends StrategyLookAhead with probabilistic group-based exploration.
- *
- * Spawner tiles are clustered into spatial groups at first use (static map
- * geometry, built once).  At each idle deliberation the agent samples a group
- * from a distribution that:
- *
- *   weight(G) = 1 / (1 + α·normDist(G) + β·recentCount(G))
+ * @class StrategyLookAheadStochastic
+ * LookAhead with probabilistic group sampling (distance + recency penalties)
  *
  * where normDist is distance to the group's nearest reachable spawner
  * normalised to [0,1] across all active groups, and recentCount is how many
@@ -49,13 +44,18 @@ const BETA = 3.0;
  * Toggle with EXPLORE_MODE=stochastic in the environment (see selectStrategy).
  */
 export class StrategyLookAheadStochastic extends StrategyLookAhead {
-    /** @type {Array<Array<{x:number,y:number}>>|null} lazily built group list */
+    /** @type {Array<Array<{x: number, y: number}>>|null} Lazily built group list */
     #groups        = null;
-    /** Ring buffer of recently chosen group indices (length ≤ WINDOW_SIZE). */
+
+    /** @type {Array<number>} Ring buffer of recently chosen group indices (length ≤ WINDOW_SIZE) */
     #recentChoices = [];
 
     // ── group initialisation ────────────────────────────────────────────────
 
+    /**
+     * Lazily build (and cache) spawner groups for stochastic sampling
+     * @returns {void}
+     */
     #initGroups() {
         if (this.#groups !== null) return;
         if (spawnerTiles.length === 0) { this.#groups = []; return; }
@@ -72,6 +72,12 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
 
     // ── main override ───────────────────────────────────────────────────────
 
+    /**
+     * Idle exploration via weighted random group sampling (distance + recency
+     * penalties); falls back to the parent's deterministic logic with ≤ 1 group
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
+     */
     exploreIfIdle(currentIntent) {
         this.#initGroups();
 
@@ -202,7 +208,9 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
      * spawners within OBSERVATION_DISTANCE.  The search space is limited to
      * the group's bounding box expanded by OBSERVATION_DISTANCE; isReachable
      * (A*) is called only on the top-K geometrically best candidates to keep
-     * the per-deliberation cost low.
+     * the per-deliberation cost low
+     * @param {{spawners: Array<{x: number, y: number}>, nearest: {x: number, y: number}}} group - Active group with its nearest eligible spawner
+     * @returns {{x: number, y: number}} Tile maximising sensed group coverage
      */
     #bestCoverageTarget(group) {
         const { spawners, nearest } = group;
@@ -253,7 +261,11 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
         return nearest; // all top-K unreachable — fall back to nearest spawner
     }
 
-    /** Keep the parent's key fields in sync so any code that reads them is safe. */
+    /**
+     * Keep the parent's explore-key fields in sync so any code that reads them is safe
+     * @param {{x: number, y: number}} tile - Newly committed explore target
+     * @returns {void}
+     */
     #commitTarget(tile) {
         const key = `${tile.x}_${tile.y}`;
         this._prevExploreKey = this._lastExploreKey;

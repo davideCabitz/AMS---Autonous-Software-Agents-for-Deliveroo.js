@@ -1,22 +1,26 @@
+/**
+ * @class Parcels
+ * Parcel belief state with optional memory for out-of-range parcels
+ */
 export class Parcels {
-    /** @type {Map<string, Parcel>} */
+    /** @type {Map<string, Object>} Live parcel beliefs from sensing (id -> parcel) */
     #map = new Map();
 
-    // ─── parcel memory (StrategyMemory only) ─────────────────────────────────
-    // id → { id, x, y, reward, lastSeenMs }
+    /** @type {Map<string, {id: string, x: number, y: number, reward: number, lastSeenMs: number}>} Remembered out-of-range parcels */
     #memory        = new Map();
+
+    /** @type {boolean} Whether memory tracking is enabled */
     #memoryEnabled = false;
+
+    /** @type {number} Decay interval in milliseconds */
     #decayIntervalMs = Infinity;
 
-    // Ids permanently excluded from beliefs and all future sensing syncs. Used when
-    // the coordinator hands a parcel to its partner: it's back on the ground (sensing
-    // re-reports it as free), but re-grabbing it would steal the partner's pickup.
+    /** @type {Set<string>} Permanently excluded parcel IDs (handed off to partner) */
     #ignored = new Set();
 
     /**
-     * Activate parcel memory. Called once from selectStrategy() when StrategyMemory
-     * is chosen. When disabled (default) the #memory Map is never written to, so
-     * all existing strategies remain completely unaffected.
+     * Enable parcel memory tracking with decay rate
+     * @param {number} decayIntervalMs - Milliseconds per reward decay unit
      */
     enableMemory(decayIntervalMs) {
         this.#memoryEnabled  = true;
@@ -24,10 +28,9 @@ export class Parcels {
     }
 
     /**
-     * Reconcile beliefs with the latest sensing. `selfId` (the agent's own id)
-     * protects parcels we know we're carrying: blind maps stop reporting a parcel
-     * once it's on our tile/carried, and without this guard the next sync would
-     * wipe the carried belief and break delivery mid-trip.
+     * Sync beliefs with latest sensing, manage memory decay, protect carried parcels
+     * @param {Array<Object>} sensingParcels - Current parcel observations from server
+     * @param {string|null} selfId - Agent ID (protects self-carried parcels from eviction)
      */
     sync(sensingParcels, selfId = null) {
         const now = Date.now();
@@ -60,23 +63,28 @@ export class Parcels {
         }
     }
 
-    /** Mark a parcel as carried by an agent (used to apply pickup results to beliefs). */
+    /**
+     * Mark parcel as carried by an agent
+     * @param {string} id - Parcel ID
+     * @param {string} agentId - Agent ID carrying the parcel
+     */
     setCarriedBy(id, agentId) {
         const p = this.#map.get(id);
         if (p) p.carriedBy = agentId;
     }
 
-    /** Drop a parcel from beliefs (used to apply pickup/putdown results). */
+    /**
+     * Remove parcel from all beliefs (sensing + memory)
+     * @param {string} id - Parcel ID
+     */
     remove(id) {
         this.#map.delete(id);
         this.#memory.delete(id); // also evict from memory on failed pickup / explicit removal
     }
 
     /**
-     * Permanently exclude a parcel from beliefs and every future sensing sync. Used
-     * when the coordinator hands a parcel to its partner: the strategy reads free()
-     * directly, so without this it would re-target the drop and steal the partner's
-     * pickup. Ids are unique per spawn, so excluding forever is safe.
+     * Permanently exclude parcel from beliefs and future syncs (handed to partner)
+     * @param {string} id - Parcel ID to ignore
      */
     ignore(id) {
         this.#ignored.add(id);
@@ -84,25 +92,41 @@ export class Parcels {
         this.#memory.delete(id);
     }
 
-    /** All parcels currently in belief state. */
+    /**
+     * Get all parcels in current beliefs
+     * @returns {Array<Object>} All live parcels
+     */
     all() {
         return [...this.#map.values()];
     }
 
-    /*Free parcels */
+    /**
+     * Get free (uncarried, not ignored) parcels
+     * @returns {Array<Object>} Free parcels available for pickup
+     */
     free() {
         return this.all().filter(p => !p.carriedBy && !this.#ignored.has(p.id));
     }
 
-    /** Parcels currently carried by a given agent id. */
+    /**
+     * Get parcels carried by a specific agent
+     * @param {string} agentId - Agent ID
+     * @returns {Array<Object>} Parcels carried by this agent
+     */
     carriedBy(agentId) {
         return this.all().filter(p => p.carriedBy === agentId);
     }
 
+    /**
+     * Get a specific parcel by ID
+     * @param {string} id - Parcel ID
+     * @returns {Object|undefined} Parcel object or undefined
+     */
     get(id) {
         return this.#map.get(id);
     }
 
+    /** @type {number} Total number of live parcels */
     get size() {
         return this.#map.size;
     }
@@ -110,9 +134,8 @@ export class Parcels {
     // ─── memory read API (consumed only by StrategyMemory) ───────────────────
 
     /**
-     * Returns snapshots of remembered (out-of-range) parcels with their current
-     * decayed reward. Parcels with reward ≤ 0 are excluded. Returns [] when
-     * memory is disabled — all existing strategies are completely unaffected.
+     * Get remembered (out-of-range) parcels with decay applied
+     * @returns {Array<Object>} Parcels with currentReward > 0 (empty array if memory disabled)
      */
     remembered() {
         if (!this.#memoryEnabled) return [];
@@ -131,9 +154,9 @@ export class Parcels {
     }
 
     /**
-     * Raw memory entry for a single id (no decay applied). Used only by the
-     * intention validity check to confirm a remembered parcel still exists.
-     * Returns null when memory is disabled or the id is unknown.
+     * Get raw memory entry without decay (for validity checks)
+     * @param {string} id - Parcel ID
+     * @returns {Object|null} Raw memory entry or null if memory disabled/unknown
      */
     getRemembered(id) {
         return this.#memoryEnabled ? (this.#memory.get(id) ?? null) : null;

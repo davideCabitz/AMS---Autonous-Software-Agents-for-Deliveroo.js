@@ -1,4 +1,4 @@
-import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
+import { crateSpawnerTiles, crateTiles, directionalTiles, me, MOVEMENT_DURATION, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
 import { canEnterDir } from './directions.js';
 import { createLogger } from './logger.js';
 
@@ -17,57 +17,34 @@ const BACKTRACK_PENALTY = 2;
 const key = (x, y) => `${x}_${y}`;
 const h   = (x1, y1, x2, y2) => Math.abs(x1 - x2) + Math.abs(y1 - y2);
 
-// Floor for the arrival timeout; the real budget scales with the measured pace.
-const ARRIVAL_TIMEOUT_FLOOR_MS = 250;
 
 /**
- * Resolve once the agent has actually arrived on tile (tx,ty), or after a
- * timeout. The server's move ack fires before the tile transition physically
- * completes (fractional in-transit coords), so issuing the next step on the ack
- * alone makes consecutive moves overlap and the agent drifts diagonally between
- * tiles. Waiting for the authoritative `onYou` position to reach the target tile
- * paces movement to the real per-tile time without a blind client-side sleep.
- *
- * Returns true if arrived, false if it timed out (caller falls through to the
- * normal blocked/replan handling rather than assuming success).
+ * Synchronize movement by waiting for the server's per-tile animation to complete
+ * @param {number} tx - Target x coordinate (unused, kept for semantic clarity)
+ * @param {number} ty - Target y coordinate (unused, kept for semantic clarity)
+ * @returns {Promise<void>} Resolves after movement animation duration completes
  */
 export function waitForArrival(tx, ty) {
-    // Use RAW coords: the move is only truly complete when the un-rounded position
-    // reaches the integer target. Rounded `me.x/y` would report arrival at 60% of
-    // the move (server jumps 0.6 immediately), making steps overlap → teleporting.
-    // Tolerance 0.1 instead of strict equality: the server's physics can produce
-    // values like 2.9999999 instead of exactly 3. Mid-transit positions are ~0.4
-    // from the target (the 0.6-jump), so 0.1 safely distinguishes arrival from
-    // in-transit without triggering on any legitimate intermediate position.
-    const arrived = () => Math.abs(me.rawX - tx) < 0.1 && Math.abs(me.rawY - ty) < 0.1;
-    if (arrived()) return Promise.resolve(true);
-
-    // Budget adapts to server speed; capped above the emitWithAck 1000ms ceiling.
-    const budget = Math.min(2000, Math.max(ARRIVAL_TIMEOUT_FLOOR_MS, 2 * moveTiming.msPerTile));
-
-    return new Promise(resolve => {
-        let done = false;
-        const finish = (ok) => {
-            if (done) return;
-            done = true;
-            clearInterval(iv);
-            clearTimeout(timer);
-            resolve(ok);
-        };
-        const iv = setInterval(() => { if (arrived()) finish(true); }, 15);
-        const timer = setTimeout(() => finish(false), budget);
-    });
+    return new Promise(resolve => setTimeout(resolve, MOVEMENT_DURATION));
 }
 
+/** @type {Set<string>|null} Cached walkable tile keys */
 let _walkable = null;
+
+/**
+ * Get walkable tile set, rebuilding if the map changed
+ * @returns {Set<string>} Set of "x_y" walkable tile keys
+ */
 function getWalkable() {
-    // Rebuild if null or if walkableTiles changed (map reload).
     if (!_walkable || _walkable.size !== walkableTiles.length)
         _walkable = new Set(walkableTiles.map(t => key(t.x, t.y)));
     return _walkable;
 }
 
-/** "x_y" keys currently occupied by other agents (impassable). */
+/**
+ * Get currently occupied agent tiles
+ * @returns {Set<string>} Set of "x_y" keys occupied by other agents
+ */
 function agentKeys() {
     return new Set(otherAgents.map(a => key(Math.round(a.x), Math.round(a.y))));
 }
@@ -130,11 +107,11 @@ function astar(start, goal, walkable) {
 }
 
 /**
- * Path (array of directions) from start to goal over the walkable map, optionally
- * treating `blockedKeys` (a Set of "x_y") as impassable. Returns null if no path.
- * Other agents are always treated as obstacles. An agent standing on the goal tile
- * makes the target unreachable (returns null); only the start tile is exempt.
- * Used by scoring (pathLen) and by PddlMove to decide whether a crate blocks.
+ * A* pathfinding from start to goal over the walkable map
+ * @param {{x: number, y: number}} start - Starting position
+ * @param {{x: number, y: number}} goal - Goal position
+ * @param {Set<string>|null} blockedKeys - Optional set of "x_y" tiles to treat as impassable
+ * @returns {Array<string>|null} Array of direction strings ('up'/'down'/'left'/'right'), or null if unreachable
  */
 export function findRoute(start, goal, blockedKeys = null) {
     const s = { x: Math.round(start.x), y: Math.round(start.y) };
@@ -159,14 +136,10 @@ export function findRoute(start, goal, blockedKeys = null) {
 }
 
 /**
- * True when a route from `start` to `goal` exists over the STATIC map with other
- * agents IGNORED (walls, arrows and mission avoidTiles still respected). Unlike
- * findRoute — which treats every other agent as an impassable wall — this answers
- * the structural question "could I get there if the agents weren't standing in the
- * way right now?". Used by trap avoidance to tell a real one-way dead-end (never
- * reachable) from a safe zone that a competitor is only temporarily blocking
- * (reachable here, blocked in findRoute) — so the agent waits for the block to
- * clear instead of diving into a trap zone it can't escape.
+ * Check if goal is structurally reachable from start (ignoring other agents)
+ * @param {{x: number, y: number}} start - Starting position
+ * @param {{x: number, y: number}} goal - Goal position
+ * @returns {boolean} True if a path exists when agents are ignored (but walls/arrows respected)
  */
 export function reachableIgnoringAgents(start, goal) {
     const s = { x: Math.round(start.x), y: Math.round(start.y) };
@@ -184,22 +157,12 @@ export function reachableIgnoringAgents(start, goal) {
 }
 
 /**
- * Push-aware route cost from `from` to `to`: A* where a tile occupied by a
- * crate is enterable ONLY via a legal push in the entry direction — the tile
- * one beyond the crate (same direction) must be a crate-zone tile
- * (crateSpawnerTiles: '5' free zones and '5!' spawners, matching the PDDL
- * (pushable t) model), walkable, crate-free and arrow-legal. Such an edge
- * costs 3 (step + reposition + push) instead of 1.
- *
- * Push legality is direction-specific, so this finds routes a ban-list never
- * could: approaching the same crate from the one side where the push lands in
- * a free zone (e.g. circling a pocket to push a corridor crate upward).
- * Optimistic about the pushed crate's new position (it isn't re-added as an
- * obstacle), mirroring pathLen's role as an estimate — PddlMove plans the
- * exact pushes.
- *
- * Returns the total cost in steps, or Infinity when no push-feasible route
- * exists. `blockedKeys` are extra impassable tiles (mission avoid set).
+ * Cost of pushing crates to reach goal, treating crate tiles as passable only via legal pushes
+ * @param {{x: number, y: number}} from - Starting position
+ * @param {{x: number, y: number}} to - Goal position
+ * @param {Set<string>} crateKeys - Set of "x_y" tiles occupied by crates
+ * @param {Set<string>|null} blockedKeys - Optional extra impassable tiles (mission avoidTiles)
+ * @returns {number} Total path cost in steps, or Infinity if unreachable
  */
 export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
     const s = { x: Math.round(from.x), y: Math.round(from.y) };
@@ -261,13 +224,9 @@ export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
 }
 
 /**
- * Set of "x_y" tiles from which AT LEAST ONE of `goals` is reachable, honouring
- * arrow constraints on the *reversed* edges. Structure-only: considers walls and
- * directional tiles, but NOT other agents or crates — the verdict is stable map
- * geometry, not transient occupancy. Multi-source reverse BFS seeded from the
- * goals. Used at map load (context.onMap) to find the sustainable pick-up→deliver
- * region for trap avoidance on directional mazes.
- * See docs/DIRECTIONAL_TRAP_AVOIDANCE.md.
+ * Reverse BFS to find all tiles from which at least one goal is reachable
+ * @param {Array<{x: number, y: number}>} goals - Goal tiles to reach
+ * @returns {Set<string>} Set of "x_y" tiles with a path to at least one goal
  */
 export function tilesThatReach(goals) {
     const walkable = getWalkable();
@@ -299,13 +258,10 @@ export function tilesThatReach(goals) {
         return seen;
 }
 
-/*
- * Set of "x_y" keys reachable from `start` over the walkable map (one BFS,
- * respecting one-way arrow tiles and treating other agents as obstacles). Used to
- * filter LLM tile queries to tiles the agent can actually get to — so "leftmost
- * tile" means the leftmost *reachable* one without the admin having to say so.
- * Crates are not modelled here (navigateTo handles them dynamically); this is the
- * static "can the agent travel there in principle" set.
+/**
+ * BFS to find all tiles reachable from start (ignoring crates, respecting agents/walls/arrows)
+ * @param {{x: number, y: number}} start - Starting position
+ * @returns {Set<string>} Set of "x_y" keys reachable from start
  */
 export function reachableFrom(start) {
     const s = { x: Math.round(start.x), y: Math.round(start.y) };
@@ -346,19 +302,10 @@ const YIELD_MAX_ATTEMPTS    = 3;
 const YIELD_PAUSE_MS        = 400;
 
 /**
- * Case 5 one-shot yield: break a mutual block by stepping to a RANDOM free
- * adjacent tile, then pausing to let the other agent advance. A directional
- * sidestep ("step away from the goal") fails in a 2-wide hallway — both lanes are
- * valid path tiles, so A* just reroutes through the sidestep tile and we re-block,
- * and two mirror-image agents pick symmetric tiles and re-collide forever. Random
- * choice breaks that symmetry: the two agents diverge with high probability.
- *
- * We don't bias toward/away from the goal — the only goal is to physically vacate
- * so the corridor frees up; the normal A* loop re-paths to the goal afterward.
- * Best-effort: if no free neighbour exists or the step fails, it just pauses (the
- * blocker may pass on its own) and returns to the normal recompute / throw path.
- *
- * `blockedTile` is the tile we kept re-blocking on; we never yield onto it.
+ * Attempt to break a mutual deadlock by moving to a random free adjacent tile
+ * @param {string} blockedTile - "x_y" key of the tile causing the block (never yield onto it)
+ * @param {Set<string>} agentBlocked - Set of "x_y" keys currently blocking agent movement
+ * @returns {Promise<void>}
  */
 async function tryYield(blockedTile, agentBlocked) {
     const cx = Math.round(me.x), cy = Math.round(me.y);
@@ -393,6 +340,13 @@ async function tryYield(blockedTile, agentBlocked) {
     await new Promise(r => setTimeout(r, YIELD_PAUSE_MS));
 }
 
+/**
+ * Navigate to target tile with deadlock detection and replan-on-obstacle
+ * @param {number} targetX - Target x coordinate
+ * @param {number} targetY - Target y coordinate
+ * @param {Function} stoppedFn - Callback returning true if navigation should stop
+ * @returns {Promise<void>}
+ */
 export async function navigateTo(targetX, targetY, stoppedFn) {
     const goal    = { x: Math.round(targetX), y: Math.round(targetY) };
     const goalKey = key(goal.x, goal.y);

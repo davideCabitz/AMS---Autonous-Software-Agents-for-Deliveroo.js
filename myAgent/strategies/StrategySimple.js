@@ -5,10 +5,15 @@ import { createLogger } from '../utils/logger.js';
 const log = createLogger('simple');
 
 /**
- * Simple strategy: deliver as soon as carrying anything; otherwise pick the best
- * free parcel by reward / distance.
+ * @class StrategySimple
+ * Simple strategy: deliver immediately when carrying, otherwise pick best free parcel
  */
 export class StrategySimple extends Strategy {
+    /**
+     * Decide next intention
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const carrying = parcels.carriedBy(me.id);
 

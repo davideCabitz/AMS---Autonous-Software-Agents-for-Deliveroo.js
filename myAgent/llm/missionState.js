@@ -1,38 +1,22 @@
 import { missionConstraints } from '../context.js';
 
-/*
- * Shared mutation logic for the persistent Level-2 mission constraints.
- *
- * Both processes need the exact same semantics: the coordinator applies a
- * constraint via the apply_mission/dropMission LLM tools, then mirrors it to the
- * worker over the partner protocol ({"type":"constraint",...}), and the worker
- * applies it here too. Keeping one implementation guarantees the two agents can
- * never drift on what a mission means.
- *
- * Every function returns a STRING observation (same contract as the LLM tools).
+/**
+ * @typedef { {requiredStackSize: number|null, maxStackSize: number|null, forbiddenStackSizes: Set<number>, allowedDeliveryTiles: Set<string>|null, allowedSpawnerTiles: Set<string>|null, avoidTiles: Set<string>, maxParcelReward: number|null, maxBundleValue: number|null, deliveryMultipliers: Map<string,number>|null, oneShotBonus: {x:number,y:number,points:number,perAgent:boolean}|null, penaltyTiles: Map<string,number>, handoffNet: number, gatherNet: number, lightNet: number, descriptions: Array<string>} } MissionConstraints
  */
 
 /**
- * The single rule deciding whether a Level-3 routine (handoff / gather / light) is
- * "on": its running point total is NOT negative. A total of 0 — the default, and the
- * case of a mission with NO reward clause — counts as ON, because a no-reward mission
- * contributes nothing and must still be followed. Only an explicitly-stated penalty
- * (net < 0) turns the routine OFF (declines a fresh offer, stops a running one).
+ * Check if a Level-3 routine should be armed (net total is non-negative)
+ * @param {number} net - Running net point total for the routine
+ * @returns {boolean} True if the routine is armed (net >= 0 means no net penalty)
  */
 export function armedByNet(net) {
     return net >= 0;
 }
 
 /**
- * Apply a mission-constraint config. Fields are all optional and additive:
- *   requiredStackSize (floor), maxStackSize (cap), forbiddenStackSizes (N or [N,…]),
- *   allowedDeliveryTiles [[x,y],…], allowedSpawnerTiles,
- *   avoidTiles [[x,y],…], maxParcelReward, maxBundleValue,
- *   deliveryMultipliers [[x,y,mult],…], oneShotBonus {x,y,points,perAgent?},
- *   penaltyTiles [[x,y,points],…], handoffNet/gatherNet/lightNet (signed, ADDED to
- *   the running per-type Level-3 routine total), description.
- * @param {object} config already-parsed JSON
- * @returns {string} observation
+ * Apply mission constraint configuration from LLM tools
+ * @param {Object} config - Mission configuration object (already-parsed JSON)
+ * @returns {string} Observation string confirming which fields were set
  */
 export function applyMissionConfig(config) {
     const fieldsSet = [];
@@ -160,9 +144,9 @@ const FIELD_MAP = {
 };
 
 /**
- * Remove ONE constraint by (fuzzy) field name.
- * @param {string} field e.g. "requiredStackSize", "avoid tiles"
- * @returns {{ok: boolean, label?: string, observation: string}}
+ * Remove one constraint by fuzzy field name
+ * @param {string} field - Field name to remove (e.g. "requiredStackSize", "avoid tiles")
+ * @returns {{ok: boolean, label?: string, observation: string}} Result with success flag and message
  */
 export function dropMissionField(field) {
     const raw = String(field ?? '').trim();
@@ -184,8 +168,8 @@ export function dropMissionField(field) {
 }
 
 /**
- * Clear ALL constraints — agent restored to default behavior.
- * @returns {string} observation
+ * Clear all constraints, restoring default agent behavior
+ * @returns {string} Observation confirming all missions cleared
  */
 export function dropAllMissions() {
     missionConstraints.requiredStackSize    = null;

@@ -8,29 +8,33 @@ import { createLogger } from '../utils/logger.js';
 const log     = createLogger('llm');
 const toolLog = createLogger('llm:tool');
 
-/*
- * Single ReAct execution loop for one chat directive (Step-7 style: one model
- * call -> Action/Observation -> ... -> Final Answer). No planner: the command
- * tools already encapsulate multi-tile work via BDI, so step-decomposition would
- * only add cost and failure surface.
- *
- * Autonomy is NOT gated during the LLM's initial thinking (the agent keeps doing
- * its own BDI work). The first command takes control and the gate is held through
- * the command sequence (released in runDirective's finally), so a multi-step
- * directive doesn't drift between commands.
+/**
+ * @typedef { {role: string, content: string} } ChatMessage
  */
 
-// Two-agent directives (order partner + own commands) use more steps than the
-// original single-agent ceiling allowed.
+/** @type {number} Max ReAct iterations before giving up on a directive */
 const MAX_ITERATIONS = 30;
-// Give up a stuck directive after this many failed command attempts, so the LLM
-// can't keep the agent occupied indefinitely — it returns to autonomous BDI work.
+
+/** @type {number} Max tool failures before aborting the directive */
 const MAX_TOOL_FAILURES = 1;
 
+// Tools that ACCEPT/CHANGE a persistent mission. When one of these succeeds the
+// directive is a mission, not an action: it must acknowledge with "Mission
+// accepted." in chat. Because the model applies a mission via a TOOL and then
+// ends the directive with "End" (the action output contract forbids a Final
+// Answer after a tool), the loop itself emits the ack — otherwise the mission is
+// applied silently and the sender never hears back (observed bug).
+const MISSION_TOOLS = new Set([
+    'apply_mission', 'forbid_delivery', 'restrict_exploration',
+    'dropMission', 'dropMissions',
+    'start_light_mission', 'stop_light_mission',
+    'start_handoff', 'stop_handoff',
+]);
+
 /**
- * Parse a ReAct action. Tolerates both `Action: go_to` + `Action Input: 5,3` and
- * function-call syntax `Action: go_to(5,3)` (the latter caused "unknown tool"
- * failures in the standalone agent). Returns { action, input } or null.
+ * Parse ReAct action from model response, tolerating multiple output formats
+ * @param {string} text - Raw model response text
+ * @returns {{action: string, input: string}|null} Parsed action and input, or null if not found
  */
 function extractAction(text) {
     const a = text.match(/^Action:\s*(.+)$/im);
@@ -48,38 +52,33 @@ function extractAction(text) {
     return { action, input };
 }
 
+/**
+ * Extract Final Answer from model response
+ * @param {string} text - Raw model response text
+ * @returns {string|null} Final answer text, or null if not present
+ */
 function extractFinal(text) {
     const m = text.match(/^Final Answer:\s*([\s\S]*)$/im);
     return m ? m[1].trim() : null;
 }
 
-// Tools that ACCEPT/CHANGE a persistent mission. When one of these succeeds the
-// directive is a mission, not an action: it must acknowledge with "Mission
-// accepted." in chat. Because the model applies a mission via a TOOL and then
-// ends the directive with "End" (the action output contract forbids a Final
-// Answer after a tool), the loop itself emits the ack — otherwise the mission is
-// applied silently and the sender never hears back (observed bug).
-const MISSION_TOOLS = new Set([
-    'apply_mission', 'forbid_delivery', 'restrict_exploration',
-    'dropMission', 'dropMissions',
-    'start_light_mission', 'stop_light_mission',
-    'start_handoff', 'stop_handoff',
-]);
-
-/** "End" on its own line marks the accompanying Action as the directive's last
- *  step: the directive terminates the moment that action completes. */
+/**
+ * Check if model response contains an "End" termination marker
+ * @param {string} text - Raw model response text
+ * @returns {boolean} True if the response signals directive completion
+ */
 function hasEndMarker(text) {
     return /^End\.?\s*$/im.test(text);
 }
 
 /**
- * Run one chat directive to completion.
- * @param {string} objective   the directive text
- * @param {object} myAgent      the IntentionRevisionReplace instance
- * @param {string|null} replySender  chat id to reply to (null for stdin tests)
- * @param {function} [resumeAutonomy] called once when the directive ends
- * @param {Array} [history]     prior {role,content} turns for conversational context
- * @returns {Promise<string>} the final answer / failure summary
+ * Run one chat directive to completion via the ReAct tool-use loop
+ * @param {string} objective - The directive text from chat
+ * @param {Object} myAgent - The IntentionRevisionReplace instance
+ * @param {string|null} replySender - Chat ID to reply to (null for stdin tests)
+ * @param {Function} [resumeAutonomy] - Called once when the directive ends
+ * @param {Array<ChatMessage>} [history] - Prior turns for conversational context
+ * @returns {Promise<string|null>} Final answer or failure summary; null when aborted
  */
 export async function runDirective(objective, myAgent, replySender, resumeAutonomy, history = []) {
     // We do NOT gate autonomy at the start: the agent keeps doing its own BDI work
@@ -221,13 +220,9 @@ const CLASSIFY_PROMPT =
     'Reply STOP, GO, ACTION, or CHAT only.';
 
 /**
- * Classify an incoming chat message. One cheap model call. Besides ACTION
- * (control the agent, serialized) vs CHAT (verbal answer, concurrent), it also
- * recognises the LIVE "red light"/"green light" signals as STOP/GO so the
- * red-light-green-light mission is interpreted by the model on EVERY shout
- * (no hardcoded keyword reflex). Defaults to ACTION on anything ambiguous or on
- * error — the safe routing choice (serialized lane, never concurrent movement).
- * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>}
+ * Classify an incoming chat message as STOP, GO, ACTION, or CHAT
+ * @param {string} text - Raw message text to classify
+ * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>} Classification result; defaults to ACTION on ambiguity or error
  */
 export async function classifyDirective(text) {
     try {
@@ -246,10 +241,10 @@ export async function classifyDirective(text) {
 }
 
 /**
- * Conversational fast-lane: answer a chat message with read-only tools only.
- * Does NOT set directive.active and never moves the agent, so it is safe to run
- * concurrently with an action directive. The Final Answer is the reply.
- * @returns {Promise<string>}
+ * Conversational fast-lane: answer a read-only chat message without moving the agent
+ * @param {string} message - Chat message to answer
+ * @param {Array<ChatMessage>} [history] - Prior conversation turns for context
+ * @returns {Promise<string>} Final answer to send back to the sender
  */
 export async function runConversation(message, history = []) {
     const tools = buildChatTools();

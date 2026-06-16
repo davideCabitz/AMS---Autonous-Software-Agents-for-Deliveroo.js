@@ -5,7 +5,16 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('intention');
 
+/**
+ * @class IntentionRevisionReplace
+ * Replacing intention revision: interrupt current, respect PDDL locks, support LLM commands
+ */
 export class IntentionRevisionReplace extends IntentionRevision {
+    /**
+     * Push intention, replacing current if different (respects PDDL lock)
+     * @param {Array} predicate - Intention predicate
+     * @returns {Promise<void>}
+     */
     async push(predicate) {
         const last = this.intention_queue.at(-1);
 
@@ -27,14 +36,9 @@ export class IntentionRevisionReplace extends IntentionRevision {
     }
 
     /**
-     * LLM command path. Pushes a predicate as the agent's next intention and
-     * returns a promise that resolves when THAT intention finishes (loop() runs
-     * its single achieve(), which settles intention.completion). Unlike push(),
-     * it bypasses the autonomous-only guards (same-predicate / go_deliver chain)
-     * so a chat directive always executes and always settles its promise — but it
-     * still respects pddl.busy so an in-flight crate macro-plan isn't corrupted.
-     * @param {Array} predicate e.g. ['go_to', x, y]
-     * @returns {Promise<*>} resolves on completion; rejects ['busy'|'stopped'|'no plan for', ...]
+     * LLM command path: execute intention and await completion
+     * @param {Array} predicate - Intention predicate (e.g., ['go_to', x, y])
+     * @returns {Promise<*>} Resolves on completion; rejects ['busy'|'stopped'|'no plan for', ...]
      */
     async commandAndAwait(predicate) {
         if (pddl.busy) return Promise.reject(['busy', ...predicate]);
@@ -48,12 +52,8 @@ export class IntentionRevisionReplace extends IntentionRevision {
     }
 
     /**
-     * Stop whatever intention is currently executing so the agent holds its
-     * position. Used by the LLM `wait` tool to make "don't move for N seconds"
-     * actually hold still (the autonomy gate only blocks NEW pushes, not the
-     * intention already running). Respects pddl.busy so a crate macro-plan is
-     * not yanked mid-execution.
-     * @returns {boolean} true if it halted, false if a PDDL plan blocked it
+     * Stop the currently executing intention (respects PDDL lock)
+     * @returns {boolean} True if halted, false if PDDL plan is in progress
      */
     haltCurrent() {
         if (pddl.busy) return false;

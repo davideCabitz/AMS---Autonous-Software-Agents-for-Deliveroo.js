@@ -10,8 +10,10 @@ import { runDirective, runConversation, classifyDirective } from './commandLoop.
 import { handlePartnerMessage, sendHalt, sendResume } from './partner.js';
 import { stopHandoff } from './handoff.js';
 
-/** Resolves once the agent is authenticated (id + position known), so a
- *  directive never runs against an empty belief snapshot. */
+/**
+ * Wait until the agent is authenticated (id and position known)
+ * @returns {Promise<void>} Resolves when me.isReady is true
+ */
 function whenReady() {
     if (me.isReady) return Promise.resolve();
     return new Promise(resolve => {
@@ -21,31 +23,37 @@ function whenReady() {
     });
 }
 
-/*
- * Entry point of the LLM command layer. Wires the SDK chat channel to the ReAct
- * loop and serializes directives (one at a time) so two directives never fight
- * over the intention queue or the autonomy gate. Each directive's final answer
- * is sent back to its sender via emitSay. A stdin path is provided for local
- * testing without a second agent to chat from.
+/**
+ * Register the LLM command layer and wire up all message routing
+ * @param {Object} myAgent - Agent instance with commandAndAwait and haltCurrent methods
+ * @param {{resumeAutonomy?: Function}} options - Optional autonomy control callback
  */
-
-// Conversational memory across directives, kept per chat sender so follow-ups
-// like "do the same" or "I said spawn not delivery" have context. Capped to the
-// last few turns so it never grows unbounded. /reset clears it, /memory prints it.
-const MAX_HISTORY_TURNS = 5;   // 1 turn = 1 user directive + 1 assistant answer
-
-const ABORT_KEYWORDS = new Set([
-    'exit', 'abort', 'abort directive', 'exit directive',
-    'back to bdi', 'go back to bdi',
-]);
-
 export function registerLlm(myAgent, { resumeAutonomy } = {}) {
-    let busy = false;                       // true while an ACTION directive runs
-    // NOT a queue: at most ONE pending directive. A new one overwrites it — the
-    // latest order is the only one that counts.
-    let pending = null;
-    const histories = new Map();            // sender key -> [{role,content}, ...]
+    /** @type {number} Max conversational history turns kept per sender (1 turn = request + response) */
+    const MAX_HISTORY_TURNS = 5;
 
+    /** @type {Set<string>} Keywords that abort the current directive immediately */
+    const ABORT_KEYWORDS = new Set([
+        'exit', 'abort', 'abort directive', 'exit directive',
+        'back to bdi', 'go back to bdi',
+    ]);
+
+    /** @type {boolean} True while an ACTION directive is running */
+    let busy = false;
+
+    /** @type {Object|null} Pending directive (at most one; new ones replace old) */
+    let pending = null;
+
+    /** @type {Map<string, Array>} Conversational history keyed by sender ID */
+    const histories = new Map();
+
+    /**
+     * Send a reply back to the message sender via emitSay
+     * @param {string} key - Sender identifier used for logging
+     * @param {string} sender - Sender socket ID passed to emitSay
+     * @param {string} answer - Reply text to deliver
+     * @returns {Promise<void>}
+     */
     const sendReply = async (key, sender, answer) => {
         log(`reply -> ${key}: ${answer}`);
         if (sender) {
@@ -60,6 +68,12 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         }
     };
 
+    /**
+     * Record a message exchange in conversational history for the given sender
+     * @param {string} key - Sender identifier
+     * @param {string} userText - The user's message
+     * @param {string} answer - The assistant's response
+     */
     const record = (key, userText, answer) => {
         const h = histories.get(key) ?? [];
         h.push({ role: 'user', content: userText });
@@ -68,7 +82,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         histories.set(key, h);
     };
 
-    // --- abort: stop any running directive immediately and return to BDI ----------
+    /**
+     * Abort the current directive and return to BDI autonomy
+     * @returns {string} Confirmation message sent to the operator
+     */
     function abortCurrent() {
         directive.aborted = true;
         directive.active  = false;
@@ -83,7 +100,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         return 'Back to BDI.';
     }
 
-    // --- serialized ACTION lane: one at a time; touches movement + the autonomy gate ---
+    /**
+     * Drain the pending directive queue, executing one directive at a time
+     * @returns {Promise<void>}
+     */
     async function drain() {
         if (busy) return;
         busy = true;
@@ -130,20 +150,26 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         }
     }
 
+    /**
+     * Enqueue a directive for serialized execution, preempting the current one if running
+     * @param {string} objective - Directive text to execute
+     * @param {string} replySender - Sender ID for the reply
+     */
     function enqueue(objective, replySender) {
-        // Priority: a NEW directive preempts the running one and replaces any
-        // pending one. The running ReAct loop sees directive.aborted at its next
-        // checkpoint and exits silently; drain then starts this directive.
         if (busy) {
             directive.aborted = true;
-            myAgent.haltCurrent();      // reject the pending commandAndAwait now, not at timeout
+            myAgent.haltCurrent();
         }
         pending = { objective, replySender };
         drain();
     }
 
-    // --- conversational fast-lane: read-only, never moves the agent, so it can run
-    //     CONCURRENTLY with an action directive (answers questions without waiting). ---
+    /**
+     * Handle a read-only chat message concurrently without touching the action queue
+     * @param {string} text - Message text to answer
+     * @param {string} sender - Sender socket ID
+     * @returns {Promise<void>}
+     */
     async function handleChat(text, sender) {
         const key = sender ?? 'console';
         chatLog(`message from ${key}: ${text}`);
@@ -157,7 +183,12 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         await sendReply(key, sender, answer);
     }
 
-    // --- routing: where does each incoming message go? ---
+    /**
+     * Route an incoming message to the appropriate handler (abort/action/chat/partner-protocol)
+     * @param {string} rawText - Raw message text
+     * @param {string} sender - Sender socket ID
+     * @returns {Promise<void>}
+     */
     async function route(rawText, sender) {
         const text = String(rawText ?? '').trim();
         if (!text) return;

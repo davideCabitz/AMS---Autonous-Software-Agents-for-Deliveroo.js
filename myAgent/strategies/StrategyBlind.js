@@ -13,43 +13,33 @@ const EXPLORE_STALL_MS     = 1500;
 const EXPLORE_BLACKLIST_MS = 5000;
 
 /**
- * Strategy for blind / (near-)zero-sensing maps — e.g. the chaotic maze, or any
- * map reporting OBSERVATION_DISTANCE in -1..1, where the agent senses only the
- * parcel(s) on its own tile. The static map (tiles, spawners, delivery zones,
- * walkability) is fully known from onMap regardless of sensing, so navigation and
- * delivery work normally; only parcel/agent visibility is limited.
- *
- * Behaviour:
- *   - Grab what we step on: if standing on a parcel worth carrying (cost
- *     heuristic), pick it up — even while already carrying, since blind sightings
- *     are scarce. Then deliver to the nearest known delivery tile.
- *   - Otherwise wander between spawners to discover parcels, using the anti-lock
- *     exploration below.
- *
- * Anti-lock exploration fixes the "target lock" problem (the base exploreIfIdle
- * keeps a go_explore target forever, so a displaced/blocked blind agent aims at a
- * stale tile indefinitely). The commitment is bounded by signals that work
- * without sensing:
- *   - a time-box (EXPLORE_COMMIT_MS): re-pick periodically regardless;
- *   - physical-movement stall (EXPLORE_STALL_MS): if the agent's tile stops
- *     changing it's stuck, so blacklist the target briefly and pick another;
- *   - on arrival, blacklist the reached tile briefly so exploration fans out
- *     instead of ping-ponging between the two closest spawners.
- * Manhattan progress toward the target is deliberately NOT used — in a maze it is
- * misleading (the agent routes around walls, so distance can plateau/grow while
- * genuine path progress is being made).
+ * @class StrategyBlind
+ * Strategy for zero-sensing maps with anti-lock exploration and stall detection
  */
 export class StrategyBlind extends Strategy {
-    // Blind agents go stationary after a pickup/putdown and own-tile sensing emits
-    // no event to wake them, so they need the agent loop to re-deliberate on a timer.
+    /** @type {number} Re-deliberation interval for blind agents (no sensing events) */
     tickIntervalMs = 100;
 
-    #commitKey   = null;        // "x_y" of the current explore target
-    #commitSince = 0;           // when we committed to it
-    #lastPos     = null;        // last observed agent tile
-    #lastMoved   = 0;           // when the agent tile last changed
-    #blacklist   = new Map();   // "x_y" -> expiry timestamp
+    /** @type {string|null} "x_y" key of current explore target */
+    #commitKey   = null;
 
+    /** @type {number} Timestamp when committed to current target */
+    #commitSince = 0;
+
+    /** @type {{x: number, y: number}|null} Last observed agent position */
+    #lastPos     = null;
+
+    /** @type {number} Timestamp when agent position last changed */
+    #lastMoved   = 0;
+
+    /** @type {Map<string, number>} Blacklisted tiles with expiry timestamps */
+    #blacklist   = new Map();
+
+    /**
+     * Decide next intention with anti-lock exploration
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Next intention, or null to keep current
+     */
     decide(currentIntent) {
         const now = Date.now();
 

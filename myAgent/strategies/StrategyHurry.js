@@ -13,37 +13,37 @@ const EXPLORE_COMMIT_MS    = 4000;
 const EXPLORE_BLACKLIST_MS = 5000;
 
 /**
- * Same pickup/deliver behaviour as StrategyGreedy (decide() is inherited), but it
- * never waits on a spawner — when idle it sweeps the map. For maps with a very high
- * spawner-to-walkable ratio (most tiles are spawners), where touring beats waiting.
- *
- * Coverage works by a persistent frontier sweep:
- *   - Every spawner currently within sensing is marked `#visited` for the whole
- *     sweep (we've observed that area). This is the key difference from the base
- *     exploreIfIdle / a short-TTL blacklist: without persistent memory the local
- *     spawners keep becoming selectable again, so the agent oscillates in one
- *     region instead of moving on.
- *   - The next target is the nearest *unvisited* (i.e. not-yet-sensed) spawner, so
- *     the frontier always advances toward unobserved ground — other rows, the far
- *     side of the map, etc. When everything is visited the set resets (new sweep).
- *   - Commitment holds until the target is observed (enters sensing); a movement
- *     stall (blocked) or a timeout drops it onto a short-TTL blacklist to retry
- *     later. Persistent `#visited` is what prevents the OBS-boundary ping-pong.
- *
- * (StrategyBlind has its own, simpler coverage; per request it's left as-is.)
+ * @class StrategyHurry
+ * Spawner-dense map strategy: persistent frontier sweep with visited set
  */
 export class StrategyHurry extends StrategyGreedy {
-    // Needs the loop to keep re-deliberating so the movement-stall escape can fire
-    // even when the agent is blocked and producing no movement events.
+    /** @type {number} Re-deliberation interval for stall detection */
     tickIntervalMs = 100;
 
-    #commitKey   = null;        // "x_y" of the current frontier target
-    #commitSince = 0;           // when we committed to it
-    #lastPos     = null;        // last observed agent tile
-    #lastMoved   = 0;           // when the agent tile last changed
-    #visited     = new Set();   // "x_y" of spawners observed this sweep (persistent)
-    #blacklist   = new Map();   // "x_y" -> expiry timestamp (only for stuck/unreachable)
+    /** @type {string|null} "x_y" key of current frontier target */
+    #commitKey   = null;
 
+    /** @type {number} Timestamp when committed to the current target */
+    #commitSince = 0;
+
+    /** @type {{x: number, y: number}|null} Last observed agent tile */
+    #lastPos     = null;
+
+    /** @type {number} Timestamp when the agent tile last changed */
+    #lastMoved   = 0;
+
+    /** @type {Set<string>} "x_y" of spawners observed this sweep (persistent coverage memory) */
+    #visited     = new Set();
+
+    /** @type {Map<string, number>} "x_y" → expiry timestamp for stuck/unreachable targets */
+    #blacklist   = new Map();
+
+    /**
+     * Persistent frontier sweep: keep heading to the nearest unobserved spawner,
+     * with stall detection and a coverage-memory visited set
+     * @param {Array|null} currentIntent - Current intention predicate
+     * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
+     */
     exploreIfIdle(currentIntent) {
         // A pickup/deliver currently running takes priority — let it finish.
         if (currentIntent && (currentIntent[0] === 'go_pick_up' || currentIntent[0] === 'go_deliver')) {
