@@ -42,13 +42,26 @@ function agentKeys() {
     return new Set(otherAgents.map(a => key(Math.round(a.x), Math.round(a.y))));
 }
 
-function astar(start, goal, walkable) {
+/**
+ * Shared A* search core. Runs the open/closed/gScore/fScore loop with the same
+ * linear-scan open-set selection both callers historically used (lowest f, and on
+ * ties the earliest-inserted Map key) so returned paths/costs are byte-identical.
+ * The two variants (plain route vs. crate-push cost) differ only in how a node's
+ * neighbours and step costs are produced and what is reconstructed at the goal —
+ * both are injected via `expand` and read off the returned cameFrom/gScore.
+ *
+ * @param {{x: number, y: number}} start - Start node (already rounded)
+ * @param {string} goalKey - "x_y" key of the goal tile
+ * @param {(node: {x: number, y: number}) => number} heuristicOf - h(node) to goal
+ * @param {(cur: {x: number, y: number}, currentKey: string, g: number, parent: {parentKey: string, dir: string}|undefined) => Array<{nk: string, nx: number, ny: number, dir: string, stepCost: number}>} expand - Valid neighbour generator
+ * @returns {{found: boolean, goalKey: string, cameFrom: Map<string, {parentKey: string, dir: string}>, gScore: Map<string, number>}}
+ */
+function aStarCore(start, goalKey, heuristicOf, expand) {
     const startKey = key(start.x, start.y);
-    const goalKey  = key(goal.x,  goal.y);
 
     const gScore   = new Map([[startKey, 0]]);
-    const fScore   = new Map([[startKey, h(start.x, start.y, goal.x, goal.y)]]);
-    const cameFrom = new Map(); 
+    const fScore   = new Map([[startKey, heuristicOf(start)]]);
+    const cameFrom = new Map();
     const open     = new Map([[startKey, start]]);
     const closed   = new Set();
 
@@ -59,16 +72,7 @@ function astar(start, goal, walkable) {
             if (f < lowestF) { lowestF = f; currentKey = k; }
         }
 
-        if (currentKey === goalKey) {
-            const path = [];
-            let k = currentKey;
-            while (cameFrom.has(k)) {
-                const { parentKey, dir } = cameFrom.get(k);
-                path.unshift(dir);
-                k = parentKey;
-            }
-            return path;
-        }
+        if (currentKey === goalKey) return { found: true, goalKey, cameFrom, gScore };
 
         const cur = open.get(currentKey);
         open.delete(currentKey);
@@ -77,26 +81,52 @@ function astar(start, goal, walkable) {
         const g      = gScore.get(currentKey);
         const parent = cameFrom.get(currentKey);
 
-        for (const { dx, dy, dir } of DIRS) {
-            const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
-            if (closed.has(nk) || !walkable.has(nk)) continue;
-            // Arrow tiles: skip a neighbour we'd enter from the forbidden side
-            // (opposite the arrow). Normal tiles return undefined -> unrestricted.
-            if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
-
-            const penalty    = (parent && nk === parent.parentKey) ? BACKTRACK_PENALTY : 0;
-            const tentativeG = g + 1 + penalty;
-
+        for (const { nk, nx, ny, dir, stepCost } of expand(cur, currentKey, g, parent)) {
+            if (closed.has(nk)) continue;
+            const tentativeG = g + stepCost;
             if (tentativeG < (gScore.get(nk) ?? Infinity)) {
                 cameFrom.set(nk, { parentKey: currentKey, dir });
                 gScore.set(nk, tentativeG);
-                fScore.set(nk, tentativeG + h(nx, ny, goal.x, goal.y));
+                fScore.set(nk, tentativeG + heuristicOf({ x: nx, y: ny }));
                 if (!open.has(nk)) open.set(nk, { x: nx, y: ny });
             }
         }
     }
 
-    return null;
+    return { found: false, goalKey, cameFrom, gScore };
+}
+
+function astar(start, goal, walkable) {
+    const goalKey = key(goal.x, goal.y);
+    const heuristicOf = n => h(n.x, n.y, goal.x, goal.y);
+
+    // Plain route: walkable & arrow-legal neighbours; unit step plus a backtrack
+    // penalty for immediately reversing into the parent's parent.
+    const expand = (cur, _currentKey, _g, parent) => {
+        const out = [];
+        for (const { dx, dy, dir } of DIRS) {
+            const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
+            if (!walkable.has(nk)) continue;
+            // Arrow tiles: skip a neighbour we'd enter from the forbidden side
+            // (opposite the arrow). Normal tiles return undefined -> unrestricted.
+            if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
+            const penalty = (parent && nk === parent.parentKey) ? BACKTRACK_PENALTY : 0;
+            out.push({ nk, nx, ny, dir, stepCost: 1 + penalty });
+        }
+        return out;
+    };
+
+    const { found, cameFrom } = aStarCore(start, goalKey, heuristicOf, expand);
+    if (!found) return null;
+
+    const path = [];
+    let k = goalKey;
+    while (cameFrom.has(k)) {
+        const { parentKey, dir } = cameFrom.get(k);
+        path.unshift(dir);
+        k = parentKey;
+    }
+    return path;
 }
 
 /**
@@ -158,8 +188,9 @@ export function reachableIgnoringAgents(start, goal) {
  * @returns {number} Total path cost in steps, or Infinity if unreachable
  */
 export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
-    const s = { x: Math.round(from.x), y: Math.round(from.y) };
-    const goalKey = key(Math.round(to.x), Math.round(to.y));
+    const s  = { x: Math.round(from.x), y: Math.round(from.y) };
+    const tx = Math.round(to.x), ty = Math.round(to.y);
+    const goalKey = key(tx, ty);
     const startKey = key(s.x, s.y);
 
     const walkable = getWalkable();
@@ -170,29 +201,15 @@ export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
     blocked.delete(startKey);
 
     const passable = k => walkable.has(k) && !blocked.has(k);
+    const heuristicOf = n => h(n.x, n.y, tx, ty);
 
-    const gScore = new Map([[startKey, 0]]);
-    const fScore = new Map([[startKey, h(s.x, s.y, Math.round(to.x), Math.round(to.y))]]);
-    const open   = new Map([[startKey, s]]);
-    const closed = new Set();
-
-    while (open.size > 0) {
-        let currentKey = null, lowestF = Infinity;
-        for (const k of open.keys()) {
-            const f = fScore.get(k) ?? Infinity;
-            if (f < lowestF) { lowestF = f; currentKey = k; }
-        }
-
-        if (currentKey === goalKey) return gScore.get(currentKey);
-
-        const cur = open.get(currentKey);
-        open.delete(currentKey);
-        closed.add(currentKey);
-        const g = gScore.get(currentKey);
-
-        for (const { dx, dy } of DIRS) {
+    // Push-aware: a crate tile is enterable only via a legal push (stepCost 3);
+    // every other passable, arrow-legal neighbour costs 1.
+    const expand = (cur) => {
+        const out = [];
+        for (const { dx, dy, dir } of DIRS) {
             const nx = cur.x + dx, ny = cur.y + dy, nk = key(nx, ny);
-            if (closed.has(nk) || !passable(nk)) continue;
+            if (!passable(nk)) continue;
             if (!canEnterDir(directionalTiles.get(nk), cur.x, cur.y, nx, ny)) continue;
 
             let stepCost = 1;
@@ -204,16 +221,13 @@ export function pushAwareCost(from, to, crateKeys, blockedKeys = null) {
                     continue; // push impossible from this side
                 stepCost = 3;
             }
-
-            const tentativeG = g + stepCost;
-            if (tentativeG < (gScore.get(nk) ?? Infinity)) {
-                gScore.set(nk, tentativeG);
-                fScore.set(nk, tentativeG + h(nx, ny, Math.round(to.x), Math.round(to.y)));
-                if (!open.has(nk)) open.set(nk, { x: nx, y: ny });
-            }
+            out.push({ nk, nx, ny, dir, stepCost });
         }
-    }
-    return Infinity;
+        return out;
+    };
+
+    const { found, gScore } = aStarCore(s, goalKey, heuristicOf, expand);
+    return found ? gScore.get(goalKey) : Infinity;
 }
 
 /**

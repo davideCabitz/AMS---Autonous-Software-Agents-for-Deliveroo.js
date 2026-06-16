@@ -76,26 +76,40 @@ function idle(ms) {
  * @param {{x: number, y: number}} to - Goal position
  * @returns {Array<{x: number, y: number}>|null} Path array or null if unreachable
  */
+/**
+ * Forward BFS over the walkable tiles (agents/arrows ignored — the "static" map),
+ * from one start key. Returns both the step-distance map and the predecessor map
+ * so callers can read distances or reconstruct a path. Shared by staticRoute and
+ * bfsDistances; neighbour order [+x,-x,+y,-y] and FIFO traversal match the originals.
+ * @param {string} startKey - "x_y" start tile (assumed walkable)
+ * @returns {{dist: Map<string, number>, prev: Map<string, string|null>}}
+ */
+function bfsWalkable(startKey) {
+    const walk  = getWalkable();
+    const dist  = new Map([[startKey, 0]]);
+    const prev  = new Map([[startKey, null]]);
+    const queue = [startKey];
+    for (let i = 0; i < queue.length; i++) {
+        const cur = queue[i];
+        const d = dist.get(cur);
+        const [x, y] = cur.split('_').map(Number);
+        for (const nk of [`${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`]) {
+            if (walk.has(nk) && !dist.has(nk)) { dist.set(nk, d + 1); prev.set(nk, cur); queue.push(nk); }
+        }
+    }
+    return { dist, prev };
+}
+
 function staticRoute(from, to) {
     const walk  = getWalkable();
     const start = `${Math.round(from.x)}_${Math.round(from.y)}`;
     const goal  = `${Math.round(to.x)}_${Math.round(to.y)}`;
     if (!walk.has(start) || !walk.has(goal)) return null;
-    const prev = new Map([[start, null]]);
-    const queue = [start];
-    while (queue.length) {
-        const cur = queue.shift();
-        if (cur === goal) {
-            const path = [];
-            for (let k = goal; k; k = prev.get(k)) path.unshift(k);
-            return path.map(k => { const [x, y] = k.split('_').map(Number); return { x, y }; });
-        }
-        const [x, y] = cur.split('_').map(Number);
-        for (const nk of [`${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`]) {
-            if (walk.has(nk) && !prev.has(nk)) { prev.set(nk, cur); queue.push(nk); }
-        }
-    }
-    return null;
+    const { prev } = bfsWalkable(start);
+    if (!prev.has(goal)) return null;
+    const path = [];
+    for (let k = goal; k; k = prev.get(k)) path.unshift(k);
+    return path.map(k => { const [x, y] = k.split('_').map(Number); return { x, y }; });
 }
 
 /**
@@ -107,17 +121,7 @@ function bfsDistances(from) {
     const walk  = getWalkable();
     const start = `${Math.round(from.x)}_${Math.round(from.y)}`;
     if (!walk.has(start)) return null;
-    const dist = new Map([[start, 0]]);
-    const queue = [start];
-    for (let i = 0; i < queue.length; i++) {
-        const cur = queue[i];
-        const d = dist.get(cur);
-        const [x, y] = cur.split('_').map(Number);
-        for (const nk of [`${x + 1}_${y}`, `${x - 1}_${y}`, `${x}_${y + 1}`, `${x}_${y - 1}`]) {
-            if (walk.has(nk) && !dist.has(nk)) { dist.set(nk, d + 1); queue.push(nk); }
-        }
-    }
-    return dist;
+    return bfsWalkable(start).dist;
 }
 
 /**
