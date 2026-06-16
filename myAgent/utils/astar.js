@@ -1,4 +1,4 @@
-import { crateSpawnerTiles, crateTiles, directionalTiles, me, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
+import { crateSpawnerTiles, crateTiles, directionalTiles, me, MOVEMENT_DURATION, moveTiming, otherAgents, socket, walkableTiles, missionConstraints, nearestAgentIsStationary } from '../context.js';
 import { canEnterDir } from './directions.js';
 import { createLogger } from './logger.js';
 
@@ -17,8 +17,6 @@ const BACKTRACK_PENALTY = 2;
 const key = (x, y) => `${x}_${y}`;
 const h   = (x1, y1, x2, y2) => Math.abs(x1 - x2) + Math.abs(y1 - y2);
 
-// Floor for the arrival timeout; the real budget scales with the measured pace.
-const ARRIVAL_TIMEOUT_FLOOR_MS = 250;
 
 /**
  * Resolve once the agent has actually arrived on tile (tx,ty), or after a
@@ -32,31 +30,15 @@ const ARRIVAL_TIMEOUT_FLOOR_MS = 250;
  * normal blocked/replan handling rather than assuming success).
  */
 export function waitForArrival(tx, ty) {
-    // Use RAW coords: the move is only truly complete when the un-rounded position
-    // reaches the integer target. Rounded `me.x/y` would report arrival at 60% of
-    // the move (server jumps 0.6 immediately), making steps overlap → teleporting.
-    // Tolerance 0.1 instead of strict equality: the server's physics can produce
-    // values like 2.9999999 instead of exactly 3. Mid-transit positions are ~0.4
-    // from the target (the 0.6-jump), so 0.1 safely distinguishes arrival from
-    // in-transit without triggering on any legitimate intermediate position.
-    const arrived = () => Math.abs(me.rawX - tx) < 0.1 && Math.abs(me.rawY - ty) < 0.1;
-    if (arrived()) return Promise.resolve(true);
-
-    // Budget adapts to server speed; capped above the emitWithAck 1000ms ceiling.
-    const budget = Math.min(2000, Math.max(ARRIVAL_TIMEOUT_FLOOR_MS, 2 * moveTiming.msPerTile));
-
-    return new Promise(resolve => {
-        let done = false;
-        const finish = (ok) => {
-            if (done) return;
-            done = true;
-            clearInterval(iv);
-            clearTimeout(timer);
-            resolve(ok);
-        };
-        const iv = setInterval(() => { if (arrived()) finish(true); }, 15);
-        const timer = setTimeout(() => finish(false), budget);
-    });
+    // Wait exactly one movement_duration before issuing the next step.
+    // The server's stepByStep does: immediate 0.6 jump → synch(movement_duration) → integer snap.
+    // The ack fires after stepByStep completes, but the final `you` (integer position) and
+    // the ack travel independently — the ack can arrive before the `you` event reaches us.
+    // Polling rawX against the integer target races with in-flight `you` events and causes
+    // the next emitMove to overlap with the previous animation, producing teleporting/sliding.
+    // A fixed sleep matching movement_duration is what the server itself uses as the animation
+    // budget; it paces moves cleanly without any dependency on event ordering.
+    return new Promise(resolve => setTimeout(resolve, MOVEMENT_DURATION));
 }
 
 let _walkable = null;
