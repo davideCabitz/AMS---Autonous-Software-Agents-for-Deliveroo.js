@@ -1,7 +1,7 @@
 import { missionConstraints } from '../context.js';
 
 /**
- * @typedef { {requiredStackSize: number|null, maxStackSize: number|null, forbiddenStackSizes: Set<number>, allowedDeliveryTiles: Set<string>|null, allowedSpawnerTiles: Set<string>|null, avoidTiles: Set<string>, maxParcelReward: number|null, maxBundleValue: number|null, deliveryMultipliers: Map<string,number>|null, oneShotBonus: {x:number,y:number,points:number,perAgent:boolean}|null, penaltyTiles: Map<string,number>, handoffNet: number, gatherNet: number, lightNet: number, descriptions: Array<string>} } MissionConstraints
+ * @typedef { {requiredStackSize: number|null, maxStackSize: number|null, forbiddenStackSizes: Set<number>, allowedDeliveryTiles: Set<string>|null, allowedSpawnerTiles: Set<string>|null, avoidTiles: Set<string>, maxParcelReward: number|null, maxBundleValue: number|null, deliveryMultipliers: Map<string,number>|null, oneShotBonus: {x:number,y:number,points:number,perAgent:boolean}|null, penaltyTiles: Map<string,number>, handoffNet: number, gatherNet: number, lightNet: number, multiplierNet: number, descriptions: Array<string>} } MissionConstraints
  */
 
 /**
@@ -108,6 +108,10 @@ export function applyMissionConfig(config) {
         missionConstraints.lightNet += Number(config.lightNet);
         fieldsSet.push('lightNet');
     }
+    if (config.multiplierNet != null) {
+        missionConstraints.multiplierNet += Number(config.multiplierNet);
+        fieldsSet.push('multiplierNet');
+    }
 
     // Tag the description with the field name(s) so the LLM can identify
     // which dropMission(field) to call later ("drop this mission").
@@ -138,9 +142,10 @@ const FIELD_MAP = {
         for (const key of missionConstraints.penaltyTiles.keys()) missionConstraints.avoidTiles.delete(key);
         missionConstraints.penaltyTiles.clear();
     }],
-    handoffnet:           ['Handoff point total',       'handoffNet',           () => { missionConstraints.handoffNet = 0; }],
-    gathernet:            ['Gather point total',        'gatherNet',            () => { missionConstraints.gatherNet  = 0; }],
-    lightnet:             ['Light-mission point total', 'lightNet',             () => { missionConstraints.lightNet   = 0; }],
+    handoffnet:           ['Handoff point total',            'handoffNet',      () => { missionConstraints.handoffNet    = 0; }],
+    gathernet:            ['Gather point total',             'gatherNet',       () => { missionConstraints.gatherNet     = 0; }],
+    lightnet:             ['Light-mission point total',      'lightNet',        () => { missionConstraints.lightNet      = 0; }],
+    multipliernet:        ['Multiplier mission net total',   'multiplierNet',   () => { missionConstraints.multiplierNet = 0; }],
 };
 
 /**
@@ -155,7 +160,7 @@ export function dropMissionField(field) {
     if (!entry) {
         return {
             ok: false,
-            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, maxStackSize, forbiddenStackSizes, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue, deliveryMultipliers, oneShotBonus, penaltyTiles, handoffNet, gatherNet, lightNet.`,
+            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, maxStackSize, forbiddenStackSizes, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue, deliveryMultipliers, oneShotBonus, penaltyTiles, handoffNet, gatherNet, lightNet, multiplierNet.`,
         };
     }
     const [, [label, camel, clear]] = entry;

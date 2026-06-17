@@ -503,3 +503,36 @@ If `PARCEL_REWARD_AVG > 30`, the minimum is raised to 20 regardless of the margi
 ### When to prefer StrategyHighCapacity instead
 
 `selectStrategy` prefers Rush only when the largest group has ≥ 5 spawner cells. On maps where all groups are small (2–4 cells), the hold can never be filled efficiently at one cluster, so the agent falls back to `StrategyHighCapacity` which uses patience-based delivery and inter-group hopping.
+
+---
+
+## 14. Composition helpers (CodeRefactor)
+
+Two reusable helpers were extracted from strategy internals during the CodeRefactor phase. They are not strategies themselves — they are standalone modules composed into the strategies that need them.
+
+### AntiLockExplorer
+
+**File:** `myAgent/strategies/AntiLockExplorer.js`
+
+Encapsulates the stall-detecting, blacklist-driven exploration loop previously inlined in `StrategyBlind` and `StrategyHurry`. Used by both strategies via composition rather than inheritance.
+
+| Mechanism | Threshold | Behaviour |
+|---|---|---|
+| Commit timeout | `EXPLORE_COMMIT_MS` = 4 000 ms | Repicks target periodically regardless of progress |
+| Stall detector | `EXPLORE_STALL_MS` = 1 500 ms | Tile unchanged → blacklists target |
+| Arrival blacklist | `EXPLORE_BLACKLIST_MS` = 5 000 ms | Completed target excluded for 5 s to force fan-out |
+
+Exposes `selectTarget(candidates)` and `tick(currentTile)`. The strategies call `tick()` on their `tickIntervalMs` heartbeat and `selectTarget()` when they need a new exploration goal.
+
+### SpawnerGroupPatrol
+
+**File:** `myAgent/strategies/SpawnerGroupPatrol.js`
+
+Encapsulates the group-building, coverage-tile selection, and waypoint-patrol logic previously duplicated between `StrategyLookAheadStochastic` (probabilistic group selection) and `StrategyHighCapacity` (cyclic waypoint patrol). Both strategies construct a `SpawnerGroupPatrol` instance and delegate group/tile queries to it.
+
+Key methods:
+- `buildGroups(spawnerTiles)` — union-find clustering with `D_CLUSTER = 2` walkable steps.
+- `coverageTile(group, agentPos)` — returns the walkable tile that covers the most group spawners within `OBSERVATION_DISTANCE`.
+- `patrolWaypoints(group)` — returns a cyclic waypoint loop sorted by angle around the group centroid (used by `StrategyHighCapacity`).
+
+Extracting this module removed ~120 lines of near-duplicate code and ensured both strategies apply identical group geometry logic.

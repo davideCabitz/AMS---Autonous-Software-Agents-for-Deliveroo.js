@@ -148,6 +148,11 @@ export const missionConstraints = {
     handoffNet:           0,         // Σ point values of "one picks up / other delivers" offers
     gatherNet:            0,         // Σ point values of "move both near (x,y) and wait" offers
     lightNet:             0,         // Σ point values of red-light-green-light offers
+    // Running sum of (mult − 1.0) deltas for reward-scaling missions ("5× pts",
+    // "0.3× reward"). Positive multipliers add, fractional ones subtract. The gate
+    // fires when the cumulative net ≥ 0 (armedByNet), at which point start_multiplier_mission
+    // also applies the accompanying Level-2 constraint (deliveryMultipliers / stack size).
+    multiplierNet:        0,         // Σ (mult−1.0) of reward-scaling mission offers
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 
