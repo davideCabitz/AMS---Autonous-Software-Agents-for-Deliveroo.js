@@ -5,9 +5,9 @@ import { missionConstraints } from '../context.js';
  */
 
 /**
- * Check if a Level-3 routine should be armed (net total is non-negative)
- * @param {number} net - Running net point total for the routine
- * @returns {boolean} True if the routine is armed (net >= 0 means no net penalty)
+ * Whether a Level-3 routine should be armed (net total non-negative)
+ * @param {number} net - Running net point total
+ * @returns {boolean} True if armed (net >= 0, no net penalty)
  */
 export function armedByNet(net) {
     return net >= 0;
@@ -15,8 +15,8 @@ export function armedByNet(net) {
 
 /**
  * Apply mission constraint configuration from LLM tools
- * @param {Object} config - Mission configuration object (already-parsed JSON)
- * @returns {string} Observation string confirming which fields were set
+ * @param {Object} config - Already-parsed mission config
+ * @returns {string} Observation confirming which fields were set
  */
 export function applyMissionConfig(config) {
     const fieldsSet = [];
@@ -29,8 +29,7 @@ export function applyMissionConfig(config) {
         fieldsSet.push('maxStackSize');
     }
     if (config.forbiddenStackSizes != null) {
-        // number | [numbers] — counts the agent must never deliver at ("deliver N =
-        // penalty"). Accumulate (additive), so repeated bans stack.
+        // Counts the agent must never deliver at ("deliver N = penalty"); additive.
         for (const n of [].concat(config.forbiddenStackSizes))
             missionConstraints.forbiddenStackSizes.add(Number(n));
         fieldsSet.push('forbiddenStackSizes');
@@ -68,18 +67,16 @@ export function applyMissionConfig(config) {
         fieldsSet.push('exactBundleValue');
     }
     if (Array.isArray(config.deliveryMultipliers)) {
-        // [[x,y,mult],…] -> Map "x_y" -> multiplier. Replaces any prior map so a
-        // re-issued bonus mission supersedes the old tiles (not additive: a tile's
-        // multiplier is whatever the latest mission says).
+        // [[x,y,mult],…] -> Map "x_y" -> multiplier. Replaces any prior map (not
+        // additive): a tile's multiplier is whatever the latest mission says.
         missionConstraints.deliveryMultipliers = new Map(
             config.deliveryMultipliers.map(([x, y, m]) => [`${x}_${y}`, Number(m)])
         );
         fieldsSet.push('deliveryMultipliers');
     }
     if (config.oneShotBonus != null) {
-        // { x, y, points, perAgent? } — a single go-there reward. Replaces any prior
-        // bonus (only one pending at a time). The literal `points` is what the BDI
-        // value functions weigh against parcel income (Strategy.bonusGoalValue).
+        // { x, y, points, perAgent? } — a single go-there reward; replaces any prior
+        // one. `points` is what the BDI value functions weigh against parcel income.
         const b = config.oneShotBonus;
         missionConstraints.oneShotBonus = {
             x: Number(b.x), y: Number(b.y), points: Number(b.points),
@@ -88,11 +85,9 @@ export function applyMissionConfig(config) {
         fieldsSet.push('oneShotBonus');
     }
     if (Array.isArray(config.penaltyTiles)) {
-        // [[x,y,points],…] — a point penalty for entering/delivering at a tile.
-        // Accumulate (additive) so repeated penalty missions stack, mirroring
-        // avoidTiles. Each key is ALSO hard-banned via avoidTiles so the existing
-        // pathfinding exclusion does the avoidance with no new navigation code; the
-        // magnitude is kept here for the worth-gate and conversational recall.
+        // [[x,y,points],…] — a point penalty for entering/delivering at a tile; additive.
+        // Each key is ALSO hard-banned via avoidTiles (reusing the pathfinding exclusion);
+        // the magnitude is kept here for the worth-gate and recall.
         for (const [x, y, points] of config.penaltyTiles) {
             const key = `${x}_${y}`;
             missionConstraints.penaltyTiles.set(key, Number(points));
@@ -100,10 +95,9 @@ export function applyMissionConfig(config) {
         }
         fieldsSet.push('penaltyTiles');
     }
-    // Level-3 routine net totals: ADD the offer's signed value to the running sum
-    // (additive across same-type offers), so a later positive offer can outweigh an
-    // earlier penalty and vice-versa. The tools read these via armedByNet to decide
-    // arm / decline / stop. Absent ⇒ untouched (stays neutral).
+    // Level-3 net totals: ADD the offer's signed value to the running sum, so a later
+    // offer can outweigh an earlier one. Tools read these via armedByNet to arm/decline/
+    // stop. Absent ⇒ untouched.
     if (config.handoffNet != null) {
         missionConstraints.handoffNet += Number(config.handoffNet);
         fieldsSet.push('handoffNet');
@@ -121,8 +115,8 @@ export function applyMissionConfig(config) {
         fieldsSet.push('multiplierNet');
     }
 
-    // Tag the description with the field name(s) so the LLM can identify
-    // which dropMission(field) to call later ("drop this mission").
+    // Tag the description with field name(s) so the LLM knows which dropMission(field)
+    // to call later.
     const baseDesc   = config.description || 'constraint applied';
     const taggedDesc = fieldsSet.length > 0 ? `${baseDesc} [${fieldsSet.join(',')}]` : baseDesc;
     missionConstraints.descriptions.push(taggedDesc);
@@ -131,7 +125,7 @@ export function applyMissionConfig(config) {
     return `Mission applied. Active missions: ${active}`;
 }
 
-// [normalized key] -> [label, camelCaseName, clearFn]
+// normalized key -> [label, camelCaseName, clearFn]
 const FIELD_MAP = {
     requiredstacksize:    ['Stack size floor',          'requiredStackSize',    () => { missionConstraints.requiredStackSize = null; }],
     maxstacksize:         ['Stack size cap',            'maxStackSize',         () => { missionConstraints.maxStackSize = null; }],
@@ -145,9 +139,8 @@ const FIELD_MAP = {
     exactbundlevalue:     ['Bundle value equality',        'exactBundleValue',     () => { missionConstraints.exactBundleValue = null; }],
     deliverymultipliers:  ['Delivery multiplier bonus',    'deliveryMultipliers',  () => { missionConstraints.deliveryMultipliers = null; }],
     oneshotbonus:         ['One-shot bonus goal',        'oneShotBonus',         () => { missionConstraints.oneShotBonus = null; }],
-    // Dropping the penalty also lifts the hard ban it added: remove exactly the
-    // penaltyTiles keys from avoidTiles (leaving any tiles a separate avoidTiles
-    // mission contributed), then clear the magnitudes.
+    // Dropping the penalty also lifts the ban it added: remove only the penaltyTiles
+    // keys from avoidTiles (keeping any from a separate avoidTiles mission), then clear.
     penaltytiles:         ['Tile penalty constraint',    'penaltyTiles',         () => {
         for (const key of missionConstraints.penaltyTiles.keys()) missionConstraints.avoidTiles.delete(key);
         missionConstraints.penaltyTiles.clear();
@@ -160,8 +153,8 @@ const FIELD_MAP = {
 
 /**
  * Remove one constraint by fuzzy field name
- * @param {string} field - Field name to remove (e.g. "requiredStackSize", "avoid tiles")
- * @returns {{ok: boolean, label?: string, observation: string}} Result with success flag and message
+ * @param {string} field - Field to remove (e.g. "requiredStackSize", "avoid tiles")
+ * @returns {{ok: boolean, label?: string, observation: string}} Success flag + message
  */
 export function dropMissionField(field) {
     const raw = String(field ?? '').trim();
@@ -175,7 +168,7 @@ export function dropMissionField(field) {
     }
     const [, [label, camel, clear]] = entry;
     clear();
-    // Remove descriptions that were tagged with this field.
+    // Remove descriptions tagged with this field.
     missionConstraints.descriptions = missionConstraints.descriptions.filter(
         d => !d.includes(camel)
     );
@@ -183,7 +176,7 @@ export function dropMissionField(field) {
 }
 
 /**
- * Clear all constraints, restoring default agent behavior
+ * Clear all constraints, restoring default behavior
  * @returns {string} Observation confirming all missions cleared
  */
 export function dropAllMissions() {

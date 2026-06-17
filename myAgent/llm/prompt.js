@@ -3,8 +3,8 @@ import { partner } from './partner.js';
 
 /**
  * Build the system prompt for the LLM command interpreter
- * @param {string} objective - Directive text to execute
- * @returns {string} Fully assembled system prompt string
+ * @param {string} objective - Directive text
+ * @returns {string} Assembled system prompt
  */
 export function buildSystemPrompt(objective) {
     const free    = parcels.free();
@@ -372,9 +372,9 @@ export function buildSystemPrompt(objective) {
 }
 
 /**
- * Build the conversational chat prompt for read-only concurrent answering
- * @param {string} message - User chat message to respond to
- * @returns {string} Fully assembled chat prompt string
+ * Build the read-only conversational chat prompt
+ * @param {string} message - User chat message
+ * @returns {string} Assembled chat prompt
  */
 export function buildChatPrompt(message) {
     const ps = partner.lastStatus;
@@ -413,8 +413,7 @@ export function buildChatPrompt(message) {
             ? missionConstraints.descriptions.map(d => `- ${d}`)
             : ['- None: default behaviour (pick up and deliver parcels autonomously).']),
         // Resolved coordinates, so "which tiles?" is answered from data, not the
-        // paraphrased description. allowedDeliveryTiles is the COMPLEMENT of any
-        // forbidden tiles (you may deliver ONLY at these).
+        // paraphrased description. allowedDeliveryTiles is the COMPLEMENT of forbidden ones.
         ...(missionConstraints.allowedDeliveryTiles?.size > 0
             ? [`- Delivery is restricted to ONLY these tiles: ${[...missionConstraints.allowedDeliveryTiles].map(k => `(${k.replace('_', ',')})`).join(', ')} (any other delivery tile is forbidden).`]
             : []),

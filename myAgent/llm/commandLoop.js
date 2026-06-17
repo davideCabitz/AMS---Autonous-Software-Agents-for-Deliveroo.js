@@ -18,12 +18,9 @@ const MAX_ITERATIONS = 30;
 /** @type {number} Max tool failures before aborting the directive */
 const MAX_TOOL_FAILURES = 1;
 
-// Tools that ACCEPT/CHANGE a persistent mission. When one of these succeeds the
-// directive is a mission, not an action: it must acknowledge with "Mission
-// accepted." in chat. Because the model applies a mission via a TOOL and then
-// ends the directive with "End" (the action output contract forbids a Final
-// Answer after a tool), the loop itself emits the ack — otherwise the mission is
-// applied silently and the sender never hears back (observed bug).
+// Tools that accept/change a persistent mission. When one succeeds the directive
+// is a mission, not an action, and must ack "Mission accepted." in chat — the
+// model ends with "End" (no Final Answer after a tool), so the loop emits the ack.
 const MISSION_TOOLS = new Set([
     'apply_mission', 'forbid_delivery', 'restrict_exploration',
     'dropMission', 'dropMissions',
@@ -32,9 +29,9 @@ const MISSION_TOOLS = new Set([
 ]);
 
 /**
- * Parse ReAct action from model response, tolerating multiple output formats
+ * Parse a ReAct action, tolerating multiple output formats
  * @param {string} text - Raw model response text
- * @returns {{action: string, input: string}|null} Parsed action and input, or null if not found
+ * @returns {{action: string, input: string}|null} Parsed action+input, or null if absent
  */
 function extractAction(text) {
     const a = text.match(/^Action:\s*(.+)$/im);
@@ -53,9 +50,9 @@ function extractAction(text) {
 }
 
 /**
- * Extract Final Answer from model response
+ * Extract a Final Answer from the model response
  * @param {string} text - Raw model response text
- * @returns {string|null} Final answer text, or null if not present
+ * @returns {string|null} Final answer text, or null if absent
  */
 function extractFinal(text) {
     const m = text.match(/^Final Answer:\s*([\s\S]*)$/im);
@@ -63,9 +60,9 @@ function extractFinal(text) {
 }
 
 /**
- * Check if model response contains an "End" termination marker
+ * Whether the response contains an "End" termination marker
  * @param {string} text - Raw model response text
- * @returns {boolean} True if the response signals directive completion
+ * @returns {boolean} True if it signals directive completion
  */
 function hasEndMarker(text) {
     return /^End\.?\s*$/im.test(text);
@@ -73,51 +70,48 @@ function hasEndMarker(text) {
 
 /**
  * Run one chat directive to completion via the ReAct tool-use loop
- * @param {string} objective - The directive text from chat
- * @param {Object} myAgent - The IntentionRevisionReplace instance
+ * @param {string} objective - Directive text from chat
+ * @param {Object} myAgent - IntentionRevisionReplace instance
  * @param {string|null} replySender - Chat ID to reply to (null for stdin tests)
  * @param {Function} [resumeAutonomy] - Called once when the directive ends
- * @param {Array<ChatMessage>} [history] - Prior turns for conversational context
+ * @param {Array<ChatMessage>} [history] - Prior turns for context
  * @returns {Promise<string|null>} Final answer or failure summary; null when aborted
  */
 export async function runDirective(objective, myAgent, replySender, resumeAutonomy, history = []) {
-    // We do NOT gate autonomy at the start: the agent keeps doing its own BDI work
-    // while the LLM is still THINKING (before any command). Each command takes
-    // control for its duration and releases it optimistically when it finishes (see
-    // commandTools), so the agent resumes autonomous work during the think between
-    // commands and after the last one — instead of idling through the confirmation
-    // round-trip. The finally below is a backstop that guarantees the gate is open
-    // and BDI is kicked once the directive ends (except while a handoff owns it).
+    // Autonomy is NOT gated at the start: BDI runs while the LLM thinks. Each command
+    // takes control for its duration and releases it optimistically (see commandTools),
+    // so the agent works between commands instead of idling through the confirmation
+    // round-trip. The finally below backstops gate release once the directive ends
+    // (except while a handoff owns it).
     const tools = buildTools(myAgent, replySender, resumeAutonomy);
     const messages = [
         { role: 'system', content: buildSystemPrompt(objective) },
-        ...history,                                // earlier directives + answers (context)
+        ...history,                                // earlier directives + answers
         { role: 'user',   content: `Directive from chat: ${objective}` },
     ];
 
-    let failures = 0;                              // failed command attempts (budget)
-    let missionApplied = false;                    // a mission tool succeeded → ack with "Mission accepted."
-    let missionDeclined = false;                   // a Level-3 routine refused a net-penalty offer → reply "Mission declined."
+    let failures = 0;                              // failed-command budget
+    let missionApplied = false;                    // mission tool succeeded → ack "Mission accepted."
+    let missionDeclined = false;                   // Level-3 routine refused a net-penalty offer → "Mission declined."
 
     try {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
             if (directive.aborted)
-                return null; // aborted: the abort handler already replied — stay silent
+                return null; // aborted: the handler already replied — stay silent
 
             let out;
             try {
                 out = await callModel(messages, { temperature: 0 });
             } catch (err) {
-                // A single API error (400 content filter, 500, network) must not
-                // crash the BDI agent — report it and end the directive. Chat gets
-                // only a short tag; the full message goes to the log.
+                // A single API error must not crash the BDI agent — report a short tag
+                // to chat, full message to the log, and end the directive.
                 log.error('callModel failed:', err?.message ?? err);
                 const brief = String(err?.message ?? err).split(/[\n.]/)[0].slice(0, 80);
                 return `Failure: LLM error — ${brief}`;
             }
 
             if (directive.aborted)
-                return null; // aborted: the abort handler already replied — stay silent
+                return null; // aborted: the handler already replied — stay silent
 
             log(`iter ${i + 1}: ${out.replace(/\s+/g, ' ').slice(0, 160)}`);
             messages.push({ role: 'assistant', content: out });
@@ -125,9 +119,8 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
             const act   = extractAction(out);
             const final = extractFinal(out);
 
-            // Bare "End" with no Action: the model declares the directive already
-            // complete. A pure action directive ends silently; a mission directive
-            // (a mission tool ran earlier this turn-sequence) acks "Mission accepted.".
+            // Bare "End", no Action: directive already complete. Action directive ends
+            // silently; a mission directive (mission tool ran earlier) acks.
             if (!act && hasEndMarker(out)) return missionDeclined ? 'Mission declined.' : missionApplied ? 'Mission accepted.' : null;
 
             // If both appear, run the Action first.
@@ -138,13 +131,10 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                     : `Error: unknown tool '${act.action}'. Available: ${Object.keys(tools).join(', ')}`;
                 toolLog(`${act.action}(${act.input}) -> ${obs}`);
 
-                // Remember a successful mission change so the directive acks with
-                // "Mission accepted." when it ends (a mission tool that fails leaves
-                // this false → the failure stays silent, as the operator wants).
-                // A tool that returns "Mission declined." (a points-bearing Level-3
-                // routine refusing a net-penalty offer) is NOT an applied mission — it
-                // must NOT flip this true, or the End/final path below would override
-                // its decline with a bogus "Mission accepted." ack.
+                // Track a successful mission change so the directive acks on end (a
+                // failed mission tool leaves this false → silent failure). A "Mission
+                // declined." result must NOT flip missionApplied, or the End path would
+                // override the decline with a bogus accept.
                 const declinedNow = MISSION_TOOLS.has(act.action) && fn
                     && /^Mission declined\.?$/i.test(obs.trim());
                 if (declinedNow) missionDeclined = true;
@@ -153,22 +143,20 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
                     missionApplied = true;
 
                 if (directive.aborted)
-                    return null; // aborted: the abort handler already replied — stay silent
+                    return null; // aborted: the handler already replied — stay silent
 
-                // "End" marker with the Action = "this is my last step": the
-                // directive ends the INSTANT the action completes. Action directives
-                // end silently; a mission directive acks "Mission accepted.".
+                // "End" with the Action = last step: end the instant it completes.
+                // Action directive ends silently; a mission directive acks.
                 if ((hasEndMarker(out) || final) && fn) return missionDeclined ? 'Mission declined.' : missionApplied ? 'Mission accepted.' : null;
 
-                // Failure budget: don't let the LLM keep retrying a stuck directive.
-                // After a few failed commands, give up and let the BDI agent carry on.
+                // Failure budget: give up after a few failed commands so the LLM
+                // doesn't keep retrying a stuck directive.
                 if (/^Failed/.test(obs) && ++failures >= MAX_TOOL_FAILURES) {
                     return `Could not complete the directive after ${failures} failed attempts; resuming autonomous work.`;
                 }
 
-                // Live state with every observation: the system-prompt snapshot is
-                // stale after the first command, and the model must never act on a
-                // remembered position/cargo (e.g. "drop" while carrying nothing).
+                // Live state every observation: the prompt snapshot is stale after the
+                // first command, and the model must never act on remembered pos/cargo.
                 const state = `[Your live state: at (${me.x},${me.y}), carrying ${parcels.carriedBy(me.id).length} parcel(s)]`;
                 messages.push({
                     role: 'user',
@@ -186,10 +174,9 @@ export async function runDirective(objective, myAgent, replySender, resumeAutono
         }
         return `Directive not completed within ${MAX_ITERATIONS} iterations.`;
     } finally {
-        // Defensive: make sure the gate is released and BDI is kicked even if a
-        // command threw before its own finally could run. EXCEPT while the handoff
-        // routine runs: it outlives the directive that started it and owns the
-        // gate until stop_handoff (or abort) ends it.
+        // Backstop: release the gate and kick BDI even if a command threw before its
+        // own finally ran — EXCEPT while the handoff routine runs (it outlives this
+        // directive and owns the gate until stop_handoff/abort).
         if (!handoffRunning()) {
             directive.active = false;
             resumeAutonomy?.();
@@ -225,8 +212,8 @@ const CLASSIFY_PROMPT =
 
 /**
  * Classify an incoming chat message as STOP, GO, ACTION, or CHAT
- * @param {string} text - Raw message text to classify
- * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>} Classification result; defaults to ACTION on ambiguity or error
+ * @param {string} text - Raw message text
+ * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>} Classification; defaults to ACTION on ambiguity/error
  */
 export async function classifyDirective(text) {
     try {
@@ -245,9 +232,9 @@ export async function classifyDirective(text) {
 }
 
 /**
- * Conversational fast-lane: answer a read-only chat message without moving the agent
+ * Conversational fast-lane: answer a read-only chat message without moving
  * @param {string} message - Chat message to answer
- * @param {Array<ChatMessage>} [history] - Prior conversation turns for context
+ * @param {Array<ChatMessage>} [history] - Prior turns for context
  * @returns {Promise<string>} Final answer to send back to the sender
  */
 export async function runConversation(message, history = []) {

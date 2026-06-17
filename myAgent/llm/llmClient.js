@@ -9,20 +9,20 @@ import { createLogger } from '../utils/logger.js';
 const baseURL = process.env.LITELLM_BASE_URL || 'http://localhost:8000/v1';
 const apiKey  = process.env.LITELLM_API_KEY  || 'not-needed-for-local';
 
-/** @type {string} LLM model name to use (environment-configurable) */
+/** @type {string} LLM model name (env-configurable) */
 export const MODEL = process.env.LOCAL_MODEL || 'llama-3.3-70b-lmstudio';
 
-/** @type {string} Fallback model for content-policy failures (if configured) */
+/** @type {string} Fallback model for content-policy failures (if set) */
 const FALLBACK_MODEL = process.env.LOCAL_MODEL_FALLBACK || '';
 
-/** @type {OpenAI} OpenAI client with 90s timeout and max 1 retry */
+/** @type {OpenAI} Client: 90s timeout, max 1 retry */
 const client = new OpenAI({ baseURL, apiKey, timeout: 90_000, maxRetries: 1 });
 const log = createLogger('llm');
 
 /**
- * Check if error is Azure content-policy 400 (retry-able)
+ * Whether an error is a retryable Azure content-policy 400
  * @param {Error} err - Error to inspect
- * @returns {boolean} True if the error is a retryable content-policy violation
+ * @returns {boolean} True if a retryable content-policy violation
  */
 function isContentPolicy(err) {
     const msg = err?.message ?? '';
@@ -31,10 +31,10 @@ function isContentPolicy(err) {
 }
 
 /**
- * Call LLM with message history and optional temperature
+ * Call the LLM with a message history
  * @param {Array<ChatMessage>} messages - Chat history to send
  * @param {{temperature?: number}} options - Optional call parameters
- * @returns {Promise<string>} Assistant message text, or empty string on error
+ * @returns {Promise<string>} Assistant message text (empty string on error)
  */
 export async function callModel(messages, { temperature = 0 } = {}) {
     const complete = async (model) => {

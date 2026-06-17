@@ -5,25 +5,25 @@ import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus
 import { startHandoff, stopHandoff } from './handoff.js';
 
 /**
- * LLM command tool catalogue
- * Every tool returns a STRING observation for ReAct loop reasoning
- * Tool categories: Reasoning (calculate, time), Read (position, parcels), Command (go_to/pickup/deliver), Chat (say)
+ * LLM command tool catalogue. Every tool returns a STRING observation for the
+ * ReAct loop. Categories: reasoning (calculate, time), read (position, parcels),
+ * command (go_to/pickup/deliver), chat (say).
  */
 
-/** @type {number} Max milliseconds a single command may run before timing out */
+/** @type {number} Max ms a single command may run before timing out */
 const COMMAND_TIMEOUT_MS = 30_000;
 
-/** @type {number} Max seconds the wait tool will hold position (prevents indefinite freeze) */
+/** @type {number} Max seconds wait() holds position (prevents indefinite freeze) */
 const MAX_WAIT_SECONDS = 30;
 
 /**
- * Evaluate a math expression and return the result as a string
- * @param {string} expression - Math expression using +, -, *, /, () — may be comma-separated
+ * Evaluate a math expression
+ * @param {string} expression - Expression using + - * / () — may be comma-separated
  * @returns {string} Numeric result(s) or an error message
  */
 function calculate(expression) {
-    // Strip surrounding quotes, then allow several comma-separated expressions in
-    // one call (e.g. "(0+18)/2, (0+19)/2" for a centre tile -> "9, 9.5").
+    // Strip quotes; allow several comma-separated expressions per call
+    // (e.g. "(0+18)/2, (0+19)/2" -> "9, 9.5").
     const raw = String(expression ?? '').trim().replace(/^["']|["']$/g, '');
     const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
     if (parts.length === 0) return 'Error: empty expression.';
@@ -44,9 +44,9 @@ function calculate(expression) {
 }
 
 /**
- * Return current local time in Rome as a JSON string
+ * Current local time in Rome as a JSON string
  * @param {string} location - Location label for the response (cosmetic only)
- * @returns {string} JSON with location, timezone, and time fields
+ * @returns {string} JSON with location, timezone, time fields
  */
 function get_current_time(location) {
     const where = String(location ?? 'Rome').trim() || 'Rome';
@@ -60,9 +60,9 @@ function get_current_time(location) {
 // ---- helpers ------------------------------------------------------------------
 
 /**
- * Parse coordinate input in various formats into {x, y} numbers
- * @param {string} input - Input string, e.g. "5,3" / "(5, 3)" / "x=5 y=3" / "5 3"
- * @returns {{x: number|null, y: number|null}} Parsed coordinates, or nulls if parsing fails
+ * Parse coordinate input in various formats into {x, y}
+ * @param {string} input - e.g. "5,3" / "(5, 3)" / "x=5 y=3" / "5 3"
+ * @returns {{x: number|null, y: number|null}} Coordinates, or nulls if parsing fails
  */
 function parseXY(input) {
     const nums = String(input ?? '').match(/-?\d+/g);
@@ -71,9 +71,9 @@ function parseXY(input) {
 }
 
 /**
- * Parse an optional signed reward token from Level-3 mission input
- * @param {string} input - Raw tool input string, may contain "pts=N" or "points=N"
- * @returns {number|null} Parsed reward value, or null when no reward token is present
+ * Parse an optional signed reward token ("pts=N"/"points=N") from Level-3 input
+ * @param {string} input - Raw tool input string
+ * @returns {number|null} Reward value, or null if no token present
  */
 function parseRewardToken(input) {
     const m = String(input ?? '').match(/(?:pts|points)\s*=\s*(-?\d+)/i);
@@ -81,10 +81,10 @@ function parseRewardToken(input) {
 }
 
 /**
- * Find the highest-reward free parcel sitting on tile (x, y)
- * @param {number} x - Tile x coordinate
- * @param {number} y - Tile y coordinate
- * @returns {string|null} Parcel ID or null if no free parcel is at that tile
+ * Highest-reward free parcel on tile (x, y)
+ * @param {number} x - Tile x
+ * @param {number} y - Tile y
+ * @returns {string|null} Parcel ID, or null if none free there
  */
 function resolveParcelId(x, y) {
     const here = parcels.free().filter(p => Math.round(p.x) === x && Math.round(p.y) === y);
@@ -93,9 +93,9 @@ function resolveParcelId(x, y) {
 }
 
 /**
- * Filter a tile list to only those the agent can currently A*-reach
+ * Filter a tile list to those the agent can currently A*-reach
  * @param {Array<{x: number, y: number}>} tiles - Full tile list
- * @returns {Array<{x: number, y: number}>} Reachable subset, or original list when nothing is reachable
+ * @returns {Array<{x: number, y: number}>} Reachable subset (or original if none reachable)
  */
 function onlyReachable(tiles) {
     const reach = reachableFrom(me);
@@ -104,7 +104,7 @@ function onlyReachable(tiles) {
 }
 
 /**
- * Find the delivery tile nearest to the agent by Manhattan distance
+ * Delivery tile nearest the agent by Manhattan distance
  * @returns {{x: number, y: number}|null} Nearest delivery tile, or null if none known
  */
 function nearestDelivery() {
@@ -115,9 +115,9 @@ function nearestDelivery() {
 }
 
 /**
- * Sleep for ms milliseconds, resolving early if directive.aborted is set
- * @param {number} ms - Maximum sleep duration in milliseconds
- * @returns {Promise<number>} Actual elapsed time in milliseconds
+ * Sleep for ms, resolving early if directive.aborted is set
+ * @param {number} ms - Max sleep duration (ms)
+ * @returns {Promise<number>} Actual elapsed time (ms)
  */
 function abortableDelay(ms) {
     return new Promise(resolve => {
@@ -133,9 +133,9 @@ function abortableDelay(ms) {
 /**
  * Race a promise against a timeout, rejecting with a tagged error on expiry
  * @param {Promise} promise - Promise to race
- * @param {number} ms - Timeout in milliseconds
- * @param {string} tag - Tag included in the timeout rejection value
- * @returns {Promise} Resolves with promise result or rejects with ['timeout', tag]
+ * @param {number} ms - Timeout (ms)
+ * @param {string} tag - Tag included in the timeout rejection
+ * @returns {Promise} Promise result, or rejects with ['timeout', tag]
  */
 function withTimeout(promise, ms, tag) {
     let timer;
@@ -146,11 +146,11 @@ function withTimeout(promise, ms, tag) {
 }
 
 /**
- * Send a chat message that cannot throw or hang (best-effort, bounded by timeout)
+ * Best-effort chat send that cannot throw or hang (bounded by timeout)
  * @param {string} target - Recipient socket ID
- * @param {string} text - Message text to send
- * @param {number} [ms] - Max wait time for server ack in milliseconds
- * @returns {Promise<boolean>} True if the ack arrived within the timeout
+ * @param {string} text - Message text
+ * @param {number} [ms] - Max wait for server ack (ms)
+ * @returns {Promise<boolean>} True if the ack arrived in time
  */
 async function safeSay(target, text, ms = 5_000) {
     if (!target) return false;
@@ -163,7 +163,7 @@ async function safeSay(target, text, ms = 5_000) {
 }
 
 /**
- * Map an intention rejection tag to a human-readable failure observation
+ * Map an intention rejection tag to a readable "Failed:" observation
  * @param {Array|string} err - Rejection value from commandAndAwait
  * @returns {string} Readable failure string prefixed with "Failed:"
  */
@@ -186,7 +186,7 @@ function describeFailure(err) {
 // ---- tool catalogue -----------------------------------------------------------
 
 /**
- * Build the read-only tool subset safe to expose in any context (no world effects)
+ * Read-only tool subset safe in any context (no world effects)
  * @returns {Object} Map of tool name to async function
  */
 function readTools() {
@@ -216,15 +216,14 @@ function readTools() {
         },
         async get_map_info() {
             if (!walkableTiles.length) return 'Map not loaded yet.';
-            // Report only reachable tiles so edges are the reachable extremes.
+            // Only reachable tiles, so edges are the reachable extremes and
+            // "leftmost/rightmost/top/bottom" resolve to a real reachable tile.
             const reach = onlyReachable(walkableTiles);
             const xs = reach.map(t => t.x);
             const ys = reach.map(t => t.y);
             const minX = Math.min(...xs), maxX = Math.max(...xs);
             const minY = Math.min(...ys), maxY = Math.max(...ys);
             const at = (pred) => reach.filter(pred).map(t => ({ x: t.x, y: t.y }));
-            // Reachable tiles on each extreme, so "leftmost/rightmost/top/bottom tile"
-            // directives resolve to a real tile the agent can get to, not a guess.
             return JSON.stringify({
                 bounds: { minX, maxX, minY, maxY },
                 width: maxX - minX + 1,
@@ -242,42 +241,35 @@ function readTools() {
 }
 
 /**
- * Build the read-only toolset for the conversational fast-lane
- * @returns {Object} Map of tool name to async function (no movement or gate changes)
+ * Read-only toolset for the conversational fast-lane (no movement/gate changes)
+ * @returns {Object} Map of tool name to async function
  */
 export function buildChatTools() {
     return {
         ...readTools(),
-        // Read-only and safe concurrently with an action directive: it only sends
-        // a status_req over chat. The chat lane needs it so partner position/cargo
-        // questions are answered live, never from memory.
+        // Read-only, safe concurrently with an action directive (only sends a
+        // status_req). The chat lane needs it to answer partner pos/cargo live.
         async ask_partner_status() { return requestStatus(); },
     };
 }
 
 /**
- * Build the full action toolset for the directive execution lane
- * @param {Object} myAgent - The IntentionRevisionReplace instance
+ * Full action toolset for the directive execution lane
+ * @param {Object} myAgent - IntentionRevisionReplace instance
  * @param {string|null} replySender - Chat ID of the directive sender (for say())
- * @param {Function} [resumeAutonomy] - Called when the gate is released after each command
+ * @param {Function} [resumeAutonomy] - Called when the gate releases after each command
  * @returns {Object} Map of tool name to async function
  */
 export function buildTools(myAgent, replySender, resumeAutonomy) {
-    // Run a BDI command. The gate is released OPTIMISTICALLY the instant each
-    // command finishes (see finally) rather than being held through the whole
-    // directive: otherwise the autonomy gate stays shut across the confirmation
-    // round-trip (the LLM call that decides whether another command follows), and
-    // on a single-command directive like "go to the bottom spawn" the agent idles
-    // at the destination for seconds instead of letting its strategy start picking
-    // up parcels. If the LLM does issue a follow-up command, this helper re-takes
-    // the gate and halts whatever the strategy began during the gap, so each
-    // command still starts from a clean state.
+    // Run a BDI command, releasing the gate OPTIMISTICALLY the instant it finishes
+    // (see finally) rather than holding it across the whole directive — otherwise the
+    // gate stays shut through the confirmation round-trip and a single-command
+    // directive idles at the destination instead of letting the strategy work. A
+    // follow-up command re-takes the gate and halts whatever the strategy began.
     //
-    // Trade-off vs. holding the gate: the agent may do its own BDI work — and thus
-    // physically move — during the inter-command think. A move-then-stay sequence
-    // ("go to X, then hold/wait/put_down") can drift in that gap before the
-    // stationary command re-grabs. Stationary commands manage their own gate and
-    // don't go through this helper.
+    // Trade-off: the agent may do its own BDI work (and move) during the inter-command
+    // think, so a move-then-stay sequence can drift before the stationary command
+    // re-grabs. Stationary commands manage their own gate and skip this helper.
     const command = async (predicate, ok) => {
         if (trafficLight.red)
             return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
@@ -285,23 +277,20 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         myAgent.haltCurrent();                         // drop any BDI intention started in the gap
         try {
             await withTimeout(myAgent.commandAndAwait(predicate), COMMAND_TIMEOUT_MS, predicate[0]);
-            return ok();                               // built while the gate is still ours (live pos)
+            return ok();                               // built while the gate is ours (live pos)
         } catch (err) {
             return describeFailure(err);
         } finally {
-            // Hand control back to BDI immediately; a follow-up command re-takes it above.
+            // Hand control back to BDI; a follow-up command re-takes it above.
             directive.active = false;
             resumeAutonomy?.();
         }
     };
 
-    // Accumulate a Level-3 routine's reward into its running net total (mirrored to
-    // the worker) and report whether the routine is now armed. `field` is the
-    // missionConstraints net key ('handoffNet'|'gatherNet'|'lightNet'). The reward is
-    // parsed from the tool input as an explicit pts=N token; absent ⇒ 0 (neutral, the
-    // no-reward mission still counts as armed). The decision is the net's sign, so a
-    // later positive offer can outweigh an earlier penalty and re-arm, and a later
-    // penalty can flip an armed routine off — see armedByNet (net >= 0 ⇒ armed).
+    // Add a Level-3 routine's reward to its running net total (mirrored to the
+    // worker) and report whether it is now armed. `field` is the net key
+    // ('handoffNet'|'gatherNet'|'lightNet'); reward comes from a pts=N token, absent ⇒
+    // 0 (still armed). Armed iff net >= 0, so a later offer can re-arm or disarm.
     const applyRoutineNet = (field, input) => {
         const pts = parseRewardToken(input);
         if (pts != null) {
@@ -325,9 +314,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             const { x, y } = parseXY(input);
             if (x == null) return `Error: go_pickup needs "x,y" (got '${input}').`;
             const id = resolveParcelId(x, y);
-            // Known parcel -> proper go_pick_up (updates beliefs by id). Unknown ->
-            // navigate there and try a blind pickup anyway: a parcel may have spawned
-            // during the walk, or sit outside the last sensing snapshot.
+            // Known parcel -> go_pick_up (updates beliefs by id). Unknown -> navigate
+            // and try a blind pickup (one may spawn during the walk or be off-snapshot).
             const predicate = id != null ? ['go_pick_up', x, y, id] : ['go_to', x, y];
             return command(predicate, () => {
                 const carrying = parcels.carriedBy(me.id).length;
@@ -340,11 +328,9 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             });
         },
         async pickup_next_parcel() {
-            // "Pick up the next parcel": release the autonomy gate and let the
-            // SELECTED BDI STRATEGY hunt — it explores spawners and reacts to
-            // sensing in real time (picks up the instant a parcel enters range),
-            // which no LLM wait/sense polling loop can match. We watch the carried
-            // set and take control back the moment a NEW parcel id appears.
+            // Release the gate and let the selected BDI strategy hunt — it explores
+            // and reacts to sensing in real time (no LLM poll loop can match it). We
+            // watch the carried set and re-take control when a NEW parcel id appears.
             if (trafficLight.red)
                 return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
             const before = new Set(parcels.carriedBy(me.id).map(p => p.id));
@@ -354,7 +340,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
                 const fresh = parcels.carriedBy(me.id).find(p => !before.has(p.id));
                 if (fresh) {
                     directive.active = true;        // take control back from BDI
-                    myAgent.haltCurrent();          // it may already be heading off to deliver
+                    myAgent.haltCurrent();          // it may already be off to deliver
                     return `Picked up parcel ${fresh.id} at (${me.x},${me.y}); now carrying ${parcels.carriedBy(me.id).length}.`;
                 }
                 await new Promise(r => setTimeout(r, 100));
@@ -364,8 +350,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         async deliver(input) {
             const carrying = parcels.carriedBy(me.id).length;
             if (carrying === 0) return 'Nothing to deliver (not carrying any parcel).';
-            // Optional "x,y" → deliver at that specific tile (e.g. "deliver in 1,1"
-            // missions); without coordinates fall back to the nearest delivery tile.
+            // Optional "x,y" → deliver at that tile; else the nearest delivery tile.
             const { x, y } = parseXY(input);
             let t;
             if (x != null) {
@@ -379,16 +364,14 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
                 `Delivered at (${t.x},${t.y}); score now ${me.score}.`);
         },
         async put_down() {
-            // Drop cargo on the CURRENT tile without navigating anywhere. On a plain
-            // tile this is a handoff drop (no score); on a delivery tile it scores.
+            // Drop cargo on the CURRENT tile without navigating. Plain tile = handoff
+            // drop (no score); delivery tile = scores.
             const carried = parcels.carriedBy(me.id);
             if (carried.length === 0) return 'Nothing to put down (not carrying any parcel).';
-            // Gate autonomy: without this, BDI resumes the instant the directive ends
-            // and re-picks the parcel from under us — the drop looks like a no-op.
+            // Gate autonomy, else BDI resumes on directive end and re-picks the parcel.
             directive.active = true;
             myAgent.haltCurrent();
-            // Pass the explicit id list: the SDK default is [] and the server treats
-            // an empty selection as "nothing", not "everything".
+            // Explicit id list: the SDK default [] is treated as "nothing" by the server.
             const dropped = await withTimeout(
                 socket.emitPutdown(carried.map(p => p.id)), 5_000, 'putdown'
             ).catch(() => null);
@@ -443,8 +426,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
                       : `Sent to ${replySender ?? 'console'} (delivery not confirmed): ${text}`;
         },
 
-        // partner (the second, worker agent) — orders run on the worker and return
-        // its result; they do NOT move this agent, so autonomy here is not gated.
+        // partner (worker agent) — orders run on the worker; they don't move this
+        // agent, so autonomy is not gated here.
         async order_partner_goto(input) {
             const { x, y } = parseXY(input);
             if (x == null) return `Error: order_partner_goto needs "x,y" (got '${input}').`;
@@ -461,7 +444,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             const { x, y } = parseXY(input);
             if (trafficLight.red) return 'Failed: RED LIGHT in force — the partner must not move either.';
             if (x != null) return sendOrder(['go_deliver', x, y]);
-            // No coordinates: send the worker to the delivery tile nearest ITS position.
+            // No coordinates: deliver at the tile nearest the worker's position.
             const wpos = partner.lastStatus ?? me;
             const t = deliveryTiles.length
                 ? [...deliveryTiles].sort((a, b) =>
@@ -477,9 +460,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         async resume_partner() { return sendResume(); },
         async ask_partner_status() { return requestStatus(); },
 
-        // cross-agent handoff routine ("one picks up, the other delivers" missions).
-        // Pass pts=N when the mission states a reward; the running handoffNet decides
-        // whether to arm. A net penalty (net < 0) declines and stops any running loop.
+        // Cross-agent handoff ("one picks up, the other delivers"). pts=N reward feeds
+        // handoffNet; a net penalty declines and stops any running loop.
         async start_handoff(input) {
             if (!applyRoutineNet('handoffNet', input)) {
                 stopHandoff();   // no-op if not running; stops it if a penalty flipped it off
@@ -489,14 +471,11 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         },
         async stop_handoff()  { return stopHandoff(); },
 
-        // Red-light-green-light mission control. ARM the mission when the admin
-        // ANNOUNCES the game ("let's begin a red light green light game …"); only
-        // once armed do the live "RED LIGHT!/GREEN LIGHT!" shouts (classified as
-        // STOP/GO) stop/resume the agents. This is what stops a stray "red light" in
-        // chat from freezing the agents before any mission has started.
+        // Red-light-green-light control. Arm on the admin's ANNOUNCEMENT; only once
+        // armed do live RED/GREEN shouts (classified STOP/GO) stop/resume the agents —
+        // so a stray "red light" before the mission starts is ignored.
         async start_light_mission(input) {
-            // Pass pts=N when the announcement states a reward; lightNet decides arming.
-            // A net penalty (net < 0) declines and disarms any active light mission.
+            // pts=N feeds lightNet; a net penalty declines and disarms.
             if (!applyRoutineNet('lightNet', input)) {
                 lightMission.active = false;
                 trafficLight.red = false;
@@ -511,11 +490,9 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return 'Red-light-green-light mission ended: light shouts no longer affect the agents.';
         },
 
-        // Multiplier-based missions ("5× pts at (x,y)", "stacks of N for 0.3 reward").
-        // Accumulates (mult − 1.0) into multiplierNet; arms when the running net ≥ 0
-        // (same armedByNet gate as Level-3 routines). Only when armed does it apply
-        // the accompanying Level-2 constraint (deliveryMultipliers, requiredStackSize, etc.),
-        // so a lone 0.3× offer is declined while a later 5× offer re-arms and applies.
+        // Multiplier missions ("5× pts at (x,y)", "stacks of N for 0.3 reward").
+        // Accumulates (mult − 1.0) into multiplierNet; arms when net ≥ 0 and only then
+        // applies the Level-2 constraint — so a lone 0.3× is declined, a later 5× re-arms.
         async start_multiplier_mission(input) {
             let config;
             try { config = JSON.parse(String(input ?? '{}')); }
@@ -540,24 +517,19 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return `Mission accepted. Multiplier net: ${missionConstraints.multiplierNet.toFixed(2)}.`;
         },
 
-        // "Move both agents near (x,y) within distance D and wait for each other".
-        // Deterministic end-to-end: enumerate the walkable tiles within Manhattan
-        // distance D of (x,y) (the centre itself may be a wall/forbidden — only the
-        // surrounding tiles matter), keep the ones each agent can actually reach,
-        // assign two DIFFERENT tiles (one per agent, never each other's current
-        // tile — two agents can't share a tile), park the worker on its tile, send
-        // B to the other, then make BOTH hold. The LLM only supplies (x,y[,D]) — it
-        // no longer has to guess tiles (it has no tool to enumerate them, which is
-        // why the prompt-only version picked walls / unreachable / identical tiles).
+        // "Move both agents near (x,y) within distance D and wait." Deterministic:
+        // enumerate walkable tiles within Manhattan distance D of (x,y) (centre may be
+        // a wall), keep reachable ones, assign two DIFFERENT tiles (never each other's
+        // current tile), park the worker on one, send B to the other, hold both. The
+        // LLM only supplies (x,y[,D]) — it has no tool to enumerate tiles itself.
         async gather_near(input) {
-            // Accumulate the gather routine's reward (pts=N) into gatherNet first; a net
-            // penalty declines and releases any hold this routine put both agents in.
+            // Accumulate reward (pts=N) into gatherNet; a net penalty declines and
+            // releases any hold this routine set.
             if (!applyRoutineNet('gatherNet', input)) {
                 if (manualHold.active) { manualHold.active = false; sendResume(); }
                 return 'Mission declined.';
             }
-            // Strip the pts=N token BEFORE parsing geometry so the reward's digits are
-            // never mistaken for a coordinate (a bare 4th number is NOT a reward).
+            // Strip pts=N before parsing geometry so the reward isn't read as a coordinate.
             const geom = String(input ?? '').replace(/(?:pts|points)\s*=\s*-?\d+/i, '');
             const nums = geom.match(/-?\d+/g);
             if (!nums || nums.length < 2)
@@ -569,15 +541,13 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             if (!partner.id)
                 return 'Failed: no partner connected — this mission needs both agents in position.';
 
-            // Gate B's autonomy and stop any in-flight move NOW, so B waits put while
-            // the worker travels (the partner order below is awaited up to 45s — without
-            // this the autonomous strategy keeps driving B during that wait).
+            // Gate B and stop any in-flight move now, so B waits put while the worker
+            // travels (the partner order below is awaited up to 45s).
             directive.active = true;
             myAgent.haltCurrent();
 
-            // Refresh the worker's live position (it only streams while under an order,
-            // so a cached status can be stale) so its tile is chosen from where it
-            // actually is. status_req is answered immediately; bounded at 5s anyway.
+            // Refresh the worker's live position (cached status can be stale; it only
+            // streams under an order) so its tile is chosen from where it actually is.
             await requestStatus().catch(() => {});
             const aPos = partner.lastStatus?.x != null
                 ? { x: Math.round(partner.lastStatus.x), y: Math.round(partner.lastStatus.y) }
@@ -613,9 +583,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             if (!tileA)
                 return `Failed: only one distinct tile is available within distance ${dist} of (${cx},${cy}); need two.`;
 
-            // 4. park the worker first (halt so it stays put after arriving), then move
-            //    B to its tile, then hold both. Worker first so it has vacated any tile
-            //    B is heading for before B moves.
+            // 4. park the worker first (halt so it stays put), then move B, then hold
+            //    both. Worker first so it vacates any tile B is heading for.
             sendHalt();
             const aRes = await sendOrder(['go_to', tileA.x, tileA.y]);
             if (directive.aborted) return null;            // abort handler already replied
@@ -629,9 +598,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return `Both agents in position within distance ${dist} of (${cx},${cy}): you at (${me.x},${me.y}), partner at (${tileA.x},${tileA.y}) [${aRes}]. Both holding — say "resume" to release.`;
         },
 
-        // Level-2 persistent mission management. The mutation logic lives in
-        // missionState.js (shared with the worker); every change is mirrored to
-        // the partner so persistent missions bind BOTH agents.
+        // Level-2 persistent missions. Mutation logic lives in missionState.js (shared
+        // with the worker); every change is mirrored so missions bind BOTH agents.
         async apply_mission(input) {
             let config;
             try { config = JSON.parse(String(input ?? '{}')); }
@@ -675,10 +643,9 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return `Spawner zone restricted to ${zone} half (${filtered.length} spawners).`;
         },
 
-        // Deterministic executor for the whole "don't deliver here" family
-        // (penalty / 0-pts / never deliver in ...). Resolves a side keyword or
-        // explicit coordinates to real delivery tiles and EXCLUDES them by
-        // narrowing allowedDeliveryTiles — the LLM never does the arithmetic.
+        // Deterministic "don't deliver here" executor (penalty / 0-pts / never deliver
+        // in ...). Resolves a side keyword or coordinates to real tiles and excludes
+        // them by narrowing allowedDeliveryTiles — the LLM never does the arithmetic.
         async forbid_delivery(input) {
             const raw = String(input ?? '').trim();
             if (!raw)
@@ -690,10 +657,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             let forbidden; // array of {x,y} delivery tiles to exclude
 
             if (SIDES.includes(side)) {
-                // Resolve named edges over the FULL deliveryTiles (NOT the
-                // reachability-filtered sense_delivery_tiles) with the fixed
-                // convention: leftmost=min x, rightmost=max x, top=max y, bottom=min y.
-                // Ties → every tile sitting at that extreme.
+                // Named edges over the FULL deliveryTiles: leftmost=min x, rightmost=max
+                // x, top=max y, bottom=min y. Ties → every tile at that extreme.
                 const xs = deliveryTiles.map(t => t.x), ys = deliveryTiles.map(t => t.y);
                 const PICK = {
                     leftmost:  { val: Math.min(...xs), key: t => t.x },
@@ -717,8 +682,8 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             }
 
             const forbiddenKeys = new Set(forbidden.map(t => `${t.x}_${t.y}`));
-            // Accumulate: subtract from the CURRENT allowed set (or all delivery
-            // tiles if none yet), so repeated forbids stack instead of clobbering.
+            // Subtract from the CURRENT allowed set (or all tiles if none yet), so
+            // repeated forbids stack instead of clobbering.
             const baseAllowed = missionConstraints.allowedDeliveryTiles?.size > 0
                 ? [...missionConstraints.allowedDeliveryTiles]
                 : deliveryTiles.map(t => `${t.x}_${t.y}`);
@@ -731,8 +696,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
 
             const newAllowed   = newAllowedKeys.map(k => k.split('_').map(Number));
             const sideLabel    = SIDES.includes(side) ? `${side} delivery tile ` : '';
-            // Coordinate-bearing description → conversational recall can name the
-            // exact tiles regardless of how the mission was phrased.
+            // Coordinate-bearing description so conversational recall can name the tiles.
             const description  = `never deliver in ${sideLabel}${resolved}`;
             applyMissionConfig({ allowedDeliveryTiles: newAllowed, description });
             sendConstraint('apply', { allowedDeliveryTiles: newAllowed, description });

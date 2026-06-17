@@ -10,25 +10,25 @@ const log = createLogger('llm:partner');
 const workerId = process.env.WORKER_ID ?? null;
 
 /**
- * Coordinator-side partner agent link (JSON protocol over chat channel)
- * Commands worker with orders, constraints, halt/resume; receives results and status updates
+ * Coordinator-side partner link (JSON protocol over the chat channel). Sends orders,
+ * constraints, halt/resume; receives results and status updates.
  */
 
-/** @type {PartnerState} Live state of the connected partner agent */
+/** @type {PartnerState} Live state of the connected partner */
 export const partner = { id: null, name: null, lastStatus: null };
 
 /** @type {number} Counter for unique order IDs */
 let nextOrderId = 1;
 
-/** @type {Map<string, {resolve: Function, timer: any}>} Pending orders awaiting result callbacks */
+/** @type {Map<string, {resolve: Function, timer: any}>} Pending orders awaiting results */
 const pending = new Map();
 
-/** @type {string} Well-known key used to track in-flight status requests */
+/** @type {string} Key tracking the in-flight status request */
 const STATUS_KEY = '__status__';
 
 /**
- * Send a JSON payload to the partner over the chat channel (fire-and-forget)
- * @param {Object} payload - JSON-serializable message object
+ * Send a JSON payload to the partner (fire-and-forget)
+ * @param {Object} payload - JSON-serializable message
  * @returns {boolean} False if no partner is connected
  */
 function sendJson(payload) {
@@ -39,10 +39,10 @@ function sendJson(payload) {
 }
 
 /**
- * Handle a partner-protocol JSON message addressed to the coordinator
+ * Handle a partner-protocol JSON message to the coordinator
  * @param {Object} msg - Parsed JSON message with a type field
- * @param {string} sender - Socket ID of the sender
- * @returns {boolean} True when the message was a recognized partner message and was consumed
+ * @param {string} sender - Sender socket ID
+ * @returns {boolean} True if recognized and consumed
  */
 export function handlePartnerMessage(msg, sender) {
     switch (msg.type) {
@@ -63,8 +63,7 @@ export function handlePartnerMessage(msg, sender) {
             if (entry) {
                 pending.delete(msg.orderId);
                 clearTimeout(entry.timer);
-                // Uniform 'Failed:' prefix so callers (handoff loop, LLM
-                // observations) can detect failure the same way as local tools.
+                // Uniform 'Failed:' prefix so callers detect failure like local tools.
                 entry.resolve(msg.ok
                     ? String(msg.detail ?? 'Done.')
                     : `Failed: ${msg.detail ?? 'order failed'}`);
@@ -88,9 +87,9 @@ export function handlePartnerMessage(msg, sender) {
 }
 
 /**
- * Await a keyed reply, resolving with a readable timeout message if the partner does not respond
- * @param {string} key - Map key to register the pending promise under
- * @param {number} timeoutMs - Milliseconds before timing out
+ * Await a keyed reply, resolving with a timeout message if the partner is silent
+ * @param {string} key - Map key for the pending promise
+ * @param {number} timeoutMs - Ms before timing out
  * @param {string} timeoutMsg - Message to resolve with on timeout
  * @returns {Promise<string>} Partner reply or timeout message
  */
@@ -105,10 +104,10 @@ function awaitReply(key, timeoutMs, timeoutMsg) {
 }
 
 /**
- * Send a BDI predicate to the worker and await its result observation
- * @param {Array} predicate - Predicate to execute, e.g. ['go_to', 5, 3] or ['putdown']
- * @param {number} [timeoutMs] - Max wait time in milliseconds
- * @returns {Promise<string>} Worker's result detail string (success or failure)
+ * Send a BDI predicate to the worker and await its result
+ * @param {Array} predicate - e.g. ['go_to', 5, 3] or ['putdown']
+ * @param {number} [timeoutMs] - Max wait (ms)
+ * @returns {Promise<string>} Worker's result detail (success or failure)
  */
 export async function sendOrder(predicate, timeoutMs = 45_000) {
     if (!partner.id) return 'No partner connected yet.';
@@ -123,8 +122,8 @@ export async function sendOrder(predicate, timeoutMs = 45_000) {
 }
 
 /**
- * Freeze the worker by halting its current plan and gating its autonomy
- * @returns {string} Confirmation message or no-partner notice
+ * Freeze the worker (halt its plan and gate its autonomy)
+ * @returns {string} Confirmation or no-partner notice
  */
 export function sendHalt() {
     return sendJson({ type: 'halt' })
@@ -134,7 +133,7 @@ export function sendHalt() {
 
 /**
  * Unfreeze the worker and re-trigger its deliberation
- * @returns {string} Confirmation message or no-partner notice
+ * @returns {string} Confirmation or no-partner notice
  */
 export function sendResume() {
     return sendJson({ type: 'resume' })
@@ -145,7 +144,7 @@ export function sendResume() {
 /**
  * Mirror a mission-constraint mutation to the worker (fire-and-forget)
  * @param {'apply'|'drop'|'dropAll'} op - Operation type
- * @param {Object|string} [payload] - Config object for apply, field name for drop
+ * @param {Object|string} [payload] - Config for apply, field name for drop
  */
 export function sendConstraint(op, payload) {
     if (!partner.id) return;
@@ -155,9 +154,9 @@ export function sendConstraint(op, payload) {
 }
 
 /**
- * Request a live status snapshot from the worker (position, carrying, frozen state)
- * @param {number} [timeoutMs] - Max wait time in milliseconds
- * @returns {Promise<string>} JSON status string or timeout/no-partner message
+ * Request a live status snapshot from the worker (position, cargo, frozen state)
+ * @param {number} [timeoutMs] - Max wait (ms)
+ * @returns {Promise<string>} JSON status, or timeout/no-partner message
  */
 export async function requestStatus(timeoutMs = 5_000) {
     if (!partner.id) return 'No partner connected yet.';
