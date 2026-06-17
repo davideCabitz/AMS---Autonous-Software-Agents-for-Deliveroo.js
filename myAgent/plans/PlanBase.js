@@ -2,10 +2,10 @@ import { IntentionDeliberation } from '../intentions/IntentionDeliberation.js';
 
 /**
  * @class PlanBase
- * Base class for executable plans (BDI plan library)
+ * Base class for executable plans (BDI plan library).
  */
 export class PlanBase {
-    /** @type {boolean} Whether this plan has been stopped */
+    /** @type {boolean} Stopped flag */
     #stopped = false;
 
     /** @type {Array<IntentionDeliberation>} Sub-intentions spawned by this plan */
@@ -14,28 +14,24 @@ export class PlanBase {
     /** @type {Object} Parent intention context */
     #parent;
 
-    /**
-     * @param {Object} parent - Parent intention object
-     */
+    /** @param {Object} parent - Parent intention */
     constructor(parent) {
         this.#parent = parent;
     }
 
-    /** @type {boolean} True if plan execution has been stopped */
+    /** @type {boolean} Stopped flag */
     get stopped() {
         return this.#stopped;
     }
 
-    /**
-     * Stop this plan and all its sub-intentions
-     */
+    /** Stop this plan and all its sub-intentions */
     stop() {
         this.#stopped = true;
         for (const sub of this.#sub_intentions) sub.stop();
     }
 
     /**
-     * Log message through parent intention
+     * Log through the parent intention
      * @param {...any} args - Log arguments
      */
     log(...args) {
@@ -44,8 +40,8 @@ export class PlanBase {
 
     /**
      * Create and execute a sub-intention
-     * @param {Array} predicate - Intention predicate (e.g., ['go_to', x, y])
-     * @returns {Promise<*>} Result of sub-intention execution
+     * @param {Array} predicate - Predicate (e.g. ['go_to', x, y])
+     * @returns {Promise<*>} Sub-intention result
      */
     async subIntention(predicate) {
         const sub = new IntentionDeliberation(this.#parent, predicate);
@@ -54,17 +50,17 @@ export class PlanBase {
     }
 
     /**
-     * Check if this plan applies to the given predicate
-     * @param {...any} _predicate - Intention predicate elements
-     * @returns {boolean} False (must override in subclass)
+     * Whether this plan applies to a predicate (override in subclass)
+     * @param {...any} _predicate - Predicate elements
+     * @returns {boolean}
      */
     static isApplicableTo(..._predicate) {
         return false;
     }
 
     /**
-     * Execute the plan
-     * @param {...any} _predicate - Intention predicate elements
+     * Execute the plan (override in subclass)
+     * @param {...any} _predicate - Predicate elements
      * @returns {Promise<boolean>}
      */
     async execute(..._predicate) {

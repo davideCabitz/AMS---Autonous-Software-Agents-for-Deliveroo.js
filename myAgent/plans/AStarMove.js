@@ -3,21 +3,21 @@ import { navigateTo }  from '../utils/astar.js';
 
 /**
  * @class AStarMove
- * Navigate to target using A* pathfinding (no obstacles blocking)
+ * Navigate to a target via A* (no crates blocking the route).
  */
 export class AStarMove extends PlanBase {
     /**
-     * Check if A* navigation applies (always yes for go_to)
+     * Applies to any go_to
      * @param {string} intent - Intention type
      * @returns {boolean}
      */
     static isApplicableTo(intent) { return intent === 'go_to'; }
 
     /**
-     * Execute A* navigation
+     * Navigate to (x, y)
      * @param {string} intent - 'go_to'
-     * @param {number} x - Target x coordinate
-     * @param {number} y - Target y coordinate
+     * @param {number} x - Target x
+     * @param {number} y - Target y
      * @returns {Promise<boolean>}
      */
     async execute(intent, x, y) {

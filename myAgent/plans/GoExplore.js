@@ -2,21 +2,21 @@ import { PlanBase } from './PlanBase.js';
 
 /**
  * @class GoExplore
- * Navigate to exploration target
+ * Navigate to an exploration target (a spawner).
  */
 export class GoExplore extends PlanBase {
     /**
-     * Check if exploration applies
+     * Applies to go_explore
      * @param {string} intent - Intention type
      * @returns {boolean}
      */
     static isApplicableTo(intent) { return intent === 'go_explore'; }
 
     /**
-     * Navigate to spawner for exploration
+     * Navigate to the spawner at (x, y)
      * @param {string} intent - 'go_explore'
-     * @param {number} x - Spawner x coordinate
-     * @param {number} y - Spawner y coordinate
+     * @param {number} x - Spawner x
+     * @param {number} y - Spawner y
      * @returns {Promise<boolean>}
      */
     async execute(intent, x, y) {

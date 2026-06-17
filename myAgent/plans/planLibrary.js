@@ -5,8 +5,8 @@ import { PddlMove }   from './PddlMove.js';
 import { AStarMove }  from './AStarMove.js';
 
 /**
- * Plan library ordered by applicability checking
- * PddlMove is checked before AStarMove: crate-planning only triggers when needed
+ * Plan library, in applicability-check order. PddlMove precedes AStarMove so
+ * crate-planning triggers only when needed.
  * @type {Array<typeof PlanBase>}
  */
 export const planLibrary = [GoPickUp, GoDeliver, GoExplore, PddlMove, AStarMove];

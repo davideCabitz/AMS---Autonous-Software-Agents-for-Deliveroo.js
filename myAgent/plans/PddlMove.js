@@ -17,14 +17,13 @@ import { findRoute, waitForArrival } from '../utils/astar.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const domain    = readFileSync(join(__dirname, '../../domain-deliveroo.pddl'), 'utf8');
 
-// PDDL object names must start with a letter (a leading digit is read as a number
-// by the solver), so tiles are named t<x>_<y> and crates c<x>_<y>.
-// rawKey is the un-prefixed "<x>_<y>" form used only as an internal A* map key.
+// PDDL object names must start with a letter (a leading digit reads as a number), so
+// tiles are t<x>_<y> and crates c<x>_<y>. rawKey is the un-prefixed "<x>_<y>" A* key.
 const pTile   = (x, y) => `t${Math.round(x)}_${Math.round(y)}`;
 const rawKey  = (x, y) => `${Math.round(x)}_${Math.round(y)}`;
 const crateId = (x, y) => `c${Math.round(x)}_${Math.round(y)}`;
 
-// Plan action name -> game move direction. Walking and pushing are both a single
+// Plan action name -> game move direction. Walking and pushing are both one
 // directional move (you push a crate by walking into it).
 const ACTION_DIR = {
     right: 'right', left: 'left', up: 'up', down: 'down',
@@ -35,14 +34,14 @@ const MAX_REPLANS = 6;
 
 /**
  * @class PddlMove
- * Navigate to target using PDDL crate-pushing when crates block the route
+ * Navigate to a target via PDDL crate-pushing when crates block the route.
  */
 export class PddlMove extends PlanBase {
     /**
-     * Check if PDDL planning is needed (crates block all paths)
+     * Applies when crates block every crate-free path but a push could clear one
      * @param {string} intent - Intention type
-     * @param {number} x - Target x coordinate
-     * @param {number} y - Target y coordinate
+     * @param {number} x - Target x
+     * @param {number} y - Target y
      * @returns {boolean}
      */
     static isApplicableTo(intent, x, y) {
@@ -53,10 +52,10 @@ export class PddlMove extends PlanBase {
     }
 
     /**
-     * Execute PDDL crate-pushing plan
+     * Solve and run a crate-pushing plan, replanning on mid-plan blocks
      * @param {string} intent - 'go_to'
-     * @param {number} x - Target x coordinate
-     * @param {number} y - Target y coordinate
+     * @param {number} x - Target x
+     * @param {number} y - Target y
      * @returns {Promise<boolean>}
      */
     async execute(intent, x, y) {
@@ -69,7 +68,7 @@ export class PddlMove extends PlanBase {
             if (this.stopped) throw ['stopped'];
             if (pTile(me.x, me.y) === goalTile) return true;
 
-            // Build the problem from the CURRENT state (so a replan picks up new crates).
+            // Build from the CURRENT state so a replan picks up new crates.
             const problem = this.#buildProblem(goalTile);
 
             let plan;
@@ -121,8 +120,7 @@ export class PddlMove extends PlanBase {
             const isPush = actionName.startsWith('push');
             const [dx, dy] = DIR_DELTA[dir];
 
-            // For push actions, capture old/new crate positions before the move.
-            // Agent is at me.x/me.y; crate is one step ahead; destination is two steps ahead.
+            // On a push, the crate's new position is two tiles ahead of the agent.
             let newCrateTile = null;
             if (isPush) {
                 newCrateTile = {
@@ -131,18 +129,15 @@ export class PddlMove extends PlanBase {
                 };
             }
 
-            // Target tile of this step (agent advances one tile, into the crate's
-            // old position on a push).
+            // This step's target (one tile ahead; the crate's old tile on a push).
             const tx = Math.round(me.x) + dx;
             const ty = Math.round(me.y) + dy;
 
             const fromX = Math.round(me.x), fromY = Math.round(me.y);
 
-            // Pre-step: if sensing added a crate to the next planned tile since this plan
-            // was built (happens when the crate was outside observation range at plan time),
-            // abort before moving and let execute() replan with the crate now in crateTiles.
-            // Skip push steps: for those, the crate at nextKey is expected and intended —
-            // the push action works by walking INTO the crate tile.
+            // If sensing added a crate to the next planned tile since the plan was built
+            // (it was out of range at plan time), abort and let execute() replan. Skip
+            // push steps: there the crate at nextKey is intended (you push into it).
             const nextKey = rawKey(tx, ty);
             if (!isPush && crateTiles.some(c => rawKey(c.x, c.y) === nextKey)) {
                 log(`crate now on planned tile ${nextKey} — replanning`);
@@ -153,16 +148,15 @@ export class PddlMove extends PlanBase {
             const r = await socket.emitMove(dir);
             if (!r) return true;
 
-            // Wait until the agent has actually arrived before the next step — the
-            // ack fires mid-transition, so continuing immediately overlaps moves
-            // and drifts diagonally. `me` is updated (rounded) by onYou.
+            // Wait for actual arrival before the next step — the ack fires mid-transition,
+            // so continuing immediately overlaps moves and drifts diagonally.
             const ok = await waitForArrival(tx, ty);
             moveLog(`${dir}${isPush ? '(push)' : ''} `
                 + `(${fromX},${fromY})→(${tx},${ty}) ${ok ? 'arrived' : 'TIMEOUT'} `
                 + `in ${Date.now() - tStep}ms now raw=(${me.rawX},${me.rawY}) tile=(${me.x},${me.y})`);
 
-            // The agent just moved onto a tile — if it was tracked as a crate (the old
-            // crate position after a push), remove it now.
+            // If the tile just entered was tracked as a crate (the old position after a
+            // push), clear it.
             const movedKey = ck(me.x, me.y);
             const staleIdx = crateTiles.findIndex(c => ck(c.x, c.y) === movedKey);
             if (staleIdx !== -1) {
@@ -179,8 +173,7 @@ export class PddlMove extends PlanBase {
                 }
             }
 
-            // Opportunistic pickup: grab any free parcel sitting on this tile
-            // without deviating from the plan — costs only the pickup emit.
+            // Opportunistic pickup: grab any free parcel on this tile (costs only the emit).
             if (!this.stopped) {
                 const mx = Math.round(me.x), my = Math.round(me.y);
                 const here = parcels.free().filter(
@@ -195,24 +188,23 @@ export class PddlMove extends PlanBase {
                 }
             }
 
-            // Pacing is governed by the server's movement_duration (emitMove
-            // resolves only when the move completes), not a client-side sleep.
+            // Pacing comes from the server's movement_duration (emitMove resolves only
+            // on completion), not a client-side sleep.
             moveTiming.record(Date.now() - tStep);
         }
         return false;
     }
 
     /**
-     * Build PDDL problem from current world state
-     * @param {string} goalTile - PDDL tile name of goal
+     * Build the PDDL problem from the current world state
+     * @param {string} goalTile - PDDL tile name of the goal
      * @returns {string} PDDL problem definition
      */
     #buildProblem(goalTile) {
         const myTile       = pTile(me.x, me.y);
         const crateSet     = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
-        // Crates can only be pushed onto crate-zone tiles (the yellow sliding/spawner
-        // tiles). Pushing onto delivery or regular walkable tiles is not allowed by the
-        // game physics, so only crateSpawnerTiles get the (pushable) fact.
+        // Crates push only onto crate-zone tiles (game physics), so only
+        // crateSpawnerTiles get the (pushable) fact.
         const crateZoneSet = new Set(crateSpawnerTiles.map(t => `${t.x}_${t.y}`));
 
         const crateObjects = [];
@@ -228,9 +220,8 @@ export class PddlMove extends PlanBase {
             const raw  = `${tile.x}_${tile.y}`;
             const name = `t${raw}`;
             if (!crateSet.has(raw))    freeFacts.push(`(free ${name})`);
-            // A crate-zone tile that already has a crate on it is not free,
-            // so it won't receive (free) above — and (pushable) without (free)
-            // is harmless (the domain requires both to allow a push).
+            // An occupied crate-zone tile isn't free, so it skips (free) above;
+            // (pushable) without (free) is harmless (the domain requires both).
             if (crateZoneSet.has(raw)) freeFacts.push(`(pushable ${name})`);
         }
 
