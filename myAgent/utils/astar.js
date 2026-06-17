@@ -228,6 +228,32 @@ export function reachableIgnoringAgents(start, goal) {
 }
 
 /**
+ * Structural A* path length ignoring other agents (walls + arrows + mission
+ * avoidTiles respected, but NPCs/competitors treated as passable). This is the
+ * cost of the route that EXISTS regardless of transient traffic — use it to tell
+ * "this target is genuinely far" from "this target is near but an agent is in the
+ * corridor right now" (where the agent-aware pathLen would spike). Crates are NOT
+ * treated as walls here (matching reachableIgnoringAgents).
+ * @param {{x: number, y: number}} start - Starting position
+ * @param {{x: number, y: number}} goal - Goal position
+ * @returns {number} Path length in tiles, or Infinity if structurally unreachable
+ */
+export function pathLenIgnoringAgents(start, goal) {
+    const s = { x: Math.round(start.x), y: Math.round(start.y) };
+    const g = { x: Math.round(goal.x),  y: Math.round(goal.y) };
+    if (![s.x, s.y, g.x, g.y].every(Number.isFinite)) return Infinity;
+
+    let walkable = getWalkable();
+    const avoid = missionConstraints.avoidTiles;
+    if (avoid?.size > 0) {
+        walkable = new Set([...walkable].filter(k => !avoid.has(k)));
+        walkable.add(key(s.x, s.y));
+    }
+    const route = astar(s, g, walkable);
+    return route ? route.length : Infinity;
+}
+
+/**
  * Cost of pushing crates to reach goal, treating crate tiles as passable only via legal pushes
  * @param {{x: number, y: number}} from - Starting position
  * @param {{x: number, y: number}} to - Goal position
