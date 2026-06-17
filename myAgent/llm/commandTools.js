@@ -507,6 +507,35 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return 'Red-light-green-light mission ended: light shouts no longer affect the agents.';
         },
 
+        // Multiplier-based missions ("5× pts at (x,y)", "stacks of N for 0.3 reward").
+        // Accumulates (mult − 1.0) into multiplierNet; arms when the running net ≥ 0
+        // (same armedByNet gate as Level-3 routines). Only when armed does it apply
+        // the accompanying Level-2 constraint (deliveryMultipliers, requiredStackSize, etc.),
+        // so a lone 0.3× offer is declined while a later 5× offer re-arms and applies.
+        async start_multiplier_mission(input) {
+            let config;
+            try { config = JSON.parse(String(input ?? '{}')); }
+            catch {
+                return `Error: expected JSON with "mult" field — e.g. {"mult":5,"deliveryMultipliers":[[1,1,5]]}. Got: ${input}`;
+            }
+            const mult = Number(config.mult ?? 1);
+            if (!Number.isFinite(mult) || mult <= 0)
+                return `Error: "mult" must be a positive finite number (got ${config.mult}).`;
+
+            applyAndMirror({ multiplierNet: mult - 1.0 });
+
+            if (!armedByNet(missionConstraints.multiplierNet)) {
+                return `Mission declined. Multiplier net: ${missionConstraints.multiplierNet.toFixed(2)}.`;
+            }
+
+            // Armed: apply the constraint config (everything except mult itself).
+            const { mult: _m, ...constraintConfig } = config;
+            if (Object.keys(constraintConfig).length > 0)
+                applyAndMirror(constraintConfig);
+
+            return `Mission accepted. Multiplier net: ${missionConstraints.multiplierNet.toFixed(2)}.`;
+        },
+
         // "Move both agents near (x,y) within distance D and wait for each other".
         // Deterministic end-to-end: enumerate the walkable tiles within Manhattan
         // distance D of (x,y) (the centre itself may be a wall/forbidden — only the

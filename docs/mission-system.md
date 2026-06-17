@@ -22,7 +22,7 @@ These missions modify `missionConstraints` and stay active until explicitly drop
 | Avoid tiles | `avoidTiles.add("x_y")` | Excluded from `findRoute` in `navigateTo`; excluded from `pathLen` |
 | Max parcel reward ceiling | `maxParcelReward = N` | `missionPickupOk(p)` gates all strategy pickup decisions |
 | Max bundle value | `maxBundleValue = N` | `missionPickupOk(p)`, `stackReady`, `singleParcelBundles` |
-| Delivery multiplier ("5× pts at tile") | `deliveryMultipliers = Map<"x_y", mult>` | `deliveryScale` / `_pickDelivery` — routes deliveries to bonus tile |
+| Delivery multiplier ("5× pts at tile") | `deliveryMultipliers = Map<"x_y", mult>` (applied via `start_multiplier_mission` when `multiplierNet ≥ 0`) | `deliveryScale` / `_pickDelivery` — routes deliveries to bonus tile |
 | Penalty tile | `penaltyTiles.set("x_y", pts)` + `avoidTiles.add("x_y")` | Hard-banned via `avoidTiles`; magnitude in `penaltyTiles` for worth-gate |
 
 ### Level-3 — Multi-agent routines
@@ -34,6 +34,7 @@ These missions arm a background cooperative behaviour. Acceptance is gated by a 
 | OnePickupAnotherDeliver ("one picks up, other delivers") | `handoffNet` | `start_handoff` starts the background handoff loop |
 | GatherNear ("move both near (x,y) and wait") | `gatherNet` | `go_to` (self) + `order_partner_goto` + `halt_partner` + `hold` |
 | Red/Green Light | `lightNet` | `start_light_mission` arms the mission; live STOP/GO signals then control both agents |
+| Reward-scaling ("5× pts", "0.3× reward") | `multiplierNet` | `start_multiplier_mission` — applies the accompanying Level-2 constraint (`deliveryMultipliers` / stack size) only when net ≥ 0 |
 
 ---
 
@@ -47,7 +48,7 @@ Called by the `apply_mission` tool (and its convenience wrappers `forbid_deliver
 
 - **Accumulative fields** — `avoidTiles`, `penaltyTiles`, `forbiddenStackSizes` use `add`/`set` (repeated missions stack).
 - **Replacement fields** — `deliveryMultipliers`, `oneShotBonus`, `allowedDeliveryTiles`, `allowedSpawnerTiles` replace the prior value (re-issued mission supersedes the old one).
-- **Net totals** — `handoffNet`, `gatherNet`, `lightNet` are added (+=) to the running sum.
+- **Net totals** — `handoffNet`, `gatherNet`, `lightNet`, `multiplierNet` are added (+=) to the running sum. `multiplierNet` accumulates `(mult − 1.0)` deltas; when it tips ≥ 0 the accompanying Level-2 constraint (from `start_multiplier_mission`) is applied.
 
 Each applied config also pushes a tagged description string: `"text [fieldName1,fieldName2]"`. These descriptions appear in the LLM system prompt so the coordinator knows which missions are active.
 
@@ -110,3 +111,4 @@ Challenge 1 had no missions. Challenge 2 added the full catalogue. Key fixes app
 - **Mission gates on Memory/LookAhead** — previously only Greedy/Blind enforced constraints; the default strategies silently ignored them.
 - **applyAndMirror wrapper** — four tools were applying constraints locally without mirroring to the worker. Added in CodeRefactor Phase 2f.
 - **lightMission.active guard** — live STOP/GO signals were freezing the agent before the mission was started. Fixed by gating on `lightMission.active`.
+- **multiplierNet gate** — fractional/diminishing reward missions ("0.3×") were previously hard-declined by the LLM with no ability to re-arm. Added `multiplierNet` accumulator (Σ `mult−1.0`) and `start_multiplier_mission` tool so the same accept/re-arm pattern used by Level-3 routines applies to reward-scaling offers.
