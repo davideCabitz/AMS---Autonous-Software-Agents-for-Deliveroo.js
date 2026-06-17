@@ -382,7 +382,6 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
 
         // command
         async go_to(input) {
-<<<<<<< HEAD
             const dest = resolveDestination(input);
             if (!dest) return `Error: go_to needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
             return command(['go_to', dest.x, dest.y], () => `Arrived at (${me.x}, ${me.y}).`);
@@ -396,7 +395,6 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return command(['go_to', dest.x, dest.y], () =>
                 `Arrived at (${me.x}, ${me.y}) and holding — issue the next action (wait/hold/put_down/deliver).`,
                 { stay: true });
-=======
             const { x, y } = parseXY(input);
             if (x == null) return `Error: go_to needs "x,y" (got '${input}').`;
             // Under PDDL_GOTO, mark this as the go-to target so PddlMove path-plans the
@@ -407,7 +405,6 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             } finally {
                 pddl.gotoTarget = null;
             }
->>>>>>> 42ff1641ab0b5d2dea35f4ed257547ccec17cd01
         },
         async go_pickup(input) {
             const { x, y } = parseXY(input);

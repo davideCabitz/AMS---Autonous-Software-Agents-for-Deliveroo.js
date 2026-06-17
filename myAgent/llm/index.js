@@ -227,6 +227,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         //   CHAT → read-only fast-lane. ACTION → serialized action lane (incl. setup).
         let kind = 'ACTION';
         try { kind = await classifyDirective(text); } catch { /* default ACTION */ }
+        // Bare "red light" / "green light" with no imperative is noise: drop it silently
+        // (no reply, no behaviour change) so it never arms/stops/resumes the agents. Only
+        // real announcements (ACTION) and full live shouts (STOP/GO) affect the game.
+        if (kind === 'IGNORE') return;
         // Live RED/GREEN shouts go to the LLM action lane. The red_light()/green_light()
         // tools enforce the lightMission.active gate — unarmed shouts are explicit no-ops.
         if (kind === 'STOP' || kind === 'GO') {

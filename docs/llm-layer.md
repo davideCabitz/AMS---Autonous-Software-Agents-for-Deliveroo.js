@@ -21,6 +21,7 @@ raw message arrives
   ├─ ends with '?' or starts with greeting →  handleChat() (no classify call)
   │
   └─ classify(text) — one model call
+        ├─ IGNORE → dropped silently (bare "red light"/"green light" with no imperative — no reply, no effect)
         ├─ STOP  →  trafficLight.red = true, halt both agents (if lightMission.active)
         ├─ GO    →  trafficLight.red = false, resume both agents (if lightMission.active)
         ├─ CHAT  →  handleChat() (concurrent read-only fast-lane)
@@ -47,7 +48,7 @@ At most one ACTION directive runs at a time (`busy` flag). A new ACTION while `b
 
 **File:** [myAgent/llm/commandLoop.js](myAgent/llm/commandLoop.js)
 
-One model call with a tightly constrained prompt. Returns `'STOP'|'GO'|'ACTION'|'CHAT'`. Defaults to `'ACTION'` on any error or ambiguity.
+One model call with a tightly constrained prompt. Returns `'STOP'|'GO'|'ACTION'|'CHAT'|'IGNORE'`. Defaults to `'ACTION'` on any error or ambiguity.
 
 Forced ACTION cases (model is instructed explicitly):
 - Any mission offer, bonus/penalty mention, or "calculate for a reward" request.
@@ -56,7 +57,9 @@ Forced ACTION cases (model is instructed explicitly):
 
 Forced CHAT cases: greetings, questions, status requests answerable with words.
 
-STOP/GO: live "RED LIGHT! Stop moving" / "GREEN LIGHT! You can move again" commands. These only take effect after `start_light_mission` arms the mission (`lightMission.active`).
+STOP/GO: live "RED LIGHT! Stop moving" / "GREEN LIGHT! You can move again" commands (they carry a stop/resume imperative). These only take effect after `start_light_mission` arms the mission (`lightMission.active`).
+
+IGNORE: a **bare** "red light" / "green light" on its own — just the colour words, no stop/resume imperative and not a game announcement. `route()` drops it before any handling, so it never arms, stops, or resumes the agents (and sends no reply). Only the full live shouts (STOP/GO) and the announcements (ACTION) affect the game.
 
 ---
 
@@ -114,10 +117,12 @@ Quiz answers (`QuestionAnswer` mission type): must be bare numerals. The mission
 | `sense_spawn_tiles` | Returns reachable spawner tiles |
 | `get_map_info` | Returns map dimensions, tile counts, reachable tile sets |
 | `path_cost` | `pathLen(me, {x,y})` via `Strategy.pathLen` — used by the LLM to evaluate mission accept/decline (see below) |
-| `go_to` | `commandAndAwait(['go_to', x, y])` |
+| `go_to` | `commandAndAwait(['go_to', x, y])`; then BDI resumes. Accepts a side keyword (`leftmost`/`rightmost`/`top`/`bottom`) as well as `x,y` |
+| `go_to_stay` | Like `go_to` but stays parked at the destination (gate held) for a trailing `wait`/`hold`/`deliver`. Also accepts a side keyword |
 | `go_pickup` | `commandAndAwait(['go_pick_up', x, y, id])` |
 | `deliver` | `commandAndAwait(['go_deliver', x?, y?])` — uses nearest delivery if no coords given |
-| `put_down` | `emitPutdown` immediately at current position |
+| `put_down` | `emitPutdown` immediately at current position (via shared `dropHere()`) |
+| `go_put_down` | Navigate to the destination **and** drop there in one call — the go+drop sibling of `go_pickup`/`deliver`. Accepts `x,y` or a side keyword; reuses `dropHere()`. Use for "drop a parcel in the &lt;edge&gt; tile" (no `get_map_info` + `go_to_stay` + `put_down` round-trips) |
 | `wait` | Sleeps for N seconds |
 | `hold` | Sets `manualHold.active = true` — indefinite position hold |
 | `release_hold` | Clears `manualHold.active` |
@@ -133,6 +138,10 @@ Quiz answers (`QuestionAnswer` mission type): must be bare numerals. The mission
 | `dropMissions` | `dropAllMissions()` + mirror to worker |
 | `start_handoff` / `stop_handoff` | Start/stop the background handoff loop |
 | `start_light_mission` / `stop_light_mission` | Arm/disarm the red-light-green-light mission |
+
+### Symbolic destinations — resolveDestination
+
+`go_to`, `go_to_stay`, and `go_put_down` resolve their argument through `resolveDestination(input)`: an explicit `"x,y"` passes through, while a side keyword (`leftmost`/`rightmost`/`top`/`bottom`) is resolved over the reachable walkable tiles with the same min/max logic as `get_map_info`, then tie-broken to the tile **nearest** the agent by `findRoute` (least travel ⇒ least decay). This lets the LLM nav-and-drop at an edge tile without a separate `get_map_info` round-trip.
 
 ### Chat tools (read-only subset)
 
@@ -171,3 +180,5 @@ OpenAI-compatible client pointing to the LiteLLM proxy. Configuration via env va
 | `LITELLM_BASE_URL` | — | Proxy base URL |
 
 Request timeout: 90 s. On a content-policy `400` error, retries once with `LOCAL_MODEL_FALLBACK` before propagating the failure.
+
+Every call logs its wall-clock latency and token usage — `[llm] call <ms> prompt=<n> completion=<n> tok` — so per-call proxy/model latency is visible separately from the number of ReAct round-trips a directive makes.

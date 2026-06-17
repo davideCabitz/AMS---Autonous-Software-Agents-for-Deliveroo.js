@@ -192,11 +192,14 @@ const CLASSIFY_PROMPT =
     'A red-light command often ALSO mentions the green light ("stop until the next green light") — it is ' +
     'STILL STOP; the leading RED/STOP is the active order. NOT the long mission announcement that explains the rules. ' +
     'IMPORTANT: if the command targets a SPECIFIC agent ("freeze the worker", "halt the worker", "freeze worker", ' +
-    '"stop the partner") it is ACTION, not STOP — the coordinator must decide how to handle it.\n' +
+    '"stop the partner") it is ACTION, not STOP — the coordinator must decide how to handle it. ' +
+    'A message that is JUST the bare words "red light" (no "stop"/"freeze"/"don\'t move" imperative) ' +
+    'is NOT a live STOP — classify it IGNORE.\n' +
     '- GO      if THIS message is a LIVE green-light / resume / you-may-move-again signal targeting ALL agents ' +
     '(e.g. "GREEN LIGHT! You can move again!", "go", "you can move again"). ' +
     'IMPORTANT: if the command targets a SPECIFIC agent ("resume the worker", "unfreeze worker", "resume partner") ' +
-    'it is ACTION, not GO.\n' +
+    'it is ACTION, not GO. A message that is JUST the bare words "green light" (no "go"/"resume"/' +
+    '"you can move again" imperative) is NOT a live GO — classify it IGNORE.\n' +
     '- ACTION  if it asks the agent to move, go somewhere, pick up, deliver, wait, ' +
     'apply or remove a mission/constraint, abort/cancel/drop/clear a mission, ' +
     'or otherwise DO something in the game world. ALSO any mission offer or challenge ' +
@@ -208,12 +211,15 @@ const CLASSIFY_PROMPT =
     'move to an odd row and wait for our message. 700pts" — all ACTION.\n' +
     '- CHAT    if it is only a question, greeting, or status request answerable with words ' +
     '(e.g. "can you hear me?", "where are you?", "what are you doing?").\n' +
-    'Reply STOP, GO, ACTION, or CHAT only.';
+    '- IGNORE  if THIS message is ONLY a bare "red light" or "green light" (just the colour words, any ' +
+    'capitalisation/punctuation) with NO stop/resume imperative ("stop moving", "freeze", "you can move ' +
+    'again", "resume") and NOT a game announcement — it is noise and must change nothing.\n' +
+    'Reply STOP, GO, ACTION, CHAT, or IGNORE only.';
 
 /**
  * Classify an incoming chat message as STOP, GO, ACTION, or CHAT
  * @param {string} text - Raw message text
- * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'>} Classification; defaults to ACTION on ambiguity/error
+ * @returns {Promise<'STOP'|'GO'|'ACTION'|'CHAT'|'IGNORE'>} Classification; defaults to ACTION on ambiguity/error
  */
 export async function classifyDirective(text) {
     try {
@@ -222,6 +228,7 @@ export async function classifyDirective(text) {
             { role: 'user',   content: text },
         ], { temperature: 0 });
         const u = out.toUpperCase();
+        if (/\bIGNORE\b/.test(u)) return 'IGNORE';
         if (/\bSTOP\b/.test(u)) return 'STOP';
         if (/\bGO\b/.test(u))   return 'GO';
         if (/\bCHAT\b/.test(u) && !/\bACTION\b/.test(u)) return 'CHAT';

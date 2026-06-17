@@ -92,7 +92,7 @@ These gates were added to the `Strategy` base class to fix a live-testing gap: `
 - All LLM command tools that would move the agent.
 - All orders to the worker.
 
-Set and cleared by the `route()` function in `llm/index.js` when a classified `STOP`/`GO` arrives, but only after `lightMission.active = true` (armed by `start_light_mission`). A stray "red light" in chat before the mission is started is silently ignored.
+Set and cleared by the `route()` function in `llm/index.js` when a classified `STOP`/`GO` arrives, but only after `lightMission.active = true` (armed by `start_light_mission`). A **bare** "red light"/"green light" (just the colour words, no stop/resume imperative) is classified `IGNORE` and dropped in `route()` before any handling, so it never arms, stops, or resumes the agents — even once the mission is armed. Only the full live shouts ("RED LIGHT! Stop moving…" / "GREEN LIGHT! You can move again!") drive the gate.
 
 ### manualHold
 
@@ -112,3 +112,4 @@ Challenge 1 had no missions. Challenge 2 added the full catalogue. Key fixes app
 - **applyAndMirror wrapper** — four tools were applying constraints locally without mirroring to the worker. Added in CodeRefactor Phase 2f.
 - **lightMission.active guard** — live STOP/GO signals were freezing the agent before the mission was started. Fixed by gating on `lightMission.active`.
 - **multiplierNet gate** — fractional/diminishing reward missions ("0.3×") were previously hard-declined by the LLM with no ability to re-arm. Added `multiplierNet` accumulator (Σ `mult−1.0`) and `start_multiplier_mission` tool so the same accept/re-arm pattern used by Level-3 routines applies to reward-scaling offers.
+- **Light-mission net + bare-word filter** — a negative light offer was being declined with a bare `Mission declined.` Final Answer, which skipped `lightNet`, so a later positive offer wrongly re-armed the mission. The action prompt now routes every light offer (positive *and* negative) through `start_light_mission`, which records the net and itself returns the decline (so accumulation works the same as the other Level-3 routines). Separately, a bare "red light"/"green light" chat message is now classified `IGNORE` and dropped before routing, closing the leak where a stray colour word armed or toggled the mission.
