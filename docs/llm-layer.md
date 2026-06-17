@@ -126,10 +126,10 @@ Quiz answers (`QuestionAnswer` mission type): must be bare numerals. The mission
 | `halt_partner` | `sendHalt()` — freezes the worker |
 | `resume_partner` | `sendResume()` — unfreezes the worker |
 | `ask_partner_status` | `requestStatus()` — returns worker position/carrying/frozen |
-| `apply_mission` | `applyMissionConfig(cfg)` + `sendConstraint('apply', cfg)` |
+| `apply_mission` | `applyMissionConfig(cfg)` + `sendConstraint('apply', cfg)`. Key fields: `requiredStackSize`, `maxStackSize`, `forbiddenStackSizes`, `allowedDeliveryTiles`, `allowedSpawnerTiles`, `avoidTiles`, `maxParcelReward`, `maxBundleValue` (≤), `minBundleValue` (≥), `exactBundleValue` (=), `deliveryMultipliers`, `penaltyTiles`, `oneShotBonus`. ASCII comparison operators in mission text (`>=`→≥, `<=`→≤, `>`→floor+1, `<`→ceiling−1, `=`→exact) are mapped to these fields by the LLM before calling. |
 | `forbid_delivery` | Convenience: applies `allowedDeliveryTiles` constraint |
 | `restrict_exploration` | Convenience: applies `allowedSpawnerTiles` constraint |
-| `dropMission` | `dropMissionField(field)` + mirror to worker |
+| `dropMission` | `dropMissionField(field)` + mirror to worker. Accepted fields: `requiredStackSize`, `maxStackSize`, `forbiddenStackSizes`, `allowedDeliveryTiles`, `allowedSpawnerTiles`, `avoidTiles`, `maxParcelReward`, `maxBundleValue`, `minBundleValue`, `exactBundleValue`, `deliveryMultipliers`, `oneShotBonus`, `penaltyTiles`, `handoffNet`, `gatherNet`, `lightNet`, `multiplierNet`. |
 | `dropMissions` | `dropAllMissions()` + mirror to worker |
 | `start_handoff` / `stop_handoff` | Start/stop the background handoff loop |
 | `start_light_mission` / `stop_light_mission` | Arm/disarm the red-light-green-light mission |

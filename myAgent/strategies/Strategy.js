@@ -82,11 +82,20 @@ export class Strategy {
      * @returns {Array<{x: number, y: number}>} Allowed delivery tiles
      */
     _allowedDeliveryPool(tiles = deliveryTiles) {
+        let pool = tiles;
         if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) return f;
+            const f = pool.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) pool = f;
         }
-        return tiles;
+        // deliver_reward missions: drop tiles whose accumulated signed delivery net is
+        // negative (not worth delivering at). Fall back to the unfiltered pool if every
+        // candidate is net-negative so the agent is never stranded with a full load.
+        const net = missionConstraints.deliveryTileNet;
+        if (net?.size > 0) {
+            const f = pool.filter(t => (net.get(`${t.x}_${t.y}`) ?? 0) >= 0);
+            if (f.length > 0) pool = f;
+        }
+        return pool;
     }
 
     /**

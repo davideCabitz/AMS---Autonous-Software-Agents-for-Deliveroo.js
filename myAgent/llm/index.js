@@ -7,7 +7,7 @@ const chatLog = createLogger('llm:chat');
 const adminId  = process.env.ADMIN_ID  ?? null;
 const workerId = process.env.WORKER_ID ?? null;
 import { runDirective, runConversation, classifyDirective } from './commandLoop.js';
-import { handlePartnerMessage, sendHalt, sendResume } from './partner.js';
+import { handlePartnerMessage } from './partner.js';
 import { stopHandoff } from './handoff.js';
 
 /**
@@ -132,9 +132,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
                         answer = `Sorry, the directive failed: ${err?.message ?? err}`;
                     }
                     // Silent endings (never sent — outcomes are observed in-game): null,
-                    // bare Done/Failure, declined missions, give-ups, iteration-limit. Only
-                    // "Mission accepted." and substantive answers (quiz/calc) reach the sender.
-                    const SILENT = /^(Done\.?|Failure:.*|Mission declined\.?|Could not complete the directive.*|Directive not completed.*|Mission cannot be.*|Can'?t comply:.*)$/is;
+                    // bare Done/Failure, give-ups, iteration-limit. "Mission accepted.",
+                    // "Mission declined." (a rejection the sender must hear), and substantive
+                    // answers (quiz/calc) all reach the sender.
+                    const SILENT = /^(Done\.?|Failure:.*|Could not complete the directive.*|Directive not completed.*|Mission cannot be.*|Can'?t comply:.*)$/is;
                     if (answer != null && !SILENT.test(answer.trim())) {
                         record(key, objective, answer);
                         await sendReply(key, replySender, answer);
@@ -226,40 +227,10 @@ export function registerLlm(myAgent, { resumeAutonomy } = {}) {
         //   CHAT → read-only fast-lane. ACTION → serialized action lane (incl. setup).
         let kind = 'ACTION';
         try { kind = await classifyDirective(text); } catch { /* default ACTION */ }
-        // Live red/green signals control the agents only once the mission is STARTED;
-        // before that a stray "red light"/"green light" is recognised but IGNORED.
+        // Live RED/GREEN shouts go to the LLM action lane. The red_light()/green_light()
+        // tools enforce the lightMission.active gate — unarmed shouts are explicit no-ops.
         if (kind === 'STOP' || kind === 'GO') {
-            if (!lightMission.active) {
-                // Outside the mission, STOP/GO are plain freeze/resume commands
-                // (e.g. "freeze worker", "resume worker").
-                if (kind === 'STOP') {
-                    manualHold.active = true;
-                    myAgent.haltCurrent();
-                    sendHalt();
-                    log(`freeze command "${text}" — coordinator and worker halted`);
-                } else {
-                    manualHold.active = false;
-                    sendResume();
-                    log(`resume command "${text}" — both agents resuming BDI`);
-                    if (!directive.active) resumeAutonomy?.();
-                }
-                return;
-            }
-            if (kind === 'STOP') {
-                trafficLight.red = true;
-                myAgent.haltCurrent();
-                sendHalt();
-                log('RED LIGHT (LLM) — both agents holding');
-            } else {
-                trafficLight.red = false;
-                // GREEN also releases a "wait for the light" hold: the announcement made
-                // the agent hold(), and green ends that wait. Without clearing manualHold,
-                // the agent never moves again. sendResume() unfreezes the worker.
-                manualHold.active = false;
-                sendResume();
-                log('GREEN LIGHT (LLM) — both agents resuming');
-                if (!directive.active) resumeAutonomy?.();
-            }
+            enqueue(text, sender);
             return;
         }
         if (kind === 'CHAT') handleChat(text, sender);

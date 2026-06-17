@@ -133,6 +133,11 @@ export const missionConstraints = {
     penaltyTiles:         new Map(), // Map<"x_y", number> — point penalty for entering/delivering a tile.
                                      //   Keys also folded into avoidTiles (hard ban); magnitude feeds the
                                      //   worth-gate and recall.
+    deliveryTileNet:      new Map(), // Map<"x_y", number> — signed per-tile DELIVERY reward, accumulated
+                                     //   across "deliver on (x,y) to get ±N" offers. net < 0 ⇒ avoid that
+                                     //   delivery tile; net ≥ 0 ⇒ deliver there. Unlike penaltyTiles this is
+                                     //   a DELIVERY gate only (no avoidTiles/movement ban), so a later positive
+                                     //   offer can lift an earlier negative one ("-50 then +250" = +200 ⇒ deliver).
     // Per-type running totals for Level-3 routines. Each same-type OFFER adds its signed
     // value; armed/kept while ≥ 0, declined/stopped while < 0 (armedByNet). Default 0 ⇒
     // a no-reward routine is followed as before. "−500 then +1000" nets +500 (run).

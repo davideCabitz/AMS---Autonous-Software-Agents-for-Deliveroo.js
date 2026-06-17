@@ -162,11 +162,24 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
     }
 
     async function runPutdown(orderId) {
+        // Gate BDI and stop any in-flight plan so the drop isn't immediately undone
+        // (without this the strategy re-picks the parcel the instant it lands).
+        myAgent.haltCurrent();
+        directive.active = true;
         const carried = parcels.carriedBy(me.id);
-        await socket.emitPutdown();
-        for (const p of carried) parcels.remove(p.id);
-        send({ type: 'result', orderId, ok: true,
-               detail: `dropped ${carried.length} parcel(s) at (${me.x},${me.y})` });
+        try {
+            const dropped = await socket.emitPutdown().catch(() => null);
+            const n = dropped?.length ?? 0;
+            // ignore() (not remove()): the parcels still exist on the tile; this worker
+            // must stop targeting them, but the coordinator (separate beliefs) can still
+            // sense and pick them up (handoff drop). Re-pick is prevented permanently.
+            for (const p of carried) parcels.ignore(p.id);
+            send({ type: 'result', orderId, ok: n > 0,
+                   detail: n > 0 ? `dropped ${n} parcel(s) at (${me.x},${me.y})`
+                                 : `nothing to drop at (${me.x},${me.y})` });
+        } finally {
+            if (!frozen) { directive.active = false; resumeAutonomy?.(); }
+        }
     }
 
     // --- message dispatch -----------------------------------------------------------
