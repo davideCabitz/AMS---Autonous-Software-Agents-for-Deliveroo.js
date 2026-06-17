@@ -1,7 +1,7 @@
 import { missionConstraints } from '../context.js';
 
 /**
- * @typedef { {requiredStackSize: number|null, maxStackSize: number|null, forbiddenStackSizes: Set<number>, allowedDeliveryTiles: Set<string>|null, allowedSpawnerTiles: Set<string>|null, avoidTiles: Set<string>, maxParcelReward: number|null, maxBundleValue: number|null, minBundleValue: number|null, exactBundleValue: number|null, deliveryMultipliers: Map<string,number>|null, oneShotBonus: {x:number,y:number,points:number,perAgent:boolean}|null, penaltyTiles: Map<string,number>, handoffNet: number, gatherNet: number, lightNet: number, multiplierNet: number, descriptions: Array<string>} } MissionConstraints
+ * @typedef { {requiredStackSize: number|null, maxStackSize: number|null, forbiddenStackSizes: Set<number>, allowedDeliveryTiles: Set<string>|null, allowedSpawnerTiles: Set<string>|null, avoidTiles: Set<string>, maxParcelReward: number|null, maxBundleValue: number|null, minBundleValue: number|null, exactBundleValue: number|null, deliveryMultipliers: Map<string,number>|null, oneShotBonus: {x:number,y:number,points:number,perAgent:boolean}|null, penaltyTiles: Map<string,number>, deliveryTileNet: Map<string,number>, handoffNet: number, gatherNet: number, lightNet: number, multiplierNet: number, descriptions: Array<string>} } MissionConstraints
  */
 
 /**
@@ -95,6 +95,18 @@ export function applyMissionConfig(config) {
         }
         fieldsSet.push('penaltyTiles');
     }
+    if (Array.isArray(config.deliveryTileRewards)) {
+        // [[x,y,signedN],…] — additive per-tile DELIVERY reward; offers accumulate so a
+        // later positive offer can outweigh an earlier penalty (net governs deliver/avoid
+        // in Strategy._allowedDeliveryPool). Unlike penaltyTiles, NOT folded into
+        // avoidTiles — this gates delivery only, never movement, so it can be lifted.
+        for (const [x, y, points] of config.deliveryTileRewards) {
+            const key = `${x}_${y}`;
+            missionConstraints.deliveryTileNet.set(key,
+                (missionConstraints.deliveryTileNet.get(key) ?? 0) + Number(points));
+        }
+        fieldsSet.push('deliveryTileNet');
+    }
     // Level-3 net totals: ADD the offer's signed value to the running sum, so a later
     // offer can outweigh an earlier one. Tools read these via armedByNet to arm/decline/
     // stop. Absent ⇒ untouched.
@@ -141,6 +153,7 @@ const FIELD_MAP = {
     oneshotbonus:         ['One-shot bonus goal',        'oneShotBonus',         () => { missionConstraints.oneShotBonus = null; }],
     // Dropping the penalty also lifts the ban it added: remove only the penaltyTiles
     // keys from avoidTiles (keeping any from a separate avoidTiles mission), then clear.
+    deliverytilenet:      ['Per-tile delivery reward',     'deliveryTileNet',      () => { missionConstraints.deliveryTileNet.clear(); }],
     penaltytiles:         ['Tile penalty constraint',    'penaltyTiles',         () => {
         for (const key of missionConstraints.penaltyTiles.keys()) missionConstraints.avoidTiles.delete(key);
         missionConstraints.penaltyTiles.clear();
@@ -163,7 +176,7 @@ export function dropMissionField(field) {
     if (!entry) {
         return {
             ok: false,
-            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, maxStackSize, forbiddenStackSizes, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue, minBundleValue, exactBundleValue, deliveryMultipliers, oneShotBonus, penaltyTiles, handoffNet, gatherNet, lightNet, multiplierNet.`,
+            observation: `Error: unknown field '${raw}'. Pass one of: requiredStackSize, maxStackSize, forbiddenStackSizes, allowedDeliveryTiles, allowedSpawnerTiles, avoidTiles, maxParcelReward, maxBundleValue, minBundleValue, exactBundleValue, deliveryMultipliers, oneShotBonus, penaltyTiles, deliveryTileNet, handoffNet, gatherNet, lightNet, multiplierNet.`,
         };
     }
     const [, [label, camel, clear]] = entry;
@@ -193,6 +206,7 @@ export function dropAllMissions() {
     missionConstraints.deliveryMultipliers  = null;
     missionConstraints.oneShotBonus         = null;
     missionConstraints.penaltyTiles.clear();
+    missionConstraints.deliveryTileNet.clear();
     missionConstraints.handoffNet           = 0;
     missionConstraints.gatherNet            = 0;
     missionConstraints.lightNet             = 0;

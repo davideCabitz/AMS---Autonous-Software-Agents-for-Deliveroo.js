@@ -38,7 +38,12 @@ function isContentPolicy(err) {
  */
 export async function callModel(messages, { temperature = 0 } = {}) {
     const complete = async (model) => {
+        // Time each call and log token usage so the per-call latency (proxy/model)
+        // is visible separately from the number of round-trips the loop makes.
+        const t0 = Date.now();
         const response = await client.chat.completions.create({ model, messages, temperature });
+        const u = response.usage;
+        log(`call ${Date.now() - t0}ms${u ? ` prompt=${u.prompt_tokens} completion=${u.completion_tokens} tok` : ''}`);
         return response.choices?.[0]?.message?.content ?? '';
     };
 

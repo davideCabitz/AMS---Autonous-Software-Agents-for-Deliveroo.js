@@ -103,6 +103,48 @@ function onlyReachable(tiles) {
     return filtered.length ? filtered : tiles;
 }
 
+/** @type {string[]} Map-edge side keywords accepted as a symbolic destination */
+const EDGE_SIDES = ['leftmost', 'rightmost', 'top', 'bottom'];
+
+/**
+ * Resolve a destination spec to concrete reachable coordinates. Accepts explicit
+ * "x,y" OR a side keyword (leftmost|rightmost|top|bottom), resolved over the
+ * reachable walkable tiles exactly as get_map_info does (leftmost=min x,
+ * rightmost=max x, top=max y, bottom=min y) and tie-broken to the tile NEAREST the
+ * agent — least travel means least decay. Lets nav tools take "leftmost" directly
+ * so the LLM skips a separate get_map_info round-trip.
+ * @param {string} input - "x,y" or a side keyword
+ * @returns {{x: number, y: number}|null} Coordinates, or null if unresolved
+ */
+function resolveDestination(input) {
+    const { x, y } = parseXY(input);
+    if (x != null) return { x, y };
+
+    const side = String(input ?? '').trim().toLowerCase();
+    if (!EDGE_SIDES.includes(side) || !walkableTiles.length) return null;
+
+    const reach = onlyReachable(walkableTiles);
+    const xs = reach.map(t => t.x), ys = reach.map(t => t.y);
+    const PICK = {
+        leftmost:  { val: Math.min(...xs), key: t => t.x },
+        rightmost: { val: Math.max(...xs), key: t => t.x },
+        top:       { val: Math.max(...ys), key: t => t.y },
+        bottom:    { val: Math.min(...ys), key: t => t.y },
+    }[side];
+    const candidates = reach.filter(t => PICK.key(t) === PICK.val);
+    if (!candidates.length) return null;
+
+    // Tie-break by real A* path length from the agent (Manhattan fallback if a
+    // route can't be computed) so we walk to the closest tile sharing the extreme.
+    let best = null, bestCost = Infinity;
+    for (const t of candidates) {
+        const route = findRoute(me, { x: t.x, y: t.y });
+        const cost = route ? route.length : Math.abs(t.x - me.x) + Math.abs(t.y - me.y);
+        if (cost < bestCost) { bestCost = cost; best = t; }
+    }
+    return best ? { x: best.x, y: best.y } : null;
+}
+
 /**
  * Delivery tile nearest the agent by Manhattan distance
  * @returns {{x: number, y: number}|null} Nearest delivery tile, or null if none known
@@ -270,7 +312,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
     // Trade-off: the agent may do its own BDI work (and move) during the inter-command
     // think, so a move-then-stay sequence can drift before the stationary command
     // re-grabs. Stationary commands manage their own gate and skip this helper.
-    const command = async (predicate, ok) => {
+    const command = async (predicate, ok, { stay = false } = {}) => {
         if (trafficLight.red)
             return 'Failed: RED LIGHT in force — movement is forbidden until the GREEN LIGHT message.';
         directive.active = true;                       // (re)take control
@@ -281,9 +323,15 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         } catch (err) {
             return describeFailure(err);
         } finally {
-            // Hand control back to BDI; a follow-up command re-takes it above.
-            directive.active = false;
-            resumeAutonomy?.();
+            // Default: hand control back to BDI; a follow-up command re-takes it above.
+            // stay=true KEEPS the gate held so the agent stays parked at the destination
+            // across the inter-command think — for "go there and <wait|hold|drop>"
+            // composites where the BDI must NOT wander off the tile before the next step.
+            // The directive-level finally (commandLoop.js) releases it when the directive ends.
+            if (!stay) {
+                directive.active = false;
+                resumeAutonomy?.();
+            }
         }
     };
 
@@ -301,14 +349,52 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         return armedByNet(missionConstraints[field]);
     };
 
+    // Drop carried cargo on the CURRENT tile (no navigation). Plain tile = handoff
+    // drop (no score); delivery tile = scores. Shared by put_down (drop in place)
+    // and go_put_down (navigate, then drop). Gate autonomy FIRST (else BDI keeps
+    // running / re-picks), THEN read the cargo fresh — a go_deliver that finished in
+    // the think-gap is now reflected, so we don't send stale ids the server can't drop.
+    const dropHere = async () => {
+        directive.active = true;
+        myAgent.haltCurrent();
+        const carried = parcels.carriedBy(me.id);
+        if (carried.length === 0) return 'Nothing to put down (not carrying any parcel).';
+        // Explicit id list (SDK default [] drops nothing for this agent's command path).
+        const dropped = await withTimeout(
+            socket.emitPutdown(carried.map(p => p.id)), 5_000, 'putdown'
+        ).catch(() => null);
+        if (!dropped || dropped.length === 0) {
+            // Empty ack: usually the cargo was already delivered/dropped by a BDI
+            // plan in the gap before we gated. Report the real state, not a hard fail.
+            if (parcels.carriedBy(me.id).length === 0)
+                return `Nothing to put down at (${me.x},${me.y}) — the cargo was already delivered or dropped.`;
+            return 'Failed: the server did not confirm the drop.';
+        }
+        // ignore() (not remove()): the parcel still physically exists on a plain
+        // tile, so this agent must stop targeting it — but the partner (separate
+        // beliefs) can still sense and pick it up (handoff drop).
+        for (const p of carried) parcels.ignore(p.id);
+        return `Dropped ${dropped.length} parcel(s) at (${me.x},${me.y}).`;
+    };
+
     return {
         ...readTools(),
 
         // command
         async go_to(input) {
-            const { x, y } = parseXY(input);
-            if (x == null) return `Error: go_to needs "x,y" (got '${input}').`;
-            return command(['go_to', x, y], () => `Arrived at (${me.x}, ${me.y}).`);
+            const dest = resolveDestination(input);
+            if (!dest) return `Error: go_to needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
+            return command(['go_to', dest.x, dest.y], () => `Arrived at (${me.x}, ${me.y}).`);
+        },
+        async go_to_stay(input) {
+            // Like go_to, but STAYS parked at the destination (gate held) instead of
+            // letting BDI resume — use as the nav step of "go to (x,y) and <wait|hold|
+            // drop>" so the agent doesn't drift off the tile before the trailing action.
+            const dest = resolveDestination(input);
+            if (!dest) return `Error: go_to_stay needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
+            return command(['go_to', dest.x, dest.y], () =>
+                `Arrived at (${me.x}, ${me.y}) and holding — issue the next action (wait/hold/put_down/deliver).`,
+                { stay: true });
         },
         async go_pickup(input) {
             const { x, y } = parseXY(input);
@@ -366,19 +452,22 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
         async put_down() {
             // Drop cargo on the CURRENT tile without navigating. Plain tile = handoff
             // drop (no score); delivery tile = scores.
-            const carried = parcels.carriedBy(me.id);
-            if (carried.length === 0) return 'Nothing to put down (not carrying any parcel).';
-            // Gate autonomy, else BDI resumes on directive end and re-picks the parcel.
-            directive.active = true;
-            myAgent.haltCurrent();
-            // Explicit id list: the SDK default [] is treated as "nothing" by the server.
-            const dropped = await withTimeout(
-                socket.emitPutdown(carried.map(p => p.id)), 5_000, 'putdown'
-            ).catch(() => null);
-            if (!dropped || dropped.length === 0)
-                return 'Failed: the server did not confirm the drop.';
-            for (const p of carried) parcels.remove(p.id);
-            return `Dropped ${dropped.length} parcel(s) at (${me.x},${me.y}).`;
+            return dropHere();
+        },
+        async go_put_down(input) {
+            // Navigate to a tile (explicit "x,y" or a side keyword) and drop there in
+            // ONE call — the missing "navigate-then-act" sibling of go_pickup/deliver.
+            // Use for "drop a parcel in the <leftmost|rightmost|top|bottom|x,y> tile"
+            // so it costs one round-trip instead of go_to_stay + put_down.
+            if (parcels.carriedBy(me.id).length === 0)
+                return 'Nothing to put down (not carrying any parcel) — pick one up first.';
+            const dest = resolveDestination(input);
+            if (!dest)
+                return `Error: go_put_down needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
+            // Park on the tile (gate held) so BDI can't drift off before the drop.
+            const nav = await command(['go_to', dest.x, dest.y], () => 'arrived', { stay: true });
+            if (/^(Failed|Error)/.test(nav)) return nav;
+            return dropHere();
         },
         async path_cost(input) {
             const { x, y } = parseXY(input);
@@ -489,6 +578,25 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             trafficLight.red = false;
             return 'Red-light-green-light mission ended: light shouts no longer affect the agents.';
         },
+        // Live RED/GREEN shouts during the game. Gate is enforced by the tool, not by LLM
+        // reasoning — an unarmed shout is an explicit no-op with a clear return value.
+        async red_light() {
+            if (!lightMission.active)
+                return 'Red-light mission not armed — shout ignored. Arm it first with start_light_mission.';
+            trafficLight.red = true;
+            myAgent.haltCurrent();
+            sendHalt();
+            return 'RED LIGHT — both agents stopped. Waiting for GREEN LIGHT.';
+        },
+        async green_light() {
+            if (!lightMission.active)
+                return 'Red-light mission not armed — shout ignored.';
+            trafficLight.red = false;
+            manualHold.active = false;
+            sendResume();
+            if (!directive.active) resumeAutonomy?.();
+            return 'GREEN LIGHT — both agents resuming.';
+        },
 
         // Multiplier missions ("5× pts at (x,y)", "stacks of N for 0.3 reward").
         // Accumulates (mult − 1.0) into multiplierNet; arms when net ≥ 0 and only then
@@ -598,12 +706,101 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return `Both agents in position within distance ${dist} of (${cx},${cy}): you at (${me.x},${me.y}), partner at (${tileA.x},${tileA.y}) [${aRes}]. Both holding — say "resume" to release.`;
         },
 
+        // Position BOTH agents on a tile whose row (y) or column (x) has a given parity,
+        // then hold — for red-light missions like "move to an odd row and wait". An agent
+        // already on a matching tile just halts in place; otherwise it moves to the nearest
+        // reachable matching tile. A GREEN LIGHT / "resume" releases both (release_hold).
+        async hold_on_parity(input) {
+            const s = String(input ?? '').toLowerCase();
+            if (!/\bodd\b|\beven\b/.test(s))
+                return `Error: hold_on_parity needs a parity ("odd"/"even") and optionally "row"/"column" (got '${input}').`;
+            const axis   = /\bcol(umn)?\b|\bcolumns\b/.test(s) ? 'col' : 'row';   // default row (y)
+            const parity = /\bodd\b/.test(s) ? 'odd' : 'even';
+            const coord  = p => axis === 'col' ? Math.round(p.x) : Math.round(p.y);
+            const ok     = v => parity === 'odd' ? Math.abs(v) % 2 === 1 : v % 2 === 0;
+            const label  = axis === 'col' ? 'column (x)' : 'row (y)';
+            if (!partner.id)
+                return 'Failed: no partner connected — this mission needs both agents in position.';
+
+            const matching = walkableTiles.filter(t => ok(coord(t)));
+            if (matching.length === 0) return `Failed: no walkable tile on an ${parity} ${label}.`;
+            const nearestTo = p => (a, b) =>
+                (Math.abs(a.x - p.x) + Math.abs(a.y - p.y)) - (Math.abs(b.x - p.x) + Math.abs(b.y - p.y));
+            const pickReachable = (from, excludeKey) => {
+                let c = matching.filter(t => `${t.x}_${t.y}` !== excludeKey);
+                if (from) {
+                    const reach = reachableFrom(from);
+                    const f = c.filter(t => reach.has(`${t.x}_${t.y}`));
+                    if (f.length) c = f;
+                }
+                return [...c].sort(nearestTo(from ?? me))[0];
+            };
+
+            directive.active = true;
+            myAgent.haltCurrent();
+            await requestStatus().catch(() => {});
+            const aPos = partner.lastStatus?.x != null
+                ? { x: Math.round(partner.lastStatus.x), y: Math.round(partner.lastStatus.y) }
+                : null;
+
+            // Decide targets first (null = already matching, stay in place).
+            const bTile = ok(coord(me)) ? null : pickReachable(me);
+            if (!ok(coord(me)) && !bTile)
+                return `Failed: no reachable ${parity} ${label} tile for you.`;
+            const bKey  = bTile ? `${bTile.x}_${bTile.y}` : `${Math.round(me.x)}_${Math.round(me.y)}`;
+            const aStay = aPos && ok(coord(aPos));
+            const aTile = aStay ? null : pickReachable(aPos, bKey);
+            if (!aStay && !aTile)
+                return `Failed: no distinct reachable ${parity} ${label} tile for the partner.`;
+            if ((bTile || aTile) && trafficLight.red)
+                return 'Failed: RED LIGHT in force — cannot reposition now; arm the mission and wait for GREEN.';
+
+            // Freeze the worker up front so it holds (whether it stays or after its order).
+            sendHalt();
+            let aMsg;
+            if (aStay) {
+                aMsg = `partner already on an ${parity} ${label} at (${aPos.x},${aPos.y})`;
+            } else {
+                const aRes = await sendOrder(['go_to', aTile.x, aTile.y]);
+                aMsg = `partner at (${aTile.x},${aTile.y}) [${aRes}]`;
+            }
+
+            let bMsg;
+            if (!bTile) {
+                bMsg = `you already on an ${parity} ${label} at (${me.x},${me.y})`;
+            } else {
+                try {
+                    await withTimeout(myAgent.commandAndAwait(['go_to', bTile.x, bTile.y]), COMMAND_TIMEOUT_MS, 'go_to');
+                } catch (err) {
+                    return `Partner positioned [${aMsg}], but I could not reach an ${parity} ${label} tile: ${describeFailure(err)}`;
+                }
+                if (directive.aborted) return null;
+                bMsg = `you at (${me.x},${me.y})`;
+            }
+
+            manualHold.active = true;            // B holds indefinitely (survives directive end)
+            myAgent.haltCurrent();
+            return `Both agents on an ${parity} ${label}: ${bMsg}, ${aMsg}. Both holding — a GREEN LIGHT or "resume" releases them.`;
+        },
+
         // Level-2 persistent missions. Mutation logic lives in missionState.js (shared
         // with the worker); every change is mirrored so missions bind BOTH agents.
         async apply_mission(input) {
             let config;
             try { config = JSON.parse(String(input ?? '{}')); }
             catch { return `Error: expected JSON — e.g. {"requiredStackSize":3}. Got: ${input}`; }
+
+            // Validate delivery-tile coordinates before applying: a non-delivery tile
+            // would otherwise silently empty the allowed set and _allowedDeliveryPool
+            // falls back to ALL tiles (so "deliver only at (4,14)" would deliver
+            // everywhere). Mirror forbid_delivery's check and reject the whole call.
+            if (Array.isArray(config.allowedDeliveryTiles)) {
+                if (!deliveryTiles.length) return 'Error: delivery tiles not loaded yet.';
+                const bad = config.allowedDeliveryTiles.find(
+                    ([x, y]) => !deliveryTiles.some(d => d.x === x && d.y === y));
+                if (bad)
+                    return `Error: (${bad[0]},${bad[1]}) is not a delivery tile. Call sense_delivery_tiles to list them.`;
+            }
 
             const obs = applyMissionConfig(config);
             sendConstraint('apply', config);
@@ -614,6 +811,25 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             const obs = dropAllMissions();
             sendConstraint('dropAll');
             return obs;
+        },
+
+        // Signed per-tile DELIVERY reward ("deliver on (x,y) to get/earn N pts", N may be
+        // +/-/0). Offers ACCUMULATE per tile; the running net governs behaviour (Strategy
+        // ._allowedDeliveryPool): net < 0 ⇒ the tile is avoided and we reply declined; net
+        // ≥ 0 ⇒ we deliver there. So "-50" then "+250" nets +200 and re-enables the tile.
+        async deliver_reward(input) {
+            const nums = String(input ?? '').match(/-?\d+/g);
+            if (!nums || nums.length < 3)
+                return `Error: deliver_reward needs "x,y,points" (got '${input}').`;
+            const x = parseInt(nums[0], 10), y = parseInt(nums[1], 10), pts = parseInt(nums[2], 10);
+            if (!deliveryTiles.length) return 'Error: delivery tiles not loaded yet.';
+            if (!deliveryTiles.some(d => d.x === x && d.y === y))
+                return `Error: (${x},${y}) is not a delivery tile. Call sense_delivery_tiles to list them.`;
+            const cfg = { deliveryTileRewards: [[x, y, pts]] };
+            applyMissionConfig(cfg);
+            sendConstraint('apply', cfg);
+            const net = missionConstraints.deliveryTileNet.get(`${x}_${y}`) ?? 0;
+            return net < 0 ? 'Mission declined.' : 'Mission accepted.';
         },
 
         async restrict_exploration(input) {

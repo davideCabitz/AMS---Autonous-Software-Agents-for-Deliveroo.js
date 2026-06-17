@@ -22,7 +22,7 @@ const MAX_TOOL_FAILURES = 1;
 // is a mission, not an action, and must ack "Mission accepted." in chat — the
 // model ends with "End" (no Final Answer after a tool), so the loop emits the ack.
 const MISSION_TOOLS = new Set([
-    'apply_mission', 'forbid_delivery', 'restrict_exploration',
+    'apply_mission', 'forbid_delivery', 'restrict_exploration', 'deliver_reward',
     'dropMission', 'dropMissions',
     'start_light_mission', 'stop_light_mission',
     'start_handoff', 'stop_handoff',
