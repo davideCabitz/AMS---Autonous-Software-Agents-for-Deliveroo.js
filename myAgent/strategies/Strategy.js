@@ -264,28 +264,28 @@ export class Strategy {
     }
 
     /**
-     * Check if current delivery target should be kept or replaced
+     * Check if the current delivery target should be kept or replaced.
+     *
+     * BINARY COMMITMENT (restored from commit 561fec2): once committed to a delivery
+     * zone, keep heading there as long as it is still REACHABLE — recompute only when
+     * agents/crates fully wall it off. We do NOT reconsider on a cost margin.
+     *
+     * Why not the competitor-aware comparative version (MULTI_AGENT_AWARENESS.md
+     * Case 2): comparing deliveryCost(cur) vs deliveryCost(alt) on a SWITCH_MARGIN is
+     * unstable. Both costs vary continuously with the agent's sub-tile position and
+     * with which competitors are sensed/pruned each tick, so the `Δ > margin` test
+     * flips sign tick-to-tick. Each flip emits a different go_deliver that preempts
+     * the running plan ('stopped'), and the agent shuffles in place without
+     * delivering. isReachable is a STABLE predicate (true unless structurally walled),
+     * so it can't oscillate. Case 2's doorway-rerouting is intentionally dropped in
+     * favour of never ping-ponging; see MULTI_AGENT_AWARENESS.md.
+     *
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {boolean} True to keep current delivery target
      */
     betterDelivery(currentIntent) {
         if (currentIntent?.[0] !== 'go_deliver') return false;
-        const cur = { x: currentIntent[1], y: currentIntent[2] };
-        if (!this.isReachable(cur)) return false;        // current gone → recompute
-        const alt = this.nearestEscapableDelivery();
-        if (!alt) {
-            // nearestEscapableDelivery returned nothing. Two cases:
-            //   • current target is a SAFE (usable) zone → genuinely nothing better,
-            //     keep heading there.
-            //   • current target is a TRAP and we got undefined because a safe zone
-            //     is agent-blocked (the wait case) → do NOT keep driving into the
-            //     trap; recompute so the caller takes the hold/idle branch instead.
-            return usableDeliverySet.has(`${cur.x}_${cur.y}`);
-        }
-        const curCost = this.deliveryCost(me, cur);
-        const altCost = this.deliveryCost(me, alt);
-        // Keep unless the alternative wins by MORE than the margin.
-        return (curCost - altCost) <= SWITCH_MARGIN;
+        return this.isReachable({ x: currentIntent[1], y: currentIntent[2] });
     }
 
     /**
@@ -320,6 +320,12 @@ export class Strategy {
             && parcel.reward > missionConstraints.maxParcelReward) return false;
         if (missionConstraints.maxBundleValue != null
             && parcel.reward > missionConstraints.maxBundleValue) return false;
+        // "= T" missions: never let the running total exceed T. Reject a parcel that
+        // alone overshoots, or that would push the bundle we're already carrying past T.
+        if (missionConstraints.exactBundleValue != null) {
+            const carriedTotal = parcels.carriedBy(me.id).reduce((s, p) => s + p.reward, 0);
+            if (carriedTotal + parcel.reward > missionConstraints.exactBundleValue) return false;
+        }
         return true;
     }
 
@@ -341,7 +347,16 @@ export class Strategy {
      */
     stackReady(carrying) {
         if (this.stackForbidden(carrying.length)) return false;
+        if (missionConstraints.exactBundleValue != null) {
+            // "= T": deliver only when the bundle is worth EXACTLY T.
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            return total === missionConstraints.exactBundleValue;
+        }
         if (missionConstraints.maxBundleValue != null) return carrying.length >= 1;
+        if (missionConstraints.minBundleValue != null) {
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.minBundleValue) return false;
+        }
         if (missionConstraints.requiredStackSize != null)
             return carrying.length >= missionConstraints.requiredStackSize;
         return true;
@@ -354,6 +369,15 @@ export class Strategy {
      */
     mustStack(carrying) {
         if (this.stackForbidden(carrying.length)) return true;
+        if (missionConstraints.exactBundleValue != null) {
+            // "= T": keep adding parcels until the bundle is worth exactly T.
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.exactBundleValue) return true;
+        }
+        if (missionConstraints.minBundleValue != null) {
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.minBundleValue) return true;
+        }
         return missionConstraints.requiredStackSize != null
             && carrying.length < missionConstraints.requiredStackSize;
     }

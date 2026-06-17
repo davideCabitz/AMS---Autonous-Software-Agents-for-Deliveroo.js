@@ -132,7 +132,12 @@ export const missionConstraints = {
     allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
     maxParcelReward:      null,      // number | null — null = no ceiling
-    maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this
+    maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this.
+                                     //   Strict "< T" is expressed as maxBundleValue = T−1 (rewards are integers).
+    minBundleValue:       null,      // number | null — total reward per delivery must be ≥ this (keep stacking until met).
+                                     //   Strict "> T" is expressed as minBundleValue = T+1 (rewards are integers).
+    exactBundleValue:     null,      // number | null — total reward per delivery must EQUAL this ("= T"). Keep
+                                     //   stacking toward it and never overshoot; deliver only when the total is exactly T.
     deliveryMultipliers:  null,      // Map<"x_y", number> | null — per-tile delivery reward scale; null = every tile 1×
     oneShotBonus:         null,      // { x, y, points, perAgent } | null — a go-there reward goal; the literal
                                      //   `points` competes with parcel income inside the value functions
@@ -148,6 +153,11 @@ export const missionConstraints = {
     handoffNet:           0,         // Σ point values of "one picks up / other delivers" offers
     gatherNet:            0,         // Σ point values of "move both near (x,y) and wait" offers
     lightNet:             0,         // Σ point values of red-light-green-light offers
+    // Running sum of (mult − 1.0) deltas for reward-scaling missions ("5× pts",
+    // "0.3× reward"). Positive multipliers add, fractional ones subtract. The gate
+    // fires when the cumulative net ≥ 0 (armedByNet), at which point start_multiplier_mission
+    // also applies the accompanying Level-2 constraint (deliveryMultipliers / stack size).
+    multiplierNet:        0,         // Σ (mult−1.0) of reward-scaling mission offers
     descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
 };
 
