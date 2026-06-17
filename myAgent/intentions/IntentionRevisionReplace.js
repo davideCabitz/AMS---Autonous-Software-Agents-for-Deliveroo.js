@@ -7,7 +7,7 @@ const log = createLogger('intention');
 
 /**
  * @class IntentionRevisionReplace
- * Replacing intention revision: interrupt current, respect PDDL locks, support LLM commands
+ * Replace semantics: interrupt current, respect PDDL locks, support LLM commands.
  */
 export class IntentionRevisionReplace extends IntentionRevision {
     /**
@@ -21,9 +21,8 @@ export class IntentionRevisionReplace extends IntentionRevision {
         // Never interrupt the same intention.
         if (last && last.predicate.join(' ') === predicate.join(' ')) return;
 
-        // Never interrupt a PDDL plan mid-execution. Once the solver has returned a
-        // plan and the agent is executing it (pddl.busy), any new intention is queued
-        // but the current plan runs to completion first.
+        // Never interrupt a PDDL plan mid-execution: while pddl.busy, queue the new
+        // intention but let the current plan finish first.
         if (pddl.busy) {
             log(`PDDL plan in progress — deferring: ${predicate.join(' ')}`);
             return;

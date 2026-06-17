@@ -5,23 +5,23 @@ const log = createLogger('agent');
 
 /**
  * @class IntentionRevision
- * Base intention loop managing a queue of intentions
+ * Base intention loop over a queue of intentions.
  */
 export class IntentionRevision {
-    /** @type {Array<IntentionDeliberation>} Queue of intentions to execute */
+    /** @type {Array<IntentionDeliberation>} Intention queue */
     #queue = [];
 
-    /** @type {Array<IntentionDeliberation>} Intention queue (read-only access) */
+    /** @type {Array<IntentionDeliberation>} Queue (read-only) */
     get intention_queue() { return this.#queue; }
 
     /**
-     * Log message through module logger
+     * Log through the module logger
      * @param {...any} args - Log arguments
      */
     log(...args) { log(...args); }
 
     /**
-     * Main intention execution loop
+     * Main execution loop
      * @returns {Promise<void>}
      */
     async loop() {
@@ -37,7 +37,7 @@ export class IntentionRevision {
 
             if (!this.#isValid(intention)) {
                 this.log('dropping stale intention:', intention.predicate.join(' '));
-                intention.cancel();   // settle its completion — awaiters must not hang
+                intention.cancel();   // settle completion so awaiters don't hang
                 this.#queue.shift();
                 continue;
             }
@@ -54,23 +54,23 @@ export class IntentionRevision {
     }
 
     /**
-     * Push a new intention to the queue
+     * Push a new intention (overridden by subclasses)
      * @param {Array} _predicate - Intention predicate
      * @returns {Promise<void>}
      */
     async push(_predicate) {}
 
     /**
-     * Check if an intention should continue executing
+     * Whether an intention should keep executing
      * @param {IntentionDeliberation} intention - Intention to validate
      * @returns {boolean}
      */
     #isValid(intention) {
         const [intent, , , id] = intention.predicate;
         if (intent === 'go_pick_up') {
-            // Fall back to memory when the parcel has left the sensing zone;
-            // getRemembered() returns null when memory is disabled (all existing
-            // strategies), so this ?? branch is a no-op for them.
+            // Fall back to memory when the parcel left the sensing zone.
+            // getRemembered() is null when memory is disabled, so this is a
+            // no-op for strategies without memory.
             const p = parcels.get(id) ?? parcels.getRemembered(id);
             return !!p && !p.carriedBy;
         }

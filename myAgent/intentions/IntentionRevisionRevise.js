@@ -3,10 +3,10 @@ import { IntentionDeliberation } from './IntentionDeliberation.js';
 
 /**
  * @class IntentionRevisionRevise
- * Revising intention revision: stop current intention when a different one is pushed
+ * Revise semantics: stop the current intention when a different one is pushed.
  */
 export class IntentionRevisionRevise extends IntentionRevision {
-    /** @type {number} Threshold for switching (unused) */
+    /** @type {number} Switch threshold (unused) */
     #SWITCH_THRESHOLD = 0.5;
 
     /**

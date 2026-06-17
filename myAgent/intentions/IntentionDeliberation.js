@@ -2,19 +2,19 @@ import { planLibrary } from '../plans/planLibrary.js';
 
 /**
  * @class IntentionDeliberation
- * Execute a single intention by trying plans from the library
+ * Execute one intention by trying plans from the library.
  */
 export class IntentionDeliberation {
-    /** @type {boolean} Whether execution has been stopped */
+    /** @type {boolean} Stopped flag */
     #stopped = false;
 
-    /** @type {boolean} Whether achieve() has been called */
+    /** @type {boolean} Whether achieve() has run */
     #started = false;
 
-    /** @type {Object|null} Currently executing plan instance */
+    /** @type {Object|null} Currently executing plan */
     #current_plan = null;
 
-    /** @type {Array} Intention predicate (e.g., ['go_to', x, y]) */
+    /** @type {Array} Predicate (e.g. ['go_to', x, y]) */
     #predicate;
 
     /** @type {Object} Parent intention context */
@@ -26,7 +26,7 @@ export class IntentionDeliberation {
     /** @type {Function} Promise rejecter */
     #rejectDone;
 
-    /** @type {Promise} Resolves when intention completes, rejects on failure */
+    /** @type {Promise} Resolves on completion, rejects on failure */
     completion;
 
     /**
@@ -44,30 +44,26 @@ export class IntentionDeliberation {
         this.completion.catch(() => {});
     }
 
-    /** @type {Array} Intention predicate */
+    /** @type {Array} Predicate */
     get predicate() { return this.#predicate; }
 
-    /** @type {boolean} Whether this intention has been stopped */
+    /** @type {boolean} Stopped flag */
     get stopped()   { return this.#stopped; }
 
-    /**
-     * Stop this intention and its current plan
-     */
+    /** Stop this intention and its current plan */
     stop() {
         this.#stopped = true;
         this.#current_plan?.stop();
     }
 
-    /**
-     * Cancel intention due to staleness (settles completion promise for awaiters)
-     */
+    /** Cancel as stale, settling the completion promise for awaiters */
     cancel() {
         this.#stopped = true;
         this.#rejectDone(['stopped', ...this.#predicate]);
     }
 
     /**
-     * Log message through parent
+     * Log through parent
      * @param {...any} args - Log arguments
      */
     log(...args) {
@@ -75,7 +71,7 @@ export class IntentionDeliberation {
     }
 
     /**
-     * Execute this intention by trying applicable plans
+     * Execute by trying applicable plans in order
      * @returns {Promise<*>} Plan result
      */
     async achieve() {
@@ -103,11 +99,9 @@ export class IntentionDeliberation {
             }
         }
 
-        // Reject with the most meaningful tag. A 'stopped' plan means the
-        // intention was superseded — keep that signal (the loop silences it).
-        // Otherwise relay the first real plan failure (e.g. ['no path to',x,y])
-        // instead of masking everything as 'no plan for': the LLM command path
-        // turns these tags into observations the model can actually act on.
+        // Reject with the most meaningful tag: 'stopped' (superseded) > first real
+        // plan failure (e.g. ['no path to',x,y]) > 'no plan for'. The LLM command
+        // path turns these into observations the model can act on.
         const e = wasStopped ? ['stopped', ...this.#predicate]
                 : firstError ?? ['no plan for', ...this.#predicate];
         this.#rejectDone(e);

@@ -1,31 +1,31 @@
 /**
  * @class Me
- * Agent's own state (position, score, identity)
+ * Agent's own state: identity, position, score.
  */
 export class Me {
-    /** @type {string} Agent unique identifier */
+    /** @type {string} Unique identifier */
     id = '';
 
-    /** @type {string} Agent display name */
+    /** @type {string} Display name */
     name = '';
 
-    /** @type {number} Rounded x coordinate (tile grid) */
+    /** @type {number} Rounded x (tile grid) */
     x = -1;
 
-    /** @type {number} Rounded y coordinate (tile grid) */
+    /** @type {number} Rounded y (tile grid) */
     y = -1;
 
-    /** @type {number} Fractional x coordinate from server (in-transit values) */
+    /** @type {number} Fractional x from server (in-transit) */
     rawX = -1;
 
-    /** @type {number} Fractional y coordinate from server (in-transit values) */
+    /** @type {number} Fractional y from server (in-transit) */
     rawY = -1;
 
     /** @type {number} Current score */
     score = 0;
 
     /**
-     * Update agent state from server message
+     * Update state from a server message
      * @param {{id?: string, name?: string, x?: number, y?: number, score?: number}} data
      */
     update({ id, name, x, y, score }) {
@@ -36,7 +36,7 @@ export class Me {
         this.score = score ?? this.score;
     }
 
-    /** @type {boolean} True when agent identity has been assigned */
+    /** @type {boolean} True once an identity has been assigned */
     get isReady() {
         return this.id !== '';
     }

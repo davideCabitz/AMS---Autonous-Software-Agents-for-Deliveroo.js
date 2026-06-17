@@ -1,9 +1,9 @@
 /**
- * Cluster spawners into groups using union-find and path-based distance
- * @param {Array<{x: number, y: number}>} tiles - Spawner tile positions
+ * Cluster spawners into groups via union-find over path-based distance
+ * @param {Array<{x: number, y: number}>} tiles - Spawner positions
  * @param {Set<string>} walkableSet - Set of "x_y" walkable tile keys
  * @param {number} maxPathLen - Max walkable steps to merge two spawners (default 2)
- * @returns {Array<Array<{x: number, y: number}>>} Array of spawner groups
+ * @returns {Array<Array<{x: number, y: number}>>} Spawner groups
  */
 export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
     if (tiles.length === 0) return [];
@@ -28,9 +28,9 @@ export function buildSpawnerGroups(tiles, walkableSet, maxPathLen = 2) {
     const DIRS = [{ dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }];
 
     /**
-     * BFS to find tiles reachable within maxPathLen steps
+     * BFS for tiles reachable within maxPathLen steps
      * @param {{x: number, y: number}} t - Start tile
-     * @returns {Map<string, number>} Map of "x_y" keys to distance
+     * @returns {Map<string, number>} "x_y" keys → distance
      */
     function reachableWithin(t) {
         const seen  = new Map([[`${t.x}_${t.y}`, 0]]);
