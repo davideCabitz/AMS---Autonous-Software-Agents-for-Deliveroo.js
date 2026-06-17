@@ -95,6 +95,21 @@ export class StrategyLookAhead extends StrategyMemory {
         }
         const eligible = allFree.filter(p => this.isReachable(p) && this.inSafe(p));
 
+        // Grab-underfoot pre-empt: a free parcel on our own tile is free to take and
+        // ends the trip-reordering flip-flop that otherwise has two near-symmetric
+        // tour orders swap the first stop every cycle (neither parcel ever reached,
+        // see #shouldKeep's line-249 free-reorder bypass). Pickup is one tick; no tour
+        // can beat it. Gated by the same value floor as a normal pickup.
+        const underfoot = eligible
+            .filter(p => distance(me, p) === 0)
+            .map(p => ({ p, gain: this.pickupGain(p) }))
+            .filter(({ gain }) => gain >= MIN_DELIVERY_REWARD)
+            .sort((a, b) => b.gain - a.gain)[0];
+        if (underfoot && !this.stackFull(carrying)) {
+            log(`→ go_pick_up underfoot ${underfoot.p.id} gain:${underfoot.gain.toFixed(1)}`);
+            return ['go_pick_up', underfoot.p.x, underfoot.p.y, underfoot.p.id];
+        }
+
         if (carrying.length > 0) {
             // A maxStackSize CAP bounds the bundle: at ≥ cap (stackFull) stop picking up
             // and deliver, else the value gate overshoots ("deliver 2" delivered 4).
@@ -232,9 +247,18 @@ export class StrategyLookAhead extends StrategyMemory {
 
     /**
      * Hysteresis over live + remembered targets (replicated from
-     * StrategyMemory.#shouldKeepWithMemory, private there), with one twist: when the
-     * chained plan's SECOND stop is the current target, switching to the near parcel
-     * re-orders the same trip, so allow it without SWITCH_MARGIN.
+     * StrategyMemory.#shouldKeepWithMemory, private there).
+     *
+     * Commit anchor: the look-ahead re-scores the 2-parcel tour every cycle, and on
+     * near-symmetric geometry the winning FIRST STOP can alternate. The old reorder
+     * twist — "if cur is now the tour's SECOND stop, switching first-stop just re-orders
+     * the same trip, allow it for free" — fired even when the two tours covered DIFFERENT
+     * pairs (e.g. {C,G} this cycle vs {G,C'} next), swapping first stops endlessly so
+     * neither parcel was ever reached. Removed: every switch now clears one margin gate,
+     * compared like-for-like on the candidate first-stop's SOLO value (never the chain
+     * value, which the second parcel's reward inflates past any margin). A genuine
+     * same-trip reorder swaps two equal-ish parcels and so is held by SWITCH_MARGIN too —
+     * harmless, since either order reaches the same pair.
      * @param {Array|null} currentIntent - Current intention predicate
      * @param {{p: Object, value: number, via?: string, second?: Object}|undefined} choice - Candidate pickup
      * @returns {boolean} True to keep the current pickup target
@@ -246,8 +270,11 @@ export class StrategyLookAhead extends StrategyMemory {
         if (!cur || cur.carriedBy) return false;
         if (!this.isReachable(cur)) return false;
         if (!choice || choice.p.id === curId) return true;
-        if (choice.via === 'lookahead' && choice.second?.id === curId) return false;
-        return choice.value - this.pickupValue(cur) < SWITCH_MARGIN;
+        // Like-for-like margin: compare the candidate FIRST STOP's solo value against
+        // cur's, never choice.value (a lookahead's chain value is inflated by the second
+        // parcel's reward, so it would clear any margin and switch every cycle — the
+        // flip-flop). Equal-value parcels never reach SWITCH_MARGIN, so cur is kept.
+        return this.pickupValue(choice.p) - this.pickupValue(cur) < SWITCH_MARGIN;
     }
 
     /**
