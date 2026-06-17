@@ -304,6 +304,12 @@ export class Strategy {
             && parcel.reward > missionConstraints.maxParcelReward) return false;
         if (missionConstraints.maxBundleValue != null
             && parcel.reward > missionConstraints.maxBundleValue) return false;
+        // "= T" missions: never let the running total exceed T. Reject a parcel that
+        // alone overshoots, or that would push the bundle we're already carrying past T.
+        if (missionConstraints.exactBundleValue != null) {
+            const carriedTotal = parcels.carriedBy(me.id).reduce((s, p) => s + p.reward, 0);
+            if (carriedTotal + parcel.reward > missionConstraints.exactBundleValue) return false;
+        }
         return true;
     }
 
@@ -325,7 +331,16 @@ export class Strategy {
      */
     stackReady(carrying) {
         if (this.stackForbidden(carrying.length)) return false;
+        if (missionConstraints.exactBundleValue != null) {
+            // "= T": deliver only when the bundle is worth EXACTLY T.
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            return total === missionConstraints.exactBundleValue;
+        }
         if (missionConstraints.maxBundleValue != null) return carrying.length >= 1;
+        if (missionConstraints.minBundleValue != null) {
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.minBundleValue) return false;
+        }
         if (missionConstraints.requiredStackSize != null)
             return carrying.length >= missionConstraints.requiredStackSize;
         return true;
@@ -338,6 +353,15 @@ export class Strategy {
      */
     mustStack(carrying) {
         if (this.stackForbidden(carrying.length)) return true;
+        if (missionConstraints.exactBundleValue != null) {
+            // "= T": keep adding parcels until the bundle is worth exactly T.
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.exactBundleValue) return true;
+        }
+        if (missionConstraints.minBundleValue != null) {
+            const total = carrying.reduce((s, p) => s + p.reward, 0);
+            if (total < missionConstraints.minBundleValue) return true;
+        }
         return missionConstraints.requiredStackSize != null
             && carrying.length < missionConstraints.requiredStackSize;
     }

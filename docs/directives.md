@@ -52,13 +52,14 @@ constraints are mirrored to BOTH agents automatically.
 | **L1** "What is the capital of Italy?" | `Final Answer` (no tool) | B replies with the bare answer ("Rome"); an automated checker matches the reply literally. |
 | **L1** "Calculate 5*5" (for a reward) | `calculate("5*5")` | B replies with the bare result ("25"). |
 | **L2** "Deliver stacks of exactly 3 parcels to double the reward" | `apply_mission {"requiredStackSize":3}` | Both agents only deliver while carrying exactly 3; otherwise keep collecting. `Mission accepted.` |
-| **L2** "Deliver stacks of exactly 5 for 0.3 of the reward" | — → decline | Fractional/diminished reward → `Mission declined.` |
-| **L2** "Deliver in (x1,y1) or (x2,y2) for 5× pts" | `apply_mission {"deliveryMultipliers":[[x1,y1,5],[x2,y2,5]]}` | Those tiles are worth 5×; both agents prefer delivering there when the bonus outweighs the extra travel. `Mission accepted.` |
+| **L2** "Deliver stacks of exactly 5 for 0.3 of the reward" | `start_multiplier_mission({"mult":0.3,"requiredStackSize":5,"maxStackSize":5})` | Fractional reward → net −0.7 → `Mission declined.` (a later positive-multiplier offer re-arms). |
+| **L2** "Deliver in (x1,y1) or (x2,y2) for 5× pts" | `start_multiplier_mission({"mult":5,"deliveryMultipliers":[[x1,y1,5],[x2,y2,5]]})` | Net +4.0 → gate fires → those tiles worth 5×; both agents prefer delivering there. `Mission accepted.` |
 | **L2** "Every time you deliver in (x,y) you get 0 pts" | `forbid_delivery(x,y)` | (x,y) is removed from the allowed delivery tiles; both agents deliver elsewhere. `Mission accepted.` |
 | **L2** "If you deliver in the leftmost delivery tile you lose 50 points" | `forbid_delivery(leftmost)` | The resolver excludes the real leftmost delivery tile(s) (ties included); both agents avoid them. `Mission accepted.` |
 | **L2** "Deliver only at (x,y)" | `apply_mission {"allowedDeliveryTiles":[[x,y]]}` | Both agents restrict deliveries to the listed tiles only. `Mission accepted.` |
 | **L2** "If you deliver parcels worth more than 10, you get no reward" | `apply_mission {"maxParcelReward":10}` | Both agents never pick up a parcel with reward > 10. `Mission accepted.` |
 | **L2** "Each delivery's total reward must be ≤ T" | `apply_mission {"maxBundleValue":T}` | Both agents carry one cheap parcel at a time so every delivery stays under T. `Mission accepted.` |
+| **L2** "Each delivery's total reward must be ≥ T" | `apply_mission {"minBundleValue":T}` | Both agents keep stacking until bundle total ≥ T before delivering. `Mission accepted.` |
 | **L2** "Do not go through tile (x,y) or you lose 50pts" | `apply_mission {"avoidTiles":[[x,y]]}` | (x,y) is excluded from all pathfinding for both agents. `Mission accepted.` |
 | **L2** "Explore only the left/right/top/bottom half" | `restrict_exploration(zone)` | Both agents restrict exploration to the named map half. `Mission accepted.` |
 | **L2** "Explore only these spawners [list]" | `apply_mission {"allowedSpawnerTiles":[[x,y],…]}` | Both agents only target the listed spawner tiles when exploring. `Mission accepted.` |

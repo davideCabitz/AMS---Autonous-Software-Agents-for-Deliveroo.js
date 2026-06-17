@@ -132,7 +132,9 @@ Additions to existing BDI files (nothing removed):
 | `context.js` | `lightMission = { active }` | Whether a red-light-green-light mission has been STARTED; gates whether STOP/GO shouts take effect. Armed by `start_light_mission`, cleared by `stop_light_mission`/abort |
 | `context.js` | `manualHold = { active }` | Indefinite hold (hold() tool) that survives directive end — "wait for each other" |
 | `context.js` | `missionConstraints.maxBundleValue` | Level-2 field: total reward per delivery must be ≤ N |
-| `context.js` | `missionConstraints.deliveryMultipliers` | Level-2 field: per-tile delivery reward multiplier (bonus tiles); null/empty = all tiles ×1 |
+| `context.js` | `missionConstraints.minBundleValue` | Level-2 field: total reward per delivery must be ≥ N (agent keeps stacking until met) |
+| `context.js` | `missionConstraints.multiplierNet` | Running Σ (mult−1.0) for reward-scaling missions; armed when ≥ 0 (`start_multiplier_mission`) |
+| `context.js` | `missionConstraints.deliveryMultipliers` | Level-2 field: per-tile delivery reward multiplier (bonus tiles); null/empty = all tiles ×1. Applied via `start_multiplier_mission` when `multiplierNet ≥ 0`. |
 | `context.js` | `missionConstraints.requiredStackSize` / `maxStackSize` | Level-2 stacking as a FLOOR/CAP pair: `requiredStackSize` = deliver only once carrying ≥ N ("at least N"); `maxStackSize` = never carry more than N ("at most N"); both set = "exactly N" |
 | `context.js` | `missionConstraints.oneShotBonus` | Level-2 field `{x,y,points,perAgent}`: a go-there reward the BDI pursues on its own when the points beat forgone parcel income (see `bonusGoalValue`) |
 | `context.js` | `missionConstraints.penaltyTiles` | Level-2 field `Map<"x_y",points>`: a numbered location penalty; keys are also folded into `avoidTiles` (hard ban), the magnitude is kept for the worth-gate and recall |
@@ -324,7 +326,8 @@ The LLM has only **high-level** tools — never raw tile-by-tile movement.
 | `avoidTiles: [[x,y],…]` | Excluded from all pathfinding (A* `blockedKeys`) |
 | `maxParcelReward: N` | Never pick parcels above N |
 | `maxBundleValue: N` | Each delivery's total reward ≤ N → agents carry one cheap parcel at a time so every delivery qualifies |
-| `deliveryMultipliers: [[x,y,m],…]` | Tile (x,y) is worth m× a normal delivery (positive "5×/double pts in (x,y)" bonus tiles); the strategy both routes deliveries to and values the load higher near the bonus tile. Replaces any prior map. |
+| `minBundleValue: N` | Each delivery's total reward ≥ N → agents keep stacking until the bundle total reaches N before delivering (`mustStack` / `stackReady`) |
+| `deliveryMultipliers: [[x,y,m],…]` | Tile (x,y) is worth m× a normal delivery. Applied by `start_multiplier_mission` (not `apply_mission` directly) when `multiplierNet ≥ 0`. Replaces any prior map. |
 | `oneShotBonus: {x,y,points,perAgent?}` | A go-there reward (e.g. "+700 at (8,3)"). The BDI diverts to it only when its net value (`points − n·ρ·dist`, via `bonusGoalValue`) beats banking the current load — so the literal point figure competes inside the cost function, not by LLM guess. For a "go there NOW" one-off, use `path_cost`+`go_to` instead. |
 | `penaltyTiles: [[x,y,points],…]` | A numbered location penalty ("going to (x,y) costs 1000 pts"): the tile is hard-banned from all pathfinding (folded into `avoidTiles`) AND the magnitude is recorded for the worth-gate / recall. Accumulates; dropping it lifts only its own bans. Use `forbid_delivery` for penalties tied to *delivering*. |
 | `description: "text"` | Label shown in future prompts, auto-tagged with field names for later `dropMission(field)` |
