@@ -3,6 +3,12 @@ import { reachableFrom, findRoute } from '../utils/astar.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions, armedByNet } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
 import { startHandoff, stopHandoff } from './handoff.js';
+import { createLogger } from '../utils/logger.js';
+
+const log = createLogger('llm:tool');
+
+// PddlMove is imported lazily inside gather_near (dynamic import) to avoid a circular
+// module init: commandTools → PddlMove → PlanBase → IntentionDeliberation → planLibrary.
 
 /**
  * LLM command tool catalogue. Every tool returns a STRING observation for the
@@ -595,19 +601,38 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             sendHalt();
             const aRes = await sendOrder(['go_to', tileA.x, tileA.y]);
             if (directive.aborted) return null;            // abort handler already replied
-            // Under PDDL_GATHER, mark tileB as the gather target so PddlMove path-plans
-            // the coordinator's leg (PddlMove fails → AStarMove fallback). Cleared after.
-            if (pddlGather) pddl.gatherTarget = { x: tileB.x, y: tileB.y };
-            try {
-                await withTimeout(myAgent.commandAndAwait(['go_to', tileB.x, tileB.y]), COMMAND_TIMEOUT_MS, 'go_to');
-            } catch (err) {
-                return `Partner ordered to (${tileA.x},${tileA.y}) [${aRes}], but I could not reach (${tileB.x},${tileB.y}): ${describeFailure(err)}`;
-            } finally {
-                pddl.gatherTarget = null;
+
+            // Coordinator's leg. Under PDDL_GATHER, hand PDDL the WHOLE candidate ring
+            // (reachable by B, minus the worker's tile) and let the PLANNER pick which tile
+            // to occupy — tile selection moves from JS into PDDL. JS's tileB stays as the
+            // A* fallback target if the solver fails. Without the flag: A* to tileB as before.
+            let bTile = tileB;
+            if (pddlGather) {
+                const nearKeys = candB
+                    .map(t => `${t.x}_${t.y}`)
+                    .filter(k => k !== `${tileA.x}_${tileA.y}`);
+                try {
+                    const { PddlMove } = await import('../plans/PddlMove.js');
+                    await new PddlMove(null).runToGatherSpot(nearKeys);
+                    bTile = { x: Math.round(me.x), y: Math.round(me.y) };  // wherever PDDL landed
+                } catch (err) {
+                    log(`gather PDDL failed (${describeFailure(err)}) — A* fallback to (${tileB.x},${tileB.y})`);
+                    try {
+                        await withTimeout(myAgent.commandAndAwait(['go_to', tileB.x, tileB.y]), COMMAND_TIMEOUT_MS, 'go_to');
+                    } catch (e2) {
+                        return `Partner ordered to (${tileA.x},${tileA.y}) [${aRes}], but I could not reach a gather tile: ${describeFailure(e2)}`;
+                    }
+                }
+            } else {
+                try {
+                    await withTimeout(myAgent.commandAndAwait(['go_to', tileB.x, tileB.y]), COMMAND_TIMEOUT_MS, 'go_to');
+                } catch (err) {
+                    return `Partner ordered to (${tileA.x},${tileA.y}) [${aRes}], but I could not reach (${tileB.x},${tileB.y}): ${describeFailure(err)}`;
+                }
             }
             manualHold.active = true;                      // B holds indefinitely (survives directive end)
             myAgent.haltCurrent();
-            return `Both agents in position within distance ${dist} of (${cx},${cy}): you at (${me.x},${me.y}), partner at (${tileA.x},${tileA.y}) [${aRes}]. Both holding — say "resume" to release.`;
+            return `Both agents in position within distance ${dist} of (${cx},${cy}): you at (${bTile.x},${bTile.y}), partner at (${tileA.x},${tileA.y}) [${aRes}]. Both holding — say "resume" to release.`;
         },
 
         // Level-2 persistent missions. Mutation logic lives in missionState.js (shared

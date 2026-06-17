@@ -23,7 +23,7 @@ LOG_NAMESPACES=              # silenzio totale
 | `nav` | Navigazione A* step-by-step |
 | `move` | Ogni movimento eseguito |
 | `move:pddl` | Movimenti pianificati da PDDL |
-| `pddl` | Pianificatore PDDL (push casse) |
+| `pddl` | Pianificatore PDDL: push casse, e — con `PDDL_GOTO`/`PDDL_GATHER` — navigazione delle missioni go_to/gather e scelta della tile gather |
 | `intention` | Gestione intenzioni BDI |
 | `agent` | Loop intenzioni agente |
 | `strategy` | Strategia selezionata |

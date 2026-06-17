@@ -19,6 +19,8 @@
         (left  ?t1 ?t2)
         (up    ?t1 ?t2)
         (down  ?t1 ?t2)
+        (near ?t)        ; a candidate gather tile (within the mission distance, reachable, not the partner's)
+        (gathered ?a)    ; ?a has reached some (near) tile — the gather mission goal
     )
 
     ;; ---- plain agent moves: step onto an adjacent free tile ----
@@ -44,6 +46,17 @@
         :parameters (?me ?from ?to)
         :precondition (and (me ?me) (at ?me ?from) (down ?from ?to) (free ?to))
         :effect       (and (at ?me ?to) (not (at ?me ?from)))
+    )
+
+    ;; ---- gather mission: commit once standing on ANY candidate (near) tile ----
+    ;; Lets the planner CHOOSE which near tile to reach (shortest plan wins) instead of
+    ;; JS pre-picking one. The existential "some near tile" is absorbed into this action's
+    ;; precondition, so the goal stays a plain (gathered me) — no quantified goal needed
+    ;; (the STRIPS backend does not support those). A no-op at execution time.
+    (:action reachGatherSpot
+        :parameters (?me ?t)
+        :precondition (and (me ?me) (at ?me ?t) (near ?t))
+        :effect       (gathered ?me)
     )
 
     ;; ---- push a crate one tile ahead; the agent follows into the crate's old tile ----
