@@ -5,16 +5,13 @@ import { createLogger } from './utils/logger.js';
 const log = createLogger('worker');
 
 /*
- * Worker side of the partner link (see myAgent/llm/partner.js for the
- * coordinator side and the protocol shapes). The worker is a plain BDI agent —
- * no LLM — that the coordinator can command over chat with JSON payloads:
- * one-shot orders (go_to / go_pick_up / go_deliver / putdown), halt/resume
- * (freeze autonomy, e.g. during a parcel handoff or while waiting together),
- * and mission-constraint mirroring so persistent missions bind both agents.
+ * Worker side of the partner link (coordinator side + protocol in llm/partner.js).
+ * A plain BDI agent — no LLM — that the coordinator commands over chat with JSON:
+ * one-shot orders (go_to / go_pick_up / go_deliver / putdown), halt/resume, and
+ * mission-constraint mirroring so persistent missions bind both agents.
  *
- * Non-JSON chat is ignored EXCEPT the red/green-light keywords: the worker
- * hears the mission agent's shout directly and must stop within the grace
- * period — it cannot afford to wait for the coordinator's relayed halt.
+ * Non-JSON chat is ignored; the worker reacts only to the coordinator's relayed
+ * halt/resume (one-brain design — see the dispatch handler below).
  */
 
 const HELLO_RETRY_MS     = 5_000;   // until first ack
@@ -46,14 +43,11 @@ function describeFailure(err) {
 export function registerWorker(myAgent, { resumeAutonomy } = {}) {
     let coordinatorId = null;
     let acked  = false;
-    // While frozen (halt order or red light) the autonomy gate stays held even
-    // after an order completes, so the worker holds position between orders —
-    // exactly what the handoff and "wait for each other" missions need.
+    // While frozen (halt or red light) the gate stays held even after an order
+    // completes, so the worker holds position between orders (handoff / "wait").
     let frozen = false;
-    // Newest-order-wins: each incoming order bumps this. A running order whose seq
-    // is no longer current was superseded (the coordinator re-steered us toward a
-    // moving rendezvous), so it must NOT report a result — the newer order owns the
-    // reply. Lets the coordinator re-target us continuously without racing two plans.
+    // Newest-order-wins: each order bumps this. A running order whose seq is no longer
+    // current was superseded, so it must NOT report — the newer order owns the reply.
     let orderSeq = 0;
 
     const send = (payload) => {
@@ -62,7 +56,7 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
             .catch?.(err => log.error('emitSay to coordinator failed:', err?.message ?? err));
     };
 
-    // --- hello loop: announce ourselves until the coordinator acks, then keepalive ---
+    // --- hello loop: announce until the coordinator acks, then keepalive ---
     const hello = () => {
         const payload = JSON.stringify({ type: 'hello', role: 'worker', name: me.name ?? null });
         socket.emitShout(payload).catch?.(() => {});
@@ -98,10 +92,9 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         frozen,
     });
 
-    // While executing a coordinator order (directive.active), stream our position so
-    // the coordinator can track us id-certainly at any distance — otherAgents is
-    // id-less and range-limited, but a handoff needs to know exactly where we are.
-    // Throttled, and only fires on real movement (onYou).
+    // While executing an order, stream our position so the coordinator can track us
+    // id-certainly at any distance (otherAgents is id-less and range-limited).
+    // Throttled, fires only on real movement (onYou).
     let lastStreamAt = 0;
     socket.onYou(() => {
         if (!directive.active || !coordinatorId) return;
@@ -117,17 +110,16 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
             send({ type: 'result', orderId, ok: false, detail: 'RED LIGHT in force — movement is forbidden' });
             return;
         }
-        // Claim the latest sequence and pre-empt any plan still running for an older
-        // order, so only ONE intention executes at a time even under rapid re-targeting.
+        // Claim the latest sequence and pre-empt any older order's plan, so only ONE
+        // intention runs at a time even under rapid re-targeting.
         const seq = ++orderSeq;
         myAgent.haltCurrent();
         const superseded = () => seq !== orderSeq;
         directive.active = true;       // hold the gate while the order runs
         try {
-            // A pickup order may target a parcel the worker has not sensed yet
-            // (e.g. one the coordinator just put down far away). Known parcel →
-            // full go_pick_up plan (belief-safe). Unknown → walk there and pick
-            // up whatever is on the tile; the next sensing event reconciles.
+            // A pickup order may target a not-yet-sensed parcel (e.g. one the
+            // coordinator just put down). Known → full go_pick_up plan. Unknown →
+            // walk there and grab whatever's on the tile; sensing reconciles next.
             if (predicate[0] === 'go_pick_up' && predicate[3] == null) {
                 const [, x, y] = predicate;
                 const here = parcels.free().filter(p => Math.round(p.x) === x && Math.round(p.y) === y);
@@ -155,14 +147,12 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
                    detail: `done: ${predicate.join(' ')} — now at (${me.x},${me.y})` });
         } catch (err) {
             // A halt from the superseding order surfaces as 'stopped'/'timeout'; that
-            // order will report, so stay silent rather than spuriously failing this one.
+            // order reports, so stay silent rather than spuriously failing this one.
             if (!superseded()) send({ type: 'result', orderId, ok: false, detail: describeFailure(err) });
         } finally {
-            // Stream our RESTING tile: the throttled onYou stream can skip the final
-            // step when we stop right after arriving, leaving the coordinator a tile
-            // behind exactly where it needs to know we've reached the rendezvous.
-            // Only release the gate if WE are still the current order — a newer one
-            // running must keep directive.active held.
+            // Stream our RESTING tile: the throttled onYou can skip the final step when
+            // we stop right after arriving, leaving the coordinator a tile behind at
+            // the rendezvous. Release the gate only if WE are still the current order.
             sendStatus();
             if (!frozen && !superseded()) {
                 directive.active = false;
@@ -188,12 +178,10 @@ export function registerWorker(myAgent, { resumeAutonomy } = {}) {
         try { j = JSON.parse(text); } catch { /* not protocol JSON */ }
 
         if (!j?.type) {
-            // Plain chat — INCLUDING the live "RED LIGHT!/GREEN LIGHT!" shouts — is
-            // for the coordinator to interpret with its LLM (one-brain design: the
-            // worker has no model). The worker reacts only to the coordinator's
-            // relayed halt/resume, so the red-light-green-light mission stays fully
-            // LLM-driven. (Trade-off: the worker now waits out the coordinator's
-            // classify-call latency + the relay hop before freezing.)
+            // Plain chat (incl. live RED/GREEN-LIGHT shouts) is for the coordinator's
+            // LLM to interpret (one-brain design — the worker has no model). The worker
+            // reacts only to the coordinator's relayed halt/resume, so the light mission
+            // stays LLM-driven (trade-off: the worker waits out the relay before freezing).
             return;
         }
 

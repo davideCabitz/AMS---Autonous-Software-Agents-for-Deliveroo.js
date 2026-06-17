@@ -16,10 +16,9 @@ export const socket  = DjsConnect();
 export const me      = new Me();
 
 /* Resilience: socket.io auto-reconnects after transport errors, but NOT after a
- * server-initiated disconnect ('io server disconnect' — observed live: the server
- * bounced the worker mid-game and the process became a zombie). Reconnect
- * manually; the same token re-authenticates as the same agent, onMap/onConfig
- * re-fire, and the worker's hello keepalive re-registers with the coordinator. */
+ * server-initiated disconnect ('io server disconnect' — leaves a zombie process).
+ * Reconnect manually; the same token re-authenticates, onMap/onConfig re-fire, and
+ * the worker's hello keepalive re-registers with the coordinator. */
 socket.on('disconnect', (reason) => {
     console.warn(`[socket] disconnected (${reason})`);
     if (reason === 'io server disconnect') {
@@ -30,145 +29,120 @@ socket.on('disconnect', (reason) => {
     }
 });
 
-/* Which of the two challenge-2 processes this is. Set by myAgent/launch.js before
- * this module loads. 'coordinator' runs the LLM command layer and orders the
- * worker around; 'worker' runs plain BDI plus the partner-order handler. A direct
- * `node myAgent/coordinator_agent.js` run (single-agent, .env TOKEN) stays a coordinator. */
+/* Which of the two processes this is, set by launch.js before this module loads.
+ * 'coordinator' runs the LLM command layer and orders the worker; 'worker' runs
+ * plain BDI plus the partner-order handler. A direct coordinator_agent.js run stays
+ * a coordinator. */
 export const role = process.env.AGENT_ROLE ?? 'coordinator';
 
-/* The coordinator's CHOSEN strategy instance, set by coordinator_agent.js on its
- * first deliberation. Shared here so the handoff routine can drive B's parcel
- * acquisition with the SAME map-chosen strategy it uses for autonomous play. */
+/* The coordinator's chosen strategy, set by coordinator_agent.js on first
+ * deliberation. Shared so the handoff routine drives B's acquisition with the SAME
+ * strategy used for autonomous play. */
 export const runtime = { strategy: null };
 export const parcels = new Parcels();
 export const deliveryTiles = [];
 export const spawnerTiles  = [];
 export const walkableTiles = [];
-/* Crates currently sensed on the map. These are movable obstacles the PDDL
- * planner may push aside (see PddlMove). Populated from `sensing.crates`. */
+/* Crates currently sensed — movable obstacles the PDDL planner may push (see
+ * PddlMove). Populated from `sensing.crates`. */
 export const crateTiles    = [];
-/* Static crate tiles from the map ('5!' crate spawner, '5' sliding tile).
- * Decided once in onMap: if the map has none, crates can never appear, so we
- * skip crate sensing and PddlMove entirely (never pay the online-solver cost). */
+/* Static crate tiles from the map ('5!' spawner, '5' sliding). Decided once in onMap:
+ * no crate tiles ⇒ crates can never appear, so crate sensing and PddlMove are skipped
+ * (never pay the solver cost). */
 export const crateSpawnerTiles = [];
 export let   mapHasCrates      = false;
 
-/* Other agents currently sensed (excluding self), as {x,y} (rounded). Treated as
- * impassable obstacles by A* (see utils/astar.js). Fully replaced each sensing
- * event — agents move, so stale positions must not linger. */
+/* Other sensed agents (excluding self), rounded {x,y}. Impassable to A*. Fully
+ * replaced each sensing event so stale positions don't linger. */
 export const otherAgents = [];
 
-/* Per-id velocity history for competitor-aware scoring (see
- * docs/COMPETITOR_AWARENESS_IMPLEMENTATION.md). Keyed by agent id, holds last
- * position + one-tick velocity. Unlike otherAgents (a positional snapshot for A*),
- * this persists across ticks so we can reason about where an agent is GOING.
- * Pruned when an id isn't re-sensed within AGENT_STALE_MS. */
+/* Per-id velocity history for competitor-aware scoring. Unlike otherAgents (a
+ * positional snapshot), this persists across ticks so we can reason about where an
+ * agent is GOING. Pruned when not re-sensed within AGENT_STALE_MS. */
 const agentHistory = new Map();   // id -> { x, y, vx, vy, lastSeen }
 const AGENT_STALE_MS = 2000;
-/* Agents farther than this (Manhattan) from a scored target can't realistically
- * contest it; we skip the A* call for them. Bounds the per-tick findRoute cost on
- * crowded maps — the concrete answer to "A* cost unchanged in spirit". */
+/* Agents beyond this Manhattan distance from a scored target can't realistically
+ * contest it, so we skip the A* call — bounds per-tick findRoute cost on crowded maps. */
 const AGENT_DIST_MANH_GATE = 8;
 
-/* Trap-avoidance sets for directional ("arrow") mazes, computed once per map in
- * onMap from walls + arrow tiles only (static geometry — agents/crates excluded so
- * the verdict can't flicker). usableDeliverySet: "x_y" of deliveries that sit in a
- * sustainable pick-up→deliver loop (not one-way dead-ends). safeTargetSet: tiles
- * from which a usable delivery is still reachable — gates pickups/explore so the
- * agent never commits to a zone it can't get back out of.
- * See docs/DIRECTIONAL_TRAP_AVOIDANCE.md. */
+/* Trap-avoidance sets for directional mazes, computed once per map in onMap from
+ * static geometry only (agents/crates excluded so the verdict can't flicker).
+ * usableDeliverySet: deliveries in a sustainable pickup→deliver loop (not dead-ends).
+ * safeTargetSet: tiles from which a usable delivery is still reachable — gates pickups/
+ * explore so the agent never commits to a zone it can't escape. */
 export let usableDeliverySet = new Set();
 export let safeTargetSet     = new Set();
 
-/* Directional ("arrow") tiles sensed on the map, keyed "x_y" -> arrow char
- * ('↑'|'→'|'↓'|'←'). A* and the PDDL edge generator consult this to avoid
- * planning an illegal entry (entering opposite the arrow). See utils/directions.js. */
+/* Sensed arrow tiles, "x_y" -> arrow char ('↑'|'→'|'↓'|'←'). A* and the PDDL edge
+ * generator consult this to avoid an illegal entry (opposite the arrow). */
 export const directionalTiles = new Map();
 
-/* Shared PDDL execution state. PddlMove sets busy=true once a plan is found and
- * executing; IntentionRevisionReplace refuses to stop the current intention while
- * busy is true, ensuring the full macro-plan (including crate pushes) runs to
- * completion before the agent switches to a new goal. */
+/* Shared PDDL state. PddlMove sets busy=true while a plan executes;
+ * IntentionRevisionReplace then refuses to stop the current intention, so the full
+ * macro-plan (incl. crate pushes) finishes before switching goals. */
 export const pddl = { busy: false };
 
-/* Shared LLM-directive state. While the LLM command layer (myAgent/llm/) is
- * carrying out a chat directive it sets active=true; optionsGeneration() then
- * stands down so the autonomous strategy loop does not clobber the intention the
- * LLM pushed. Beliefs keep updating (parcels.sync still runs) — only autonomous
- * deciding/pushing is suspended. Cleared (and autonomy resumed) when the
- * directive finishes. Mirrors the pddl.busy live-singleton pattern. */
+/* Shared LLM-directive state. While the LLM layer runs a directive it sets
+ * active=true and optionsGeneration() stands down so the strategy doesn't clobber its
+ * intention. Beliefs keep updating — only deciding/pushing pauses. Cleared on finish. */
 export const directive = { active: false, aborted: false };
 
-/* Red-light/green-light enforcement state ("red light, green light" mission).
- * `red` is set by the LLM message classifier's STOP/GO verdict (see llm/index.js).
- * While red: optionsGeneration stands down, LLM commands are refused, and worker
- * orders are refused — every movement costs points. */
+/* Red-light enforcement. `red` is set by the LLM classifier's STOP/GO verdict (see
+ * llm/index.js). While red: optionsGeneration stands down and LLM/worker movement is
+ * refused — every move costs points. */
 export const trafficLight = { red: false };
 
-/* Whether a "red light, green light" mission has been STARTED. The live
- * "RED LIGHT!/GREEN LIGHT!" shouts only stop/resume the agents once the LLM has
- * read an announcement ("let's begin a red light green light game …") and armed
- * the mission via the start_light_mission tool. Before that, a stray "red light"
- * in chat is classified STOP but IGNORED — it must not freeze the agents. Cleared
- * by stop_light_mission or an abort. */
+/* Whether a red-light-green-light mission has been STARTED. Live RED/GREEN shouts only
+ * stop/resume the agents once the LLM has armed the mission via start_light_mission;
+ * before that a stray "red light" is classified STOP but IGNORED. Cleared by
+ * stop_light_mission or abort. */
 export const lightMission = { active: false };
 
-/* Indefinite position hold, set by the LLM hold() tool (e.g. "move there and
- * wait for each other"). Unlike directive.active — which is released when the
- * directive ends — this gate persists across directives until release_hold().
- * Checked by optionsGeneration alongside the other gates. */
+/* Indefinite hold (LLM hold() tool). Unlike directive.active, this persists across
+ * directives until release_hold(). Checked by optionsGeneration. */
 export const manualHold = { active: false };
 
-/* Persistent Level-2 mission constraints. Updated by the LLM apply_mission tool;
- * read by every strategy on each decide() call. All fields are null/empty by
- * default (= no constraint). dropMissions() resets them all. */
+/* Persistent Level-2 mission constraints. Updated by apply_mission; read by every
+ * strategy on each decide(). Null/empty = no constraint; dropMissions() resets all. */
 export const missionConstraints = {
-    requiredStackSize:    null,      // number | null — FLOOR: deliver only once carrying ≥ this ("at least N")
-    maxStackSize:         null,      // number | null — CAP: never carry more than this ("exactly N" sets both)
-    forbiddenStackSizes:  new Set(), // Set<number> — counts the agent must never DELIVER at ("deliver N = penalty").
-                                     //   NOT a cap: carrying a forbidden count forces more pickups (toward N+1), so
-                                     //   e.g. {2} means "1 ok, 3+ ok, never deliver exactly 2 — if holding 2, grab a 3rd".
-    allowedDeliveryTiles: null,      // Set<"x_y"> | null — null = all tiles allowed
-    allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration targets to these spawners
+    requiredStackSize:    null,      // FLOOR: deliver only once carrying ≥ this ("at least N")
+    maxStackSize:         null,      // CAP: never carry more than this ("exactly N" sets both)
+    forbiddenStackSizes:  new Set(), // counts never to DELIVER at ("deliver N = penalty"). NOT a cap:
+                                     //   holding a forbidden count forces more pickups, so {2} = "1 ok,
+                                     //   3+ ok, never deliver exactly 2 — if holding 2, grab a 3rd".
+    allowedDeliveryTiles: null,      // Set<"x_y"> | null — null = all allowed
+    allowedSpawnerTiles:  null,      // Set<"x_y"> | null — restrict exploration to these
     avoidTiles:           new Set(), // Set<"x_y"> — empty = no avoidance
-    maxParcelReward:      null,      // number | null — null = no ceiling
-    maxBundleValue:       null,      // number | null — total reward per delivery must be ≤ this.
-                                     //   Strict "< T" is expressed as maxBundleValue = T−1 (rewards are integers).
-    minBundleValue:       null,      // number | null — total reward per delivery must be ≥ this (keep stacking until met).
-                                     //   Strict "> T" is expressed as minBundleValue = T+1 (rewards are integers).
-    exactBundleValue:     null,      // number | null — total reward per delivery must EQUAL this ("= T"). Keep
-                                     //   stacking toward it and never overshoot; deliver only when the total is exactly T.
-    deliveryMultipliers:  null,      // Map<"x_y", number> | null — per-tile delivery reward scale; null = every tile 1×
-    oneShotBonus:         null,      // { x, y, points, perAgent } | null — a go-there reward goal; the literal
-                                     //   `points` competes with parcel income inside the value functions
-                                     //   (bonusGoalValue) so "is +N worth the trip?" is a real comparison.
-    penaltyTiles:         new Map(), // Map<"x_y", number> — literal point penalty for entering/delivering at a
-                                     //   tile. Keys are also folded into avoidTiles (hard ban) on apply; the
-                                     //   magnitude here feeds the worth-gate and conversational recall.
-    // Per-type running point totals for the Level-3 multi-agent routines. Each new
-    // same-type mission OFFER adds its signed value here; the routine is armed/kept
-    // while its total is ≥ 0 and declined/stopped while < 0 (see armedByNet in
-    // missionState.js). Default 0 ⇒ a routine with no reward clause is followed exactly
-    // as before. "−500 then +1000" nets +500 (followed); a later "−800" nets −300 (stopped).
-    handoffNet:           0,         // Σ point values of "one picks up / other delivers" offers
-    gatherNet:            0,         // Σ point values of "move both near (x,y) and wait" offers
-    lightNet:             0,         // Σ point values of red-light-green-light offers
-    // Running sum of (mult − 1.0) deltas for reward-scaling missions ("5× pts",
-    // "0.3× reward"). Positive multipliers add, fractional ones subtract. The gate
-    // fires when the cumulative net ≥ 0 (armedByNet), at which point start_multiplier_mission
-    // also applies the accompanying Level-2 constraint (deliveryMultipliers / stack size).
-    multiplierNet:        0,         // Σ (mult−1.0) of reward-scaling mission offers
-    descriptions:         [],        // tagged strings "text [field1,field2]" shown in the LLM prompt
+    maxParcelReward:      null,      // null = no ceiling
+    maxBundleValue:       null,      // delivery total must be ≤ this ("< T" → T−1)
+    minBundleValue:       null,      // delivery total must be ≥ this ("> T" → T+1; keep stacking)
+    exactBundleValue:     null,      // delivery total must EQUAL this ("= T"); stack toward it, never overshoot
+    deliveryMultipliers:  null,      // Map<"x_y", number> | null — per-tile reward scale; null = 1×
+    oneShotBonus:         null,      // { x, y, points, perAgent } | null — go-there reward; `points`
+                                     //   competes with parcel income in bonusGoalValue.
+    penaltyTiles:         new Map(), // Map<"x_y", number> — point penalty for entering/delivering a tile.
+                                     //   Keys also folded into avoidTiles (hard ban); magnitude feeds the
+                                     //   worth-gate and recall.
+    // Per-type running totals for Level-3 routines. Each same-type OFFER adds its signed
+    // value; armed/kept while ≥ 0, declined/stopped while < 0 (armedByNet). Default 0 ⇒
+    // a no-reward routine is followed as before. "−500 then +1000" nets +500 (run).
+    handoffNet:           0,         // Σ of "one picks up / other delivers" offers
+    gatherNet:            0,         // Σ of "move both near (x,y) and wait" offers
+    lightNet:             0,         // Σ of red-light-green-light offers
+    // Running Σ of (mult − 1.0) for reward-scaling missions ("5×", "0.3×"). Arms when
+    // net ≥ 0 (armedByNet), at which point start_multiplier_mission applies the
+    // accompanying Level-2 constraint.
+    multiplierNet:        0,         // Σ (mult−1.0) of reward-scaling offers
+    descriptions:         [],        // tagged "text [field1,field2]" shown in the LLM prompt
 };
 
-/* For PDDL beliefset, we maintain a single global instance that we update on each map event. */
+/* Single global PDDL beliefset, updated on each map event. */
 export let beliefset = new Beliefset();
 
 export let OBSERVATION_DISTANCE   = 5;
 export let DECAY_STEPS_PER_REWARD = 10;
-export let MOVEMENT_DURATION      = 100; // Time per step
-/* Max parcels the agent can carry at once (server config player.capacity).
- * Default Infinity ⇒ no cap when the config omits it (behaviour unchanged). */
+export let MOVEMENT_DURATION      = 100; // time per step
+/* Max carry capacity (config player.capacity). Default Infinity ⇒ no cap. */
 export let CARRYING_CAPACITY      = Infinity;
 
 const DECAY_EVENT_MS = {
@@ -176,39 +150,31 @@ const DECAY_EVENT_MS = {
     '5s': 5000, '10s': 10000, 'infinite': Infinity
 };
 
-/* Decay interval in ms (how often the server drops 1 reward point), from config.
- * Infinity ⇒ parcels never decay. Used together with the *measured* time-per-tile
- * to compute the real decay rate (see moveTiming below). */
+/* Decay interval in ms (how often the server drops 1 point), from config. Infinity ⇒
+ * no decay. Combined with the measured time-per-tile for the real decay rate. */
 export let DECAY_INTERVAL_MS = 1000;
 
-/* How often the server spawns a new parcel, in ms (config parcels generation
- * interval, same 'frame'/'1s'/... vocabulary as decay). Default '2s'. */
+/* Parcel spawn interval in ms (config, same vocabulary as decay). Default 2s. */
 export let PARCEL_GENERATION_MS = 2000;
 
-/* Max parcels alive on the map at once (config PARCELS_MAX). Default 5 (server
- * default) so an absent value never activates abundance-based strategies. */
+/* Max parcels alive at once (config PARCELS_MAX). Default 5 so an absent value never
+ * activates abundance strategies. */
 export let PARCELS_MAX = 5;
 
-/* Mean reward a freshly spawned parcel gets (config PARCEL_REWARD_AVG).
- * Default 30 (server default). Used as the quality bar in the rush strategy. */
+/* Mean fresh-parcel reward (config PARCEL_REWARD_AVG). Default 30; the rush strategy's
+ * quality bar. */
 export let PARCEL_REWARD_AVG = 30;
 
-/* Empirically-measured real time per tile.
- *
- * The scoring needs to know how much reward a parcel loses while we walk to it,
- * and decay is wall-clock based (1 point per DECAY_INTERVAL_MS). Pacing is left
- * to the server's movement_duration (emitMove resolves only when the move
- * completes), so the real cost of a tile is movement_duration plus network
- * latency, replanning and blocked-tile waits. We time each real emitMove cycle
- * and keep an exponential moving average; `msPerTile` starts at MOVEMENT_DURATION
- * and converges to the true value as the agent moves. */
+/* Empirically-measured real time per tile. Decay is wall-clock (1 point per
+ * DECAY_INTERVAL_MS), and the real per-tile cost is movement_duration plus latency,
+ * replanning and blocked-tile waits. We EMA each emitMove cycle; `msPerTile` starts at
+ * MOVEMENT_DURATION and converges as the agent moves. */
 export const moveTiming = {
     msPerTile: MOVEMENT_DURATION,
     _alpha: 0.2,                       // EMA weight for the newest sample
     record(ms) {
         if (!Number.isFinite(ms) || ms <= 0) return;
-        // Ignore absurd samples (long stalls/blocks) so one freeze doesn't poison
-        // the average; those are handled as outliers, not the steady-state pace.
+        // Ignore absurd samples (long stalls) so one freeze doesn't poison the average.
         if (ms > 10 * MOVEMENT_DURATION) return;
         this.msPerTile = this._alpha * ms + (1 - this._alpha) * this.msPerTile;
     },
@@ -221,14 +187,12 @@ export const moveTiming = {
 };
 
 socket.onConfig(config => {
-    // Dump the raw config once so the exact runtime shape is visible in the log.
+    // Dump the raw config once so the runtime shape is visible in the log.
     configLog('raw:', JSON.stringify(config));
 
-    // The config has been seen in two shapes depending on SDK/server version:
-    // nested under GAME (config.GAME.player.*) or flat at the root (config.player.*).
-    // Reading the previous hard-coded GAME path threw when GAME was absent, which
-    // aborted the whole handler and silently left every value at its default
-    // (that's why movement_duration stuck at 100 when the server sent 50).
+    // Config comes in two shapes by SDK/server version: nested under GAME
+    // (config.GAME.player.*) or flat (config.player.*). Read both — a hard GAME path
+    // threw when GAME was absent and silently left every value at its default.
     const game   = config?.GAME ?? config;
     const player = game?.player ?? config?.player ?? {};
     const parcelCfg = game?.parcels ?? config?.parcels ?? {};
@@ -241,7 +205,7 @@ socket.onConfig(config => {
     DECAY_INTERVAL_MS      = decayMs;
     DECAY_STEPS_PER_REWARD = decayMs / MOVEMENT_DURATION;
 
-    // Parcel spawn pacing and population cap — both config shapes, like above.
+    // Parcel spawn pacing and population cap — both config shapes.
     const genEvent = parcelCfg.generation_event ?? parcelCfg.generation_interval
         ?? game?.PARCELS_GENERATION_INTERVAL ?? config?.PARCELS_GENERATION_INTERVAL;
     PARCEL_GENERATION_MS = DECAY_EVENT_MS[genEvent] ?? 2000;
@@ -249,8 +213,7 @@ socket.onConfig(config => {
     PARCELS_MAX  = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : 5;
     const avgRaw = Number(parcelCfg.reward_avg ?? game?.PARCEL_REWARD_AVG ?? config?.PARCEL_REWARD_AVG);
     PARCEL_REWARD_AVG = Number.isFinite(avgRaw) && avgRaw > 0 ? avgRaw : 30;
-    // Reset the measured pace to the server's movement_duration whenever config
-    // changes; it re-converges to the real per-tile cost as the agent moves.
+    // Reset the measured pace on config change; it re-converges as the agent moves.
     moveTiming.msPerTile   = MOVEMENT_DURATION;
 
     configLog(`obs=${OBSERVATION_DISTANCE} move=${MOVEMENT_DURATION}ms decayInterval=${decayMs}ms decay_step=${DECAY_STEPS_PER_REWARD.toFixed(1)} capacity=${CARRYING_CAPACITY} parcelGen=${PARCEL_GENERATION_MS}ms parcelsMax=${PARCELS_MAX} rewardAvg=${PARCEL_REWARD_AVG}`);
@@ -269,8 +232,7 @@ socket.onMap((_w, _h, tiles) => {
         t.parcelSpawner || t.type === '1' || t.type === 1
     ));
 
-    // Cascade gate: does this map have any crate infrastructure at all?
-    // Check both string and numeric types — the server may send either form.
+    // Cascade gate: does the map have any crate infrastructure? (string or numeric type.)
     crateSpawnerTiles.length = 0;
     crateSpawnerTiles.push(...tiles.filter(t =>
         t.crateSpawner || t.type === '5!' || t.type === '5' || t.type === 5
@@ -278,12 +240,9 @@ socket.onMap((_w, _h, tiles) => {
     mapHasCrates = crateSpawnerTiles.length > 0;
     mapLog(`mapHasCrates=${mapHasCrates} (${crateSpawnerTiles.length} crate tiles)`);
 
-    // Seed live crate positions from the '5!' spawner tiles: they start the game
-    // with a crate on them. Without this the agent believes far-away spawner
-    // tiles are free, A* plans a "crate-free" route through them, and PDDL only
-    // engages after a wasted detour. A stale seed (spawner without a crate) is
-    // self-correcting: sensing, 'crate' dispose events and walk-through cleanup
-    // all remove it on first contact.
+    // Seed live crates from '5!' spawners (they start with a crate). Without this the
+    // agent thinks those tiles are free, A* routes through them, and PDDL engages only
+    // after a wasted detour. A stale seed self-corrects (sensing / dispose / walk-through).
     crateTiles.length = 0;
     crateTiles.push(...crateSpawnerTiles
         .filter(t => t.crateSpawner || t.type === '5!')
@@ -293,26 +252,26 @@ socket.onMap((_w, _h, tiles) => {
 
     walkableTiles.length = 0;
     walkableTiles.push(...tiles.filter(t => {
-        if (t.type === '0' || t.type === 0) return false;           // wall — always exclude
-        if (t.type === '5!' || t.type === '5' || t.type === 5) return true; // crate zone — always include (server may mark walkable:false when a crate is on it, but the PDDL planner needs these tiles for push planning)
+        if (t.type === '0' || t.type === 0) return false;           // wall — exclude
+        if (t.type === '5!' || t.type === '5' || t.type === 5) return true; // crate zone — always include (PDDL needs these for push planning, even when server marks walkable:false)
         return t.walkable !== false;
     }));
 
-    // Directional arrow tiles: record type by coordinate so pathfinding and the
-    // PDDL edge generator can enforce the one-way entry rule.
+    // Arrow tiles: record type by coordinate so pathfinding and the PDDL edge
+    // generator enforce the one-way entry rule.
     directionalTiles.clear();
     for (const t of walkableTiles)
         if (isDirectional(t.type)) directionalTiles.set(`${t.x}_${t.y}`, t.type);
 
     mapLog(`delivery: ${deliveryTiles.length} | spawners: ${spawnerTiles.length} | crateTiles: ${crateSpawnerTiles.length} | walkable: ${walkableTiles.length} | directional: ${directionalTiles.size}`);
 
-    // We build the beliefeset for the PDDL solver for now. Must be updated on each map event since the solver doesn't have direct access to the map data structure.
+    // Rebuild the PDDL beliefset each map event (the solver has no direct map access).
     beliefset = new Beliefset();
     const walkSet  = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
     const delivSet = new Set(deliveryTiles.map(t => `${t.x}_${t.y}`));
 
-    // PDDL object names must start with a letter (a leading digit is tokenized as a
-    // number by the solver), so map tiles are named t<x>_<y>.
+    // PDDL object names must start with a letter (a leading digit tokenizes as a
+    // number), so tiles are named t<x>_<y>.
     for (const { x, y } of walkableTiles) {
         const t = `t${x}_${y}`;
         beliefset.declare(`tile ${t}`);
@@ -325,11 +284,10 @@ socket.onMap((_w, _h, tiles) => {
 
     mapLog(`beliefset: ${beliefset.objects.length} objects`);
 
-    // Trap avoidance (directional mazes): find the sustainable pick-up→deliver
-    // region via a greatest fixpoint — keep only deliveries that can still reach a
-    // usable spawner and spawners that can still reach a usable delivery, until
-    // stable. Each pass only shrinks the sets, so it terminates in a few iterations.
-    // Static (walls + arrows only), so it's computed once here, not per tick.
+    // Trap avoidance (directional mazes): greatest-fixpoint on the sustainable
+    // pickup→deliver region — keep only deliveries that can still reach a usable
+    // spawner and vice-versa, until stable (each pass only shrinks, so it terminates).
+    // Static, so computed once here, not per tick.
     {
         let spawn = [...spawnerTiles], deliv = [...deliveryTiles];
         while (true) {
@@ -341,14 +299,13 @@ socket.onMap((_w, _h, tiles) => {
             spawn = newSpawn; deliv = newDeliv;
         }
         usableDeliverySet = new Set(deliv.map(d => `${d.x}_${d.y}`));
-        // All-traps fallback: if no sustainable delivery exists (whole map is a trap,
-        // or there are no spawners to loop with), treat every delivery as a valid
-        // target so the agent still works instead of freezing.
+        // All-traps fallback: if no sustainable delivery exists, treat every delivery
+        // as valid so the agent works instead of freezing.
         safeTargetSet = tilesThatReach(deliv.length ? deliv : deliveryTiles);
     }
 });
 
-// Primary crate tracking via server events (global, not range-limited).
+// Crate tracking via server events (global, not range-limited).
 socket.on('crate', (action, { x, y }) => {
     if (!mapHasCrates) return;
     const rx = Math.round(x), ry = Math.round(y);
@@ -364,17 +321,17 @@ socket.on('crate', (action, { x, y }) => {
 });
 
 socket.onSensing(sensing => {
-    // Other agents are obstacles for A*. Full replace (not merge): agents move, so
-    // a stale position would wrongly block a tile. Runs before any crate-related
-    // early-return below so agent tracking is independent of mapHasCrates.
+    // Other agents are A* obstacles. Full replace (not merge) so a stale position
+    // can't wrongly block a tile. Runs before the crate early-returns below so
+    // agent tracking is independent of mapHasCrates.
     otherAgents.length = 0;
     const now = Date.now();
     for (const a of sensing.agents ?? []) {
         if (a.id === me.id) continue;
         const x = Math.round(a.x), y = Math.round(a.y);
         otherAgents.push({ x, y });                  // positional snapshot for A*
-        // Per-id velocity: delta over the last tick only. Zero on first sight or
-        // after a gap (a stale prev would yield a bogus huge velocity).
+        // Per-id velocity: last-tick delta only. Zero on first sight or after a
+        // gap (a stale prev would yield a bogus huge velocity).
         const prev = agentHistory.get(a.id);
         const fresh = prev && (now - prev.lastSeen) <= AGENT_STALE_MS;
         agentHistory.set(a.id, {
@@ -384,7 +341,7 @@ socket.onSensing(sensing => {
             lastSeen: now,
         });
     }
-    // Prune ids not re-sensed recently so a vanished agent stops biasing scoring.
+    // Prune stale ids so a vanished agent stops biasing scoring.
     for (const [id, h] of agentHistory)
         if (now - h.lastSeen > AGENT_STALE_MS) agentHistory.delete(id);
     if (otherAgents.length)
@@ -398,11 +355,9 @@ socket.onSensing(sensing => {
         } else return;
     }
     if (!sensing.crates?.length) return;
-    // Merge: add newly sensed crates without clearing inferred ones.
-    // Inferred crates (from physical blocks) may be outside sensing range —
-    // clearing them here causes the blocked→infer→clear→blocked loop.
-    // Removal only happens via socket 'dispose' events or when the agent
-    // successfully walks through a tile (see astar.js).
+    // Merge (not replace): inferred crates from physical blocks may lie outside
+    // sensing range, so clearing here causes a blocked→infer→clear→blocked loop.
+    // Removal happens only via 'dispose' events or walk-through (see astar.js).
     for (const c of sensing.crates) {
         const rx = Math.round(c.x), ry = Math.round(c.y);
         if (!crateTiles.some(t => Math.round(t.x) === rx && Math.round(t.y) === ry))
@@ -411,18 +366,17 @@ socket.onSensing(sensing => {
 });
 
 // ─── competitor-awareness helpers (Phase 0) ─────────────────────────────────
-// Consumed by the Strategy scoring layer. All degrade to "no competitors" when
-// agentHistory is empty, preserving current behavior (backward-compat invariant).
+// Consumed by the Strategy scoring layer; all degrade to "no competitors" when
+// agentHistory is empty (backward-compat invariant).
 
 /**
- * Min A* distance from ANY sensed agent to `tile`; Infinity if none in range.
+ * Min A* distance from any sensed agent to `tile`; Infinity if none in range.
  * Manhattan pre-filter (AGENT_DIST_MANH_GATE) bounds findRoute calls per tick.
  *
- * findRoute treats every other-agent tile as blocked and returns null when an
- * agent stands ON the goal (astar.js:135-136,143) — so an agent sitting on a
- * still-free parcel would yield Infinity, the OPPOSITE of the contest signal we
- * want. Special-case manh===0 -> 0 (max contest) before any findRoute call; this
- * also avoids a wasted A*.
+ * findRoute blocks every other-agent tile and returns null when an agent sits ON
+ * the goal (astar.js:135-136,143) — so an agent on a still-free parcel yields
+ * Infinity, the opposite of the contest signal we want. manh===0 → 0 (max
+ * contest) short-circuits before any findRoute call.
  */
 export function otherAgentDistTo(tile) {
     let best = Infinity;
@@ -449,9 +403,8 @@ export function nearestAgentId(tile) {
 }
 
 /**
- * True if `agentId`'s velocity is closing on `tile` (positive dot product of
- * velocity with the bearing to the tile). Used as a Phase-1 quality softener and
- * by Phase-3 Case 3. False for unknown/stationary agents.
+ * True if `agentId` is closing on `tile` (velocity·bearing > 0). Phase-1 quality
+ * softener and Phase-3 Case 3. False for unknown/stationary agents.
  */
 export function isAgentMovingToward(agentId, tile) {
     const h = agentHistory.get(agentId);
