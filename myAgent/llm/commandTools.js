@@ -1,4 +1,4 @@
-import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, missionConstraints, directive, trafficLight, manualHold, lightMission, moveTiming } from '../context.js';
+import { socket, me, parcels, deliveryTiles, spawnerTiles, walkableTiles, missionConstraints, directive, trafficLight, manualHold, lightMission, moveTiming, pddl, pddlGather, pddlGoto } from '../context.js';
 import { reachableFrom, findRoute } from '../utils/astar.js';
 import { applyMissionConfig, dropMissionField, dropAllMissions, armedByNet } from './missionState.js';
 import { partner, sendOrder, sendHalt, sendResume, sendConstraint, requestStatus } from './partner.js';
@@ -382,6 +382,7 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
 
         // command
         async go_to(input) {
+<<<<<<< HEAD
             const dest = resolveDestination(input);
             if (!dest) return `Error: go_to needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
             return command(['go_to', dest.x, dest.y], () => `Arrived at (${me.x}, ${me.y}).`);
@@ -395,6 +396,18 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             return command(['go_to', dest.x, dest.y], () =>
                 `Arrived at (${me.x}, ${me.y}) and holding — issue the next action (wait/hold/put_down/deliver).`,
                 { stay: true });
+=======
+            const { x, y } = parseXY(input);
+            if (x == null) return `Error: go_to needs "x,y" (got '${input}').`;
+            // Under PDDL_GOTO, mark this as the go-to target so PddlMove path-plans the
+            // leg (PddlMove failure → AStarMove fallback). Cleared once the command settles.
+            if (pddlGoto) pddl.gotoTarget = { x, y };
+            try {
+                return await command(['go_to', x, y], () => `Arrived at (${me.x}, ${me.y}).`);
+            } finally {
+                pddl.gotoTarget = null;
+            }
+>>>>>>> 42ff1641ab0b5d2dea35f4ed257547ccec17cd01
         },
         async go_pickup(input) {
             const { x, y } = parseXY(input);
@@ -696,10 +709,15 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             sendHalt();
             const aRes = await sendOrder(['go_to', tileA.x, tileA.y]);
             if (directive.aborted) return null;            // abort handler already replied
+            // Under PDDL_GATHER, mark tileB as the gather target so PddlMove path-plans
+            // the coordinator's leg (PddlMove fails → AStarMove fallback). Cleared after.
+            if (pddlGather) pddl.gatherTarget = { x: tileB.x, y: tileB.y };
             try {
                 await withTimeout(myAgent.commandAndAwait(['go_to', tileB.x, tileB.y]), COMMAND_TIMEOUT_MS, 'go_to');
             } catch (err) {
                 return `Partner ordered to (${tileA.x},${tileA.y}) [${aRes}], but I could not reach (${tileB.x},${tileB.y}): ${describeFailure(err)}`;
+            } finally {
+                pddl.gatherTarget = null;
             }
             manualHold.active = true;                      // B holds indefinitely (survives directive end)
             myAgent.haltCurrent();

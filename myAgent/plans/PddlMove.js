@@ -10,7 +10,8 @@ const log     = createLogger('pddl');
 const moveLog = createLogger('move:pddl');
 import {
     me, socket, parcels, beliefset, mapHasCrates, pddl, moveTiming,
-    crateTiles, crateSpawnerTiles, walkableTiles
+    crateTiles, crateSpawnerTiles, walkableTiles, otherAgents,
+    missionConstraints, pddlGoto, pddlGather
 } from '../context.js';
 import { findRoute, waitForArrival } from '../utils/astar.js';
 
@@ -30,7 +31,18 @@ const ACTION_DIR = {
     pushright: 'right', pushleft: 'left', pushup: 'up', pushdown: 'down',
 };
 
+// Structural-deadlock budget: crate blocks that never clear. An agent block is
+// transient (the blocker moves) and is retried separately, off this budget.
 const MAX_REPLANS = 6;
+
+// Pause before replanning around an agent that blocked a step — parity with the A*
+// navigator's YIELD_PAUSE_MS (astar.js, module-private there).
+const AGENT_YIELD_MS = 400;
+
+// Overall wall-clock cap for transient agent-block retries on a mission goal, so a
+// permanently-parked blocker can't loop forever; the intention being superseded
+// (this.stopped) ends it sooner in practice.
+const AGENT_BLOCK_TIMEOUT_MS = 30_000;
 
 /**
  * @class PddlMove
@@ -45,30 +57,71 @@ export class PddlMove extends PlanBase {
      * @returns {boolean}
      */
     static isApplicableTo(intent, x, y) {
-        if (intent !== 'go_to' || !mapHasCrates || crateTiles.length === 0) return false;
+        if (intent !== 'go_to') return false;
+
+        // Mission paths (env-gated): PDDL path-plans a go_to that belongs to an accepted
+        // mission even with no crates blocking. Requires only that the goal is reachable;
+        // on solver failure execute() throws and IntentionDeliberation falls through to
+        // AStarMove (always applicable to go_to) — the transparent fallback.
+        if (PddlMove.#isMissionGoTo(x, y)) return !!findRoute(me, { x, y });
+
+        // Crate path (original): only when crates wall off every crate-free route but a
+        // push could open one.
+        if (!mapHasCrates || crateTiles.length === 0) return false;
         const crateKeys = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
         if (findRoute(me, { x, y }, crateKeys)) return false; // crate-free path exists
         return !!findRoute(me, { x, y });                     // reachable if crates move
     }
 
     /**
-     * Solve and run a crate-pushing plan, replanning on mid-plan blocks
+     * Whether this go_to target is an env-enabled, LLM-accepted mission goal:
+     *   PDDL_GOTO   — the active oneShotBonus coordinate (persistent acceptance record)
+     *                 OR the short-lived pddl.gotoTarget set by the go_to command tool
+     *                 (a direct "go there for N pts" instruction the LLM runs as a command,
+     *                 not an apply_mission).
+     *   PDDL_GATHER — the short-lived pddl.gatherTarget set by gather_near.
+     * @param {number} x - Target x
+     * @param {number} y - Target y
+     * @returns {boolean}
+     */
+    static #isMissionGoTo(x, y) {
+        const at = (t) => t && Math.round(t.x) === Math.round(x) && Math.round(t.y) === Math.round(y);
+        if (pddlGoto   && (at(missionConstraints.oneShotBonus) || at(pddl.gotoTarget))) return true;
+        if (pddlGather && at(pddl.gatherTarget)) return true;
+        return false;
+    }
+
+    /**
+     * Navigate a go_to via PDDL (crate-pushing and/or mission path-planning)
      * @param {string} intent - 'go_to'
      * @param {number} x - Target x
      * @param {number} y - Target y
      * @returns {Promise<boolean>}
      */
     async execute(intent, x, y) {
+        return this.runToGoal(pTile(x, y));
+    }
+
+    /**
+     * Solve and run a plan to a grounded goal tile, replanning on mid-plan blocks.
+     * Crate blocks consume MAX_REPLANS (a structural dead-end gives up); agent blocks are
+     * transient (the blocker moves), so they yield-and-retry the SAME goal off that budget
+     * until the goal is reached, the intention is superseded, or AGENT_BLOCK_TIMEOUT_MS.
+     * @param {string} goalTile - PDDL tile name of the goal (e.g. 't8_8')
+     * @returns {Promise<boolean>}
+     */
+    async runToGoal(goalTile) {
         if (this.stopped) throw ['stopped'];
         if (!beliefset || beliefset.objects.length === 0) throw ['pddl-beliefset-empty'];
 
-        const goalTile = pTile(x, y);
+        const agentDeadline = Date.now() + AGENT_BLOCK_TIMEOUT_MS;
+        let crateAttempts = 0;
 
-        for (let attempt = 0; attempt < MAX_REPLANS; attempt++) {
+        while (crateAttempts < MAX_REPLANS) {
             if (this.stopped) throw ['stopped'];
             if (pTile(me.x, me.y) === goalTile) return true;
 
-            // Build from the CURRENT state so a replan picks up new crates.
+            // Build from the CURRENT state so a replan picks up new crates/agents.
             const problem = this.#buildProblem(goalTile);
 
             let plan;
@@ -79,13 +132,25 @@ export class PddlMove extends PlanBase {
             }
 
             if (this.stopped) throw ['stopped'];
-            if (!plan || plan.length === 0) throw ['pddl-no-plan'];
+            if (!plan || plan.length === 0) {
+                // No plan can mean the goal tile is momentarily agent-occupied (excluded
+                // from free in #buildProblem). Treat that as a transient agent block and
+                // retry the same goal; otherwise it's a genuine no-plan (→ A* fallback).
+                const [gx, gy] = goalTile.slice(1).split('_').map(Number);
+                const goalAgentBlocked = otherAgents.some(a => rawKey(a.x, a.y) === rawKey(gx, gy));
+                if (goalAgentBlocked && Date.now() <= agentDeadline) {
+                    log('goal tile agent-occupied — yielding then replanning to same goal');
+                    await new Promise(r => setTimeout(r, AGENT_YIELD_MS));
+                    continue;
+                }
+                throw ['pddl-no-plan'];
+            }
 
             // Lock: once a plan is in hand, block intention replacement until done.
             pddl.busy = true;
-            let blocked;
+            let status;
             try {
-                blocked = await this.#runPlan(plan);
+                status = await this.#runPlan(plan);
             } finally {
                 pddl.busy = false;
             }
@@ -93,9 +158,21 @@ export class PddlMove extends PlanBase {
             if (this.stopped) throw ['stopped'];
             if (pTile(me.x, me.y) === goalTile) return true;
 
-            if (!blocked) throw ['pddl-plan-incomplete'];
+            if (status === 'done') throw ['pddl-plan-incomplete'];
 
-            log('route blocked mid-plan — replanning from current state');
+            if (status === 'agent') {
+                // Transient: do NOT consume the structural budget. Pause so the blocker can
+                // move, then replan toward the same goal (the agent's tile is excluded in
+                // #buildProblem, so the new plan routes around it).
+                if (Date.now() > agentDeadline) throw ['pddl-agent-block-timeout'];
+                log('blocked by agent — yielding then replanning to same goal');
+                await new Promise(r => setTimeout(r, AGENT_YIELD_MS));
+                continue;
+            }
+
+            // status === 'crate': structural — count against MAX_REPLANS.
+            crateAttempts++;
+            log(`route blocked by crate mid-plan — replanning (${crateAttempts}/${MAX_REPLANS})`);
         }
 
         throw ['pddl-too-many-replans'];
@@ -104,7 +181,8 @@ export class PddlMove extends PlanBase {
     /**
      * Execute plan steps, detecting mid-plan obstacles
      * @param {Array<Object>} plan - PDDL plan actions
-     * @returns {Promise<boolean>} True if a step was blocked (replan needed)
+     * @returns {Promise<'done'|'crate'|'agent'>} 'done' if the plan ran out; otherwise the
+     *   block cause: 'agent' (transient — retried off the structural budget) or 'crate'.
      */
     async #runPlan(plan) {
         const DIR_DELTA = { right: [1,0], left: [-1,0], up: [0,1], down: [0,-1] };
@@ -141,12 +219,18 @@ export class PddlMove extends PlanBase {
             const nextKey = rawKey(tx, ty);
             if (!isPush && crateTiles.some(c => rawKey(c.x, c.y) === nextKey)) {
                 log(`crate now on planned tile ${nextKey} — replanning`);
-                return true;
+                return 'crate';
             }
 
             const tStep = Date.now();
             const r = await socket.emitMove(dir);
-            if (!r) return true;
+            if (!r) {
+                // Move refused: classify the blocker so runToGoal retries an agent block
+                // off the structural budget. An agent on the next tile ⇒ transient.
+                const agentBlocked = otherAgents.some(a => rawKey(a.x, a.y) === nextKey);
+                log(`step blocked at ${nextKey} by ${agentBlocked ? 'agent' : 'crate/unknown'} — replanning`);
+                return agentBlocked ? 'agent' : 'crate';
+            }
 
             // Wait for actual arrival before the next step — the ack fires mid-transition,
             // so continuing immediately overlaps moves and drifts diagonally.
@@ -192,7 +276,7 @@ export class PddlMove extends PlanBase {
             // on completion), not a client-side sleep.
             moveTiming.record(Date.now() - tStep);
         }
-        return false;
+        return 'done';
     }
 
     /**
@@ -206,6 +290,11 @@ export class PddlMove extends PlanBase {
         // Crates push only onto crate-zone tiles (game physics), so only
         // crateSpawnerTiles get the (pushable) fact.
         const crateZoneSet = new Set(crateSpawnerTiles.map(t => `${t.x}_${t.y}`));
+        // Other agents are impassable: mark their tiles not-free so a replan routes around
+        // a blocker instead of re-deriving the same path into it. Never our own tile.
+        const agentSet     = new Set(
+            otherAgents.map(a => rawKey(a.x, a.y)).filter(k => k !== rawKey(me.x, me.y))
+        );
 
         const crateObjects = [];
         const crateFacts   = [];
@@ -219,7 +308,8 @@ export class PddlMove extends PlanBase {
         for (const tile of walkableTiles) {
             const raw  = `${tile.x}_${tile.y}`;
             const name = `t${raw}`;
-            if (!crateSet.has(raw))    freeFacts.push(`(free ${name})`);
+            // Free unless a crate or another agent occupies it (both impassable).
+            if (!crateSet.has(raw) && !agentSet.has(raw)) freeFacts.push(`(free ${name})`);
             // An occupied crate-zone tile isn't free, so it skips (free) above;
             // (pushable) without (free) is harmless (the domain requires both).
             if (crateZoneSet.has(raw)) freeFacts.push(`(pushable ${name})`);
