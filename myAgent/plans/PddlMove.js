@@ -122,7 +122,7 @@ export class PddlMove extends PlanBase {
             if (pTile(me.x, me.y) === goalTile) return true;
 
             // Build from the CURRENT state so a replan picks up new crates/agents.
-            const problem = this.#buildProblem(goalTile);
+            const problem = this.#buildProblem({ goalTile });
 
             let plan;
             try {
@@ -173,6 +173,78 @@ export class PddlMove extends PlanBase {
             // status === 'crate': structural — count against MAX_REPLANS.
             crateAttempts++;
             log(`route blocked by crate mid-plan — replanning (${crateAttempts}/${MAX_REPLANS})`);
+        }
+
+        throw ['pddl-too-many-replans'];
+    }
+
+    /**
+     * Gather mission: let the PLANNER pick which candidate tile to occupy. Given the set
+     * of candidate "x_y" keys (the distance-D ring, already filtered to reachable and
+     * minus the partner's tile by the caller), build a (gathered me) problem with (near t)
+     * facts and run it. The planner chooses the shortest-to-reach near tile; arrival = we
+     * stand on one of them. Same crate/agent replan policy as runToGoal.
+     * @param {Set<string>|Array<string>} nearTileKeys - candidate "x_y" tile keys
+     * @returns {Promise<boolean>}
+     */
+    async runToGatherSpot(nearTileKeys) {
+        if (this.stopped) throw ['stopped'];
+        if (!beliefset || beliefset.objects.length === 0) throw ['pddl-beliefset-empty'];
+        const nearKeys = new Set(nearTileKeys);
+        if (nearKeys.size === 0) throw ['pddl-no-plan'];
+
+        const onNear = () => nearKeys.has(rawKey(me.x, me.y));
+        const agentDeadline = Date.now() + AGENT_BLOCK_TIMEOUT_MS;
+        let crateAttempts = 0;
+
+        while (crateAttempts < MAX_REPLANS) {
+            if (this.stopped) throw ['stopped'];
+            if (onNear()) return true;
+
+            const problem = this.#buildProblem({ nearKeys });
+
+            let plan;
+            try {
+                plan = await onlineSolver(domain, problem);
+            } catch (e) {
+                throw ['pddl-solver-failed', e?.message ?? String(e)];
+            }
+
+            if (this.stopped) throw ['stopped'];
+            if (!plan || plan.length === 0) {
+                // All candidate tiles momentarily agent-occupied (excluded from free) ⇒
+                // transient; yield and retry. Otherwise a genuine no-plan (→ A* fallback).
+                const allBlocked = [...nearKeys].every(k => otherAgents.some(a => rawKey(a.x, a.y) === k));
+                if (allBlocked && Date.now() <= agentDeadline) {
+                    log('all gather candidates agent-occupied — yielding then replanning');
+                    await new Promise(r => setTimeout(r, AGENT_YIELD_MS));
+                    continue;
+                }
+                throw ['pddl-no-plan'];
+            }
+
+            pddl.busy = true;
+            let status;
+            try {
+                status = await this.#runPlan(plan);
+            } finally {
+                pddl.busy = false;
+            }
+
+            if (this.stopped) throw ['stopped'];
+            if (onNear()) return true;
+
+            if (status === 'done') throw ['pddl-plan-incomplete'];
+
+            if (status === 'agent') {
+                if (Date.now() > agentDeadline) throw ['pddl-agent-block-timeout'];
+                log('blocked by agent — yielding then replanning gather spot');
+                await new Promise(r => setTimeout(r, AGENT_YIELD_MS));
+                continue;
+            }
+
+            crateAttempts++;
+            log(`gather route blocked by crate — replanning (${crateAttempts}/${MAX_REPLANS})`);
         }
 
         throw ['pddl-too-many-replans'];
@@ -280,11 +352,16 @@ export class PddlMove extends PlanBase {
     }
 
     /**
-     * Build the PDDL problem from the current world state
-     * @param {string} goalTile - PDDL tile name of the goal
+     * Build the PDDL problem from the current world state.
+     * Two goal shapes:
+     *   - { goalTile }  → goal (at me goalTile): walk/push to one fixed tile.
+     *   - { nearKeys }  → goal (gathered me) with (near t) facts: the planner CHOOSES
+     *                     which candidate tile to reach (shortest plan). Used by the
+     *                     gather mission so tile selection lives in PDDL, not JS.
+     * @param {{goalTile?: string, nearKeys?: Set<string>}} spec - Goal specification
      * @returns {string} PDDL problem definition
      */
-    #buildProblem(goalTile) {
+    #buildProblem({ goalTile, nearKeys }) {
         const myTile       = pTile(me.x, me.y);
         const crateSet     = new Set(crateTiles.map(c => rawKey(c.x, c.y)));
         // Crates push only onto crate-zone tiles (game physics), so only
@@ -319,7 +396,16 @@ export class PddlMove extends PlanBase {
         log(`crates: [${[...crateSet].join(', ')}]`);
         log(`crate zones (pushable): [${[...crateZoneSet].join(', ')}]`);
         log(`free pushable targets: [${freePushable.join(', ')}]`);
-        log(`goal: ${goalTile} | me: ${myTile}`);
+
+        // Goal: a fixed tile, or "any (near) tile" via the reachGatherSpot marker action.
+        const gatherMode = !goalTile && nearKeys && nearKeys.size > 0;
+        const nearFacts  = gatherMode
+            ? [...nearKeys].map(k => `(near t${k})`).join(' ')
+            : '';
+        const goal = gatherMode ? '(gathered me)' : `(at me ${goalTile})`;
+        log(gatherMode
+            ? `goal: gathered (near: ${[...nearKeys].join(', ')}) | me: ${myTile}`
+            : `goal: ${goalTile} | me: ${myTile}`);
 
         const objects = `me ${crateObjects.join(' ')} ${beliefset.objects.join(' ')}`.trim();
         const init = [
@@ -327,6 +413,7 @@ export class PddlMove extends PlanBase {
             crateFacts.join(' '),
             beliefset.toPddlString(),
             freeFacts.join(' '),
+            nearFacts,
         ].filter(Boolean).join(' ');
 
         return `\
@@ -334,7 +421,7 @@ export class PddlMove extends PlanBase {
     (:domain default)
     (:objects ${objects})
     (:init ${init})
-    (:goal (at me ${goalTile}))
+    (:goal ${goal})
 )`;
     }
 }

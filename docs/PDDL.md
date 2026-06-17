@@ -25,8 +25,10 @@ The domain models a tile grid with movable crates. Key predicates:
 | `(pushable t)` | `t` is a crate-zone tile (valid push destination) |
 | `(crate c)` | `c` is a crate |
 | `(right/left/up/down t1 t2)` | adjacency in each direction |
+| `(near t)` | `t` is a gather-mission candidate tile (see [Mission layer](#mission-layer-llm-accepted-goals)) |
+| `(gathered a)` | `a` has reached some `(near)` tile — the gather goal |
 
-Actions: `move-right`, `move-left`, `move-up`, `move-down` (walk on free tiles) and `push-right`, `push-left`, `push-up`, `push-down` (walk into a crate tile, requiring the destination to be a free pushable tile). Action costs have been stripped — the solver optimises only for plan length.
+Actions: `right`, `left`, `up`, `down` (walk on free tiles) and `pushRight`, `pushLeft`, `pushUp`, `pushDown` (walk into a crate tile, requiring the destination to be a free pushable tile). A fifth action, `reachGatherSpot`, is a no-op marker used only by the gather mission to make the goal quantifier-free (see Mission layer). Action costs have been stripped — the solver optimises only for plan length.
 
 ---
 
@@ -86,7 +88,7 @@ PDDL can finalize the navigation for two LLM-accepted missions, instead of A*. T
 | Flag | Mission | What PDDL does |
 |---|---|---|
 | `PDDL_GOTO=1` | "go to (x,y) for N points" | Path-plans the route to the coordinate. |
-| `PDDL_GATHER=1` | `gather_near` — keep both agents within distance D of (x,y) | Path-plans the **coordinator's** leg to its assigned tile. |
+| `PDDL_GATHER=1` | `gather_near` — keep both agents within distance D of (x,y) | **Selects** the coordinator's tile (the planner picks among the distance-D candidates) and path-plans to it. |
 
 Off by default (`'1'` enables; anything else / unset disables). Read in [context.js](myAgent/context.js) as `pddlGoto` / `pddlGather`. The flags are independent.
 
@@ -97,15 +99,25 @@ Off by default (`'1'` enables; anything else / unset disables). Read in [context
 - **`PDDL_GOTO`** matches either:
   - `missionConstraints.oneShotBonus` — the persistent acceptance record when the LLM applies the goal via `apply_mission {"oneShotBonus":…}` (the BDI then weighs it against parcel work via `Strategy.bonusDiversion`, which emits `['go_to', x, y]`); **or**
   - `pddl.gotoTarget` — a short-lived `{x,y}` the `go_to` command tool sets when the LLM runs the instruction as a **direct command** (the common case: the ReAct loop calls `go_to(11,9)` rather than `apply_mission`).
-- **`PDDL_GATHER`** matches `pddl.gatherTarget`, set by the `gather_near` tool around the coordinator's `commandAndAwait(['go_to', tileB…])`.
+- **`PDDL_GATHER`** does not use a `pddl.*` target. Instead `gather_near` calls `PddlMove.runToGatherSpot(nearKeys)` directly (dynamic import), letting the **planner choose** the coordinator's tile — see below.
 
-Each short-lived target is set immediately before the navigation command and cleared in a `finally` once the move settles. **Tile selection is unchanged** — `gather_near` still enumerates the distance-D ring and picks the two agents' tiles in JS, and the worker's leg still goes through `sendOrder` deterministically; PDDL only path-plans the chosen coordinator tile. (The STRIPS solver cannot express "any tile at distance D" as a quantified/disjunctive goal, so JS grounds the tile and PDDL plans the path to it.)
+For `PDDL_GOTO`, the short-lived `pddl.gotoTarget` is set immediately before the navigation command and cleared in a `finally` once the move settles.
+
+#### Gather: PDDL chooses the tile
+
+For `PDDL_GATHER`, tile selection itself moves into PDDL rather than being grounded in JS:
+
+- `gather_near` still enumerates the distance-D ring, filters to tiles reachable by the coordinator, and excludes the worker's chosen tile — but it hands the **whole candidate set** to the planner instead of picking one. The worker's leg still goes through `sendOrder` deterministically (single-agent PDDL).
+- `#buildProblem({ nearKeys })` tags each candidate tile with a `(near t)` fact and sets the goal to `(gathered me)`. The domain's `reachGatherSpot` marker action has precondition `(and (at me ?t) (near ?t))` and effect `(gathered me)` — so the existential "reach *some* candidate" lives in the action precondition, keeping the goal quantifier-free (the STRIPS backend cannot express a quantified/disjunctive goal directly).
+- The planner picks the shortest-to-reach candidate and commits via `reachGatherSpot` (a no-op at execution — `#runPlan` skips it, as `ACTION_DIR` has no entry). `runToGatherSpot` detects arrival when the agent stands on any `near` tile, and shares `runToGoal`'s crate-vs-agent replan policy.
+- On any solver failure, `gather_near` falls back to walking to JS's pre-computed `tileB` via A* — so enabling the flag never costs reachability.
 
 ### Files touched
 
-- [context.js](myAgent/context.js) — `pddlGoto` / `pddlGather` flags; `pddl.gotoTarget` / `pddl.gatherTarget` fields.
-- [myAgent/plans/PddlMove.js](myAgent/plans/PddlMove.js) — `#isMissionGoTo`, widened `isApplicableTo`, `runToGoal`, agent-block replan.
-- [myAgent/llm/commandTools.js](myAgent/llm/commandTools.js) — `go_to` and `gather_near` set the short-lived targets under the flags.
+- [context.js](myAgent/context.js) — `pddlGoto` / `pddlGather` flags; `pddl.gotoTarget` field (go-to only).
+- [domain-deliveroo.pddl](domain-deliveroo.pddl) — `(near ?t)` / `(gathered ?a)` predicates and the `reachGatherSpot` marker action (gather tile-selection).
+- [myAgent/plans/PddlMove.js](myAgent/plans/PddlMove.js) — `#isMissionGoTo`, widened `isApplicableTo`, `runToGoal`, `runToGatherSpot`, `#buildProblem({goalTile|nearKeys})`, agent-block replan.
+- [myAgent/llm/commandTools.js](myAgent/llm/commandTools.js) — `go_to` sets `pddl.gotoTarget`; `gather_near` hands the candidate ring to `runToGatherSpot` (lazy import) with A* fallback.
 
 The crate-push role and the existing mission code paths are untouched when the flags are off.
 
