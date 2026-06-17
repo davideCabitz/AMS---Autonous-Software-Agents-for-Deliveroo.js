@@ -388,10 +388,16 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
 
         // command
         async go_to(input) {
-<<<<<<< HEAD
             const dest = resolveDestination(input);
             if (!dest) return `Error: go_to needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
-            return command(['go_to', dest.x, dest.y], () => `Arrived at (${me.x}, ${me.y}).`);
+            // Under PDDL_GOTO, mark this as the go-to target so PddlMove path-plans the
+            // leg (PddlMove failure → AStarMove fallback). Cleared once the command settles.
+            if (pddlGoto) pddl.gotoTarget = { x: dest.x, y: dest.y };
+            try {
+                return await command(['go_to', dest.x, dest.y], () => `Arrived at (${me.x}, ${me.y}).`);
+            } finally {
+                pddl.gotoTarget = null;
+            }
         },
         async go_to_stay(input) {
             // Like go_to, but STAYS parked at the destination (gate held) instead of
@@ -399,21 +405,14 @@ export function buildTools(myAgent, replySender, resumeAutonomy) {
             // drop>" so the agent doesn't drift off the tile before the trailing action.
             const dest = resolveDestination(input);
             if (!dest) return `Error: go_to_stay needs "x,y" or a side keyword (leftmost|rightmost|top|bottom) (got '${input}').`;
-            return command(['go_to', dest.x, dest.y], () =>
-                `Arrived at (${me.x}, ${me.y}) and holding — issue the next action (wait/hold/put_down/deliver).`,
-                { stay: true });
-=======
-            const { x, y } = parseXY(input);
-            if (x == null) return `Error: go_to needs "x,y" (got '${input}').`;
-            // Under PDDL_GOTO, mark this as the go-to target so PddlMove path-plans the
-            // leg (PddlMove failure → AStarMove fallback). Cleared once the command settles.
-            if (pddlGoto) pddl.gotoTarget = { x, y };
+            if (pddlGoto) pddl.gotoTarget = { x: dest.x, y: dest.y };
             try {
-                return await command(['go_to', x, y], () => `Arrived at (${me.x}, ${me.y}).`);
+                return await command(['go_to', dest.x, dest.y], () =>
+                    `Arrived at (${me.x}, ${me.y}) and holding — issue the next action (wait/hold/put_down/deliver).`,
+                    { stay: true });
             } finally {
                 pddl.gotoTarget = null;
             }
->>>>>>> 42ff1641ab0b5d2dea35f4ed257547ccec17cd01
         },
         async go_pickup(input) {
             const { x, y } = parseXY(input);
