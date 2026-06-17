@@ -1,6 +1,11 @@
-# PDDL — Crate-Push Planning
+# PDDL — Crate-Push & Mission Planning
 
-PDDL is used for exactly one purpose: planning Sokoban-style crate pushes to free a path blocked by crates. Normal navigation is A*. The online solver is only invoked when A* cannot find any crate-free path to the goal.
+PDDL serves two roles:
+
+1. **Crate-push planning (always on).** Sokoban-style crate pushes to free a path blocked by crates. Normal navigation is A*; the online solver is invoked only when A* cannot find any crate-free path to the goal.
+2. **Mission path-planning (opt-in, env-gated).** For two LLM-accepted missions, the navigation can be handed to the PDDL solver instead of A*, gated by env flags and with A* as an automatic fallback. See [Mission layer](#mission-layer-llm-accepted-goals) below.
+
+Both roles share the same domain, solver, beliefset, `pddl.busy` lock, and `PddlMove` executor.
 
 ---
 
@@ -35,34 +40,74 @@ Actions: `move-right`, `move-left`, `move-up`, `move-down` (walk on free tiles) 
 PddlMove.isApplicableTo(intent, x, y)
 ```
 
-Returns `true` only when ALL of the following hold:
-1. `intent === 'go_to'`
-2. `mapHasCrates === true` (the map has crate infrastructure)
-3. `crateTiles.length > 0` (at least one crate is currently tracked)
-4. `findRoute(me, {x,y}, crateKeys)` returns `null` — no crate-free path exists
-5. `findRoute(me, {x,y})` returns non-null — the goal IS reachable if crates can move
+Requires `intent === 'go_to'`, then matches either path:
 
-If a crate-free path exists, `AStarMove` handles it. If the goal is unreachable even ignoring crates, neither plan can help; `IntentionDeliberation` throws `['no path to', x, y]`.
+**Mission path** (`#isMissionGoTo(x,y)` — env-gated): the goal is an LLM-accepted mission target (see [Mission layer](#mission-layer-llm-accepted-goals)). Applies as long as `findRoute(me, {x,y})` is reachable — **no crates required**.
 
-### Execution — execute
+**Crate path** (original): applies only when ALL hold:
+1. `mapHasCrates === true` (the map has crate infrastructure)
+2. `crateTiles.length > 0` (at least one crate is currently tracked)
+3. `findRoute(me, {x,y}, crateKeys)` returns `null` — no crate-free path exists
+4. `findRoute(me, {x,y})` returns non-null — the goal IS reachable if crates can move
 
-Runs up to `MAX_REPLANS = 6` planning attempts:
+If neither matches, `AStarMove` handles the `go_to`. If a mission-path solve fails, `IntentionDeliberation` falls through to `AStarMove` (always applicable to `go_to`) — the transparent fallback.
+
+### Execution — execute / runToGoal
+
+`execute()` is a thin wrapper over `runToGoal(goalTile)`, which runs the planning loop:
 
 1. Calls `#buildProblem(goalTile)` to construct the PDDL problem from live world state:
    - Objects: `me`, all crate ids `c<x>_<y>`, all tile names `t<x>_<y>`.
-   - Init: agent position, crate positions and `(at)` facts, tile adjacency from `beliefset`, `(free)` facts for crate-free tiles, `(pushable)` facts for crate-zone tiles.
+   - Init: agent position, crate positions and `(at)` facts, tile adjacency from `beliefset`, `(pushable)` facts for crate-zone tiles, and `(free)` facts for every walkable tile **not** occupied by a crate **or another agent** (`otherAgents` tiles are marked not-free so a replan routes around a blocker; our own tile is never excluded).
    - Goal: `(at me goalTile)`.
 2. Calls `onlineSolver(domain, problem)` (external HTTP call to the PDDL solver service).
 3. Sets `pddl.busy = true` to prevent intention replacement during execution.
-4. Runs `#runPlan(plan)`:
+4. Runs `#runPlan(plan)`, which returns a status — `'done'`, `'crate'`, or `'agent'`:
    - Each step translates `action` name → direction via `ACTION_DIR`.
    - Walk steps: checks for newly-sensed crates on the planned tile before moving.
    - Push steps: walks into the crate tile, then tracks the crate's new position (`me + 2·Δ`).
    - After each successful move: removes stale crate entries, records timing, does opportunistic pickup of any free parcel on the new tile.
-   - If `emitMove` returns falsy mid-plan → `blocked = true`; breaks to replan.
-5. If the goal is reached, returns `true`. If blocked, replans from current state. After `MAX_REPLANS` failed replans, throws `['pddl-too-many-replans']`.
+   - If `emitMove` returns falsy mid-plan, it classifies the blocker: an `otherAgents` tile on the next step → `'agent'` (transient); otherwise → `'crate'`.
+5. Replan policy based on status:
+   - `'done'` but not at goal → throws `['pddl-plan-incomplete']`.
+   - `'crate'` → counts against `MAX_REPLANS = 6` (a structural crate dead-end eventually gives up with `['pddl-too-many-replans']`).
+   - `'agent'` → **does not consume** the replan budget: pauses `AGENT_YIELD_MS` (so the blocker can move) and replans toward the **same goal**, bounded only by `this.stopped` (intention superseded) and `AGENT_BLOCK_TIMEOUT_MS`. A goal tile that is momentarily agent-occupied (solver returns no plan) is treated the same way.
 
-`pddl.busy` is always released in a `finally` block, even when a step throws.
+`pddl.busy` is always released in a `finally` block, even when a step throws. The agent-block behaviour gives the PDDL path parity with the A* navigator, which already yields-and-retries around agents.
+
+---
+
+## Mission layer (LLM-accepted goals)
+
+PDDL can finalize the navigation for two LLM-accepted missions, instead of A*. This is **opt-in per mission** and **always falls back to A*** on any solver failure, so enabling it never breaks a mission.
+
+### Env flags
+
+| Flag | Mission | What PDDL does |
+|---|---|---|
+| `PDDL_GOTO=1` | "go to (x,y) for N points" | Path-plans the route to the coordinate. |
+| `PDDL_GATHER=1` | `gather_near` — keep both agents within distance D of (x,y) | Path-plans the **coordinator's** leg to its assigned tile. |
+
+Off by default (`'1'` enables; anything else / unset disables). Read in [context.js](myAgent/context.js) as `pddlGoto` / `pddlGather`. The flags are independent.
+
+### How a `go_to` becomes PDDL-eligible
+
+`PddlMove.#isMissionGoTo(x,y)` matches the goal against a small piece of shared state on the `pddl` object (mirroring the `pddl.busy` convention):
+
+- **`PDDL_GOTO`** matches either:
+  - `missionConstraints.oneShotBonus` — the persistent acceptance record when the LLM applies the goal via `apply_mission {"oneShotBonus":…}` (the BDI then weighs it against parcel work via `Strategy.bonusDiversion`, which emits `['go_to', x, y]`); **or**
+  - `pddl.gotoTarget` — a short-lived `{x,y}` the `go_to` command tool sets when the LLM runs the instruction as a **direct command** (the common case: the ReAct loop calls `go_to(11,9)` rather than `apply_mission`).
+- **`PDDL_GATHER`** matches `pddl.gatherTarget`, set by the `gather_near` tool around the coordinator's `commandAndAwait(['go_to', tileB…])`.
+
+Each short-lived target is set immediately before the navigation command and cleared in a `finally` once the move settles. **Tile selection is unchanged** — `gather_near` still enumerates the distance-D ring and picks the two agents' tiles in JS, and the worker's leg still goes through `sendOrder` deterministically; PDDL only path-plans the chosen coordinator tile. (The STRIPS solver cannot express "any tile at distance D" as a quantified/disjunctive goal, so JS grounds the tile and PDDL plans the path to it.)
+
+### Files touched
+
+- [context.js](myAgent/context.js) — `pddlGoto` / `pddlGather` flags; `pddl.gotoTarget` / `pddl.gatherTarget` fields.
+- [myAgent/plans/PddlMove.js](myAgent/plans/PddlMove.js) — `#isMissionGoTo`, widened `isApplicableTo`, `runToGoal`, agent-block replan.
+- [myAgent/llm/commandTools.js](myAgent/llm/commandTools.js) — `go_to` and `gather_near` set the short-lived targets under the flags.
+
+The crate-push role and the existing mission code paths are untouched when the flags are off.
 
 ---
 
@@ -93,6 +138,6 @@ Initial seed: on `onMap`, `crateSpawnerTiles` of type `'5!'` (spawner tiles that
 
 ## Current status
 
-`PddlMove` is functional but rarely triggered in practice because crate maps are uncommon in the challenge scenarios. The trigger requires `crateTiles.length > 0`, which is now correctly seeded from the static map (`'5!'` tiles) rather than relying exclusively on sensing — fixing the earlier bug where `crateTiles` was always empty.
+`PddlMove` is functional. The **crate-push** role is rarely triggered in practice because crate maps are uncommon in the challenge scenarios; its trigger requires `crateTiles.length > 0`, now correctly seeded from the static map (`'5!'` tiles) rather than relying exclusively on sensing — fixing the earlier bug where `crateTiles` was always empty. Known remaining gap: a crate on a `'5!'` tile moved before sensing covers it leaves a stale seed, self-corrected by dispose events and walk-through cleanup on first contact.
 
-The known remaining gap: if a crate on a `'5!'` tile is moved before sensing range covers it, the seed position is stale. This is self-correcting: dispose events and walk-through cleanup remove the stale entry on first contact.
+The **mission** role (`PDDL_GOTO` / `PDDL_GATHER`) triggers on any map regardless of crates, but only when the matching flag is set and the LLM has accepted the mission. With the flags unset (the default), behaviour is identical to before — navigation is A*.

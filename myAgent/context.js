@@ -79,8 +79,18 @@ export const directionalTiles = new Map();
 
 /* Shared PDDL state. PddlMove sets busy=true while a plan executes;
  * IntentionRevisionReplace then refuses to stop the current intention, so the full
- * macro-plan (incl. crate pushes) finishes before switching goals. */
-export const pddl = { busy: false };
+ * macro-plan (incl. crate pushes) finishes before switching goals.
+ * gatherTarget / gotoTarget {x,y}|null: set by the gather_near and go_to LLM tools (under
+ * PDDL_GATHER / PDDL_GOTO) for the coordinator's leg, so PddlMove treats that one go_to as
+ * PDDL-eligible without a persistent mission record; cleared when the move settles. */
+export const pddl = { busy: false, gatherTarget: null, gotoTarget: null };
+
+/* PDDL mission flags (off by default; '1' enables). When set, the matching LLM-accepted
+ * mission is path-planned by PddlMove instead of A*, falling back to A* on solver failure.
+ *   PDDL_GOTO   — the go-to-coordinate (oneShotBonus) mission.
+ *   PDDL_GATHER — the coordinator's distance-D tile in the gather_near mission. */
+export const pddlGoto   = process.env.PDDL_GOTO   === '1';
+export const pddlGather = process.env.PDDL_GATHER === '1';
 
 /* Shared LLM-directive state. While the LLM layer runs a directive it sets
  * active=true and optionsGeneration() stands down so the strategy doesn't clobber its
