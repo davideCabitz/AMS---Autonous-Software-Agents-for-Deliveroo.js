@@ -2,9 +2,9 @@ import { StrategyMemory } from './StrategyMemory.js';
 import { MIN_DELIVERY_REWARD, MULTI_PICKUP_MIN, SWITCH_MARGIN } from './Strategy.js';
 import {
     me, parcels, CARRYING_CAPACITY, missionConstraints,
-    spawnerTiles, walkableTiles, OBSERVATION_DISTANCE,
+    spawnerTiles, OBSERVATION_DISTANCE,
 } from '../context.js';
-import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { buildGroupsWithSig, spawnerConstraintSig, buildCentroidPatrol } from './SpawnerGroupPatrol.js';
 import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -383,20 +383,13 @@ export class StrategyLookAhead extends StrategyMemory {
      * @returns {void}
      */
     _initIdleGroups() {
-        const sig = missionConstraints.allowedSpawnerTiles?.size > 0
-            ? [...missionConstraints.allowedSpawnerTiles].sort().join('|') : '';
+        const sig = spawnerConstraintSig();
         if (this._idleGroups !== null && sig === this._idleGroupsSig) return;
         this._idleGroupsSig = sig;
         this._idlePatrolGroupIdx = null;
-        if (spawnerTiles.length === 0) { this._idleGroups = []; return; }
-        let pool = spawnerTiles;
-        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
-            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) pool = f;
-        }
-        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
-        this._idleGroups = buildSpawnerGroups(pool, walkableSet, IDLE_D_CLUSTER);
-        patrolLog(`built ${this._idleGroups.length} group(s) from ${pool.length} spawner tiles`);
+        this._idleGroups = buildGroupsWithSig(IDLE_D_CLUSTER).groups;
+        const poolLen = this._idleGroups.reduce((s, g) => s + g.length, 0);
+        patrolLog(`built ${this._idleGroups.length} group(s) from ${poolLen} spawner tiles`);
     }
 
     /**
@@ -456,16 +449,7 @@ export class StrategyLookAhead extends StrategyMemory {
      * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
      */
     _buildIdlePatrol(group) {
-        if (group.length === 1) return [group[0]];
-        if (group.length === 2) return [...group];
-        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
-        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
-        const byAngle = [...group].sort((a, b) =>
-            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-        if (byAngle.length <= IDLE_MAX_WAYPOINTS) return byAngle;
-        const step = byAngle.length / IDLE_MAX_WAYPOINTS;
-        return Array.from({ length: IDLE_MAX_WAYPOINTS },
-            (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+        return buildCentroidPatrol(group, IDLE_MAX_WAYPOINTS);
     }
 
     /**

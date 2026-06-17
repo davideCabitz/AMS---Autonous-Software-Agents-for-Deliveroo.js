@@ -2,15 +2,9 @@ import { StrategyGreedy } from './StrategyGreedy.js';
 import { me, spawnerTiles, walkableTiles, OBSERVATION_DISTANCE } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
+import { AntiLockExplorer } from './AntiLockExplorer.js';
 
 const log = createLogger('hurry');
-
-// Give up the current frontier target if no progress for this long (blocked).
-const EXPLORE_STALL_MS     = 1500;
-// Safety cap on a single target (in case it's never observed nor reached).
-const EXPLORE_COMMIT_MS    = 4000;
-// How long an unreachable/stalled target stays excluded before being retried.
-const EXPLORE_BLACKLIST_MS = 5000;
 
 /**
  * @class StrategyHurry
@@ -20,23 +14,11 @@ export class StrategyHurry extends StrategyGreedy {
     /** @type {number} Re-deliberation interval for stall detection */
     tickIntervalMs = 100;
 
-    /** @type {string|null} "x_y" key of current frontier target */
-    #commitKey   = null;
-
-    /** @type {number} Timestamp when committed to the current target */
-    #commitSince = 0;
-
-    /** @type {{x: number, y: number}|null} Last observed agent tile */
-    #lastPos     = null;
-
-    /** @type {number} Timestamp when the agent tile last changed */
-    #lastMoved   = 0;
+    /** @type {AntiLockExplorer} Commit/stall/blacklist/movement bookkeeping */
+    #explorer = new AntiLockExplorer();
 
     /** @type {Set<string>} "x_y" of spawners observed this sweep (persistent coverage memory) */
     #visited     = new Set();
-
-    /** @type {Map<string, number>} "x_y" → expiry timestamp for stuck/unreachable targets */
-    #blacklist   = new Map();
 
     /**
      * Persistent frontier sweep: keep heading to the nearest unobserved spawner,
@@ -54,10 +36,7 @@ export class StrategyHurry extends StrategyGreedy {
 
         // Track physical movement (drives the stall detector).
         const px = Math.round(me.x), py = Math.round(me.y);
-        if (!this.#lastPos || this.#lastPos.x !== px || this.#lastPos.y !== py) {
-            this.#lastPos   = { x: px, y: py };
-            this.#lastMoved = now;
-        }
+        this.#explorer.trackMovement(px, py, now);
 
         // Coverage memory: every spawner currently within sensing counts as observed.
         for (const t of spawnerTiles) {
@@ -65,26 +44,26 @@ export class StrategyHurry extends StrategyGreedy {
         }
 
         // Expire stall-blacklist entries.
-        for (const [k, exp] of this.#blacklist) if (exp <= now) this.#blacklist.delete(k);
+        this.#explorer.pruneBlacklist(now);
 
         // Stay committed to the current frontier target until it's been observed
         // (entered sensing), unless we've stalled (blocked) or timed out.
         if (currentIntent && currentIntent[0] === 'go_explore') {
             const [, tx, ty] = currentIntent;
             const key = `${tx}_${ty}`;
-            if (this.#commitKey !== key) { this.#commitKey = key; this.#commitSince = now; }
+            this.#explorer.commitTo(key, now);
 
             const observed = this.#visited.has(key);
-            const stalled  = now - this.#lastMoved   >= EXPLORE_STALL_MS;
-            const timedOut = now - this.#commitSince >= EXPLORE_COMMIT_MS;
+            const stalled  = this.#explorer.stalled(now);
+            const timedOut = this.#explorer.timedOut(now);
 
             if (!observed && !stalled && !timedOut) return null; // keep heading to it
 
             if (stalled || timedOut) {
                 log(`giving up target ${key} (${stalled ? 'stalled' : 'timeout'}) — re-selecting`);
-                this.#blacklist.set(key, now + EXPLORE_BLACKLIST_MS);
+                this.#explorer.blacklist(key, now);
             }
-            this.#commitKey = null;
+            this.#explorer.clearCommit();
         }
 
         // Pick the nearest spawner not yet observed this sweep (skip blacklisted /
@@ -96,7 +75,7 @@ export class StrategyHurry extends StrategyGreedy {
         const here = `${px}_${py}`;
         let candidates = pool.filter(t => {
             const k = `${t.x}_${t.y}`;
-            return !this.#visited.has(k) && !this.#blacklist.has(k) && k !== here;
+            return !this.#visited.has(k) && !this.#explorer.isBlacklisted(k) && k !== here;
         });
 
         // Whole frontier observed → start a fresh sweep.
@@ -104,7 +83,7 @@ export class StrategyHurry extends StrategyGreedy {
             this.#visited.clear();
             candidates = pool.filter(t => {
                 const k = `${t.x}_${t.y}`;
-                return !this.#blacklist.has(k) && k !== here;
+                return !this.#explorer.isBlacklisted(k) && k !== here;
             });
         }
 
@@ -118,8 +97,7 @@ export class StrategyHurry extends StrategyGreedy {
         // heuristic, and avoids the O(n²·A*) cost that stalls the event loop.
         const target = [...candidates].sort((a, b) => distance(me, a) - distance(me, b))[0];
         if (target) {
-            this.#commitKey   = `${target.x}_${target.y}`;
-            this.#commitSince = now;
+            this.#explorer.recommit(`${target.x}_${target.y}`, now);
             log(`→ go_explore ${target.x},${target.y} dist:${distance(me, target).toFixed(1)}`);
             return ['go_explore', target.x, target.y];
         }

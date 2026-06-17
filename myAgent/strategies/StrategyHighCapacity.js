@@ -1,8 +1,7 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
-import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { buildGroupsWithSig, spawnerConstraintSig, buildCentroidPatrol } from './SpawnerGroupPatrol.js';
 import {
-    me, parcels, spawnerTiles, walkableTiles, deliveryTiles,
-    OBSERVATION_DISTANCE, CARRYING_CAPACITY, missionConstraints,
+    me, parcels, OBSERVATION_DISTANCE, CARRYING_CAPACITY, missionConstraints,
 } from '../context.js';
 import { distance } from '../utils/distance.js';
 import { createLogger } from '../utils/logger.js';
@@ -33,6 +32,8 @@ const HOP_MAX_LOSS_FRACTION = 0.25;
 // margin (>1) is hysteresis — it stops two comparable groups from flip-flopping
 // the farm target every tick as the agent moves between them.
 const FARM_SWITCH_MARGIN = 1.3;
+// Cap on patrol waypoints per group so the farm sweep stays snappy on big groups.
+const MAX_WAYPOINTS = 6;
 
 /**
  * @class StrategyHighCapacity
@@ -239,22 +240,15 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     #initGroups() {
         // Rebuild whenever the allowedSpawnerTiles mission constraint changes
         // (restrict_exploration can arrive mid-run), not just on first use.
-        const sig = missionConstraints.allowedSpawnerTiles?.size > 0
-            ? [...missionConstraints.allowedSpawnerTiles].sort().join('|')
-            : '';
+        const sig = spawnerConstraintSig();
         if (this.#groups !== null && sig === this.#groupsSig) return;
         this.#groupsSig = sig;
         this.#farmIdx = null;
         this.#patrolGroupIdx = null;
         this.#visitedDetours.clear();
-        let pool = spawnerTiles;
-        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
-            const f = spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) pool = f;
-        }
-        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
-        this.#groups = buildSpawnerGroups(pool, walkableSet, D_CLUSTER);
-        log(`built ${this.#groups.length} group(s) from ${pool.length} spawner tiles: `
+        this.#groups = buildGroupsWithSig(D_CLUSTER).groups;
+        const poolLen = this.#groups.reduce((s, g) => s + g.length, 0);
+        log(`built ${this.#groups.length} group(s) from ${poolLen} spawner tiles: `
             + this.#groups.map((g, i) => `G${i}(n=${g.length})`).join(' '));
     }
 
@@ -347,11 +341,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const directDist = this.pathLen(me, farmTarget);
         if (!Number.isFinite(directDist)) return null;
         // allowedDeliveryTiles mission: only constraint-approved tiles qualify.
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         const candidates = [];
         for (const d of tiles) {
             const toD   = this.pathLen(me, d);
@@ -454,26 +444,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
      * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
      */
     #buildPatrol(group) {
-        if (group.length === 1) return [group[0]];
-
-        // Centroid of all group spawner tiles.
-        const cx = group.reduce((s, t) => s + t.x, 0) / group.length;
-        const cy = group.reduce((s, t) => s + t.y, 0) / group.length;
-
-        // If the group has only 2 tiles just use both.
-        if (group.length === 2) return [...group];
-
-        // Sort by angle around centroid → clockwise loop.
-        const byAngle = [...group].sort((a, b) =>
-            Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
-        );
-
-        // Cap the patrol length so the agent doesn't spend forever on large
-        // groups: keep every k-th tile so we get at most MAX_WAYPOINTS stops.
-        const MAX_WAYPOINTS = 6;
-        if (byAngle.length <= MAX_WAYPOINTS) return byAngle;
-        const step = byAngle.length / MAX_WAYPOINTS;
-        return Array.from({ length: MAX_WAYPOINTS }, (_, i) => byAngle[Math.round(i * step) % byAngle.length]);
+        return buildCentroidPatrol(group, MAX_WAYPOINTS);
     }
 
     // ── HOP / bank decision ──────────────────────────────────────────────────

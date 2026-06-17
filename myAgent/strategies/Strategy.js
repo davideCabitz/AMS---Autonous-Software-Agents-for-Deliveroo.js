@@ -89,6 +89,38 @@ export class Strategy {
     // ─── shared helpers ──────────────────────────────────────────────────────
 
     /**
+     * Delivery tiles after applying the allowedDeliveryTiles mission constraint.
+     * Filters to constraint-approved tiles when the constraint is active, falling
+     * back to the full pool if the filter would empty it. With no such mission the
+     * input is returned unchanged. Centralises the filter block that was previously
+     * pasted at every delivery-tile selection site.
+     * @param {Array<{x: number, y: number}>} tiles - Pool to filter (default: all delivery tiles)
+     * @returns {Array<{x: number, y: number}>} Allowed delivery tiles
+     */
+    _allowedDeliveryPool(tiles = deliveryTiles) {
+        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) return f;
+        }
+        return tiles;
+    }
+
+    /**
+     * Spawner tiles after applying the allowedSpawnerTiles mission constraint.
+     * Same fall-back-if-empty semantics as _allowedDeliveryPool. Centralises the
+     * filter block pasted across the group-building strategies.
+     * @param {Array<{x: number, y: number}>} tiles - Pool to filter (default: all spawner tiles)
+     * @returns {Array<{x: number, y: number}>} Allowed spawner tiles
+     */
+    _allowedSpawnerPool(tiles = spawnerTiles) {
+        if (missionConstraints.allowedSpawnerTiles?.size > 0) {
+            const f = tiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`));
+            if (f.length > 0) return f;
+        }
+        return tiles;
+    }
+
+    /**
      * Get delivery reward multiplier at tile (from mission config)
      * @param {{x: number, y: number}} tile - Tile position
      * @returns {number} Multiplier (1 = no scaling, or mission multiplier)
@@ -104,11 +136,7 @@ export class Strategy {
      * @returns {{x: number, y: number}|undefined} Nearest reachable delivery, or undefined if none
      */
     nearestDelivery(from = me) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         return [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
@@ -146,11 +174,7 @@ export class Strategy {
      * @returns {{x: number, y: number}|undefined} Delivery tile, or undefined if all unreachable
      */
     nearestEscapableDelivery(from = me) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        let tiles = this._allowedDeliveryPool();
         const reachable = [...tiles]
             .map(d => ({ d, len: this.deliveryCost(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
@@ -174,11 +198,7 @@ export class Strategy {
         // the load (return undefined → the strategies' "no reachable delivery →
         // reposition/idle" branch) and retry next tick instead of entering a trap we
         // can't escape. Only fall back to the trap when NO usable zone exists at all.
-        let tiles2 = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles2.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles2 = f;
-        }
+        const tiles2 = this._allowedDeliveryPool();
         const safeBlocked = tiles2.some(d =>
             usableDeliverySet.has(`${d.x}_${d.y}`) && reachableIgnoringAgents(from, d));
         if (safeBlocked) {
@@ -215,11 +235,7 @@ export class Strategy {
      * @returns {{d: {x: number, y: number}, len: number}|undefined} Best delivery and path cost
      */
     _bestDelivery(from, R, n) {
-        let tiles = deliveryTiles;
-        if (missionConstraints.allowedDeliveryTiles?.size > 0) {
-            const f = tiles.filter(t => missionConstraints.allowedDeliveryTiles.has(`${t.x}_${t.y}`));
-            if (f.length > 0) tiles = f;
-        }
+        const tiles = this._allowedDeliveryPool();
         const reachable = [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len));

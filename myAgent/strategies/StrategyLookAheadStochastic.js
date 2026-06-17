@@ -1,5 +1,5 @@
 import { StrategyLookAhead } from './StrategyLookAhead.js';
-import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
+import { buildGroups } from './SpawnerGroupPatrol.js';
 import {
     me, parcels, spawnerTiles, walkableTiles,
     OBSERVATION_DISTANCE, missionConstraints,
@@ -58,9 +58,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
      */
     #initGroups() {
         if (this.#groups !== null) return;
-        if (spawnerTiles.length === 0) { this.#groups = []; return; }
-        const walkableSet = new Set(walkableTiles.map(t => `${t.x}_${t.y}`));
-        this.#groups = buildSpawnerGroups(spawnerTiles, walkableSet, D_CLUSTER);
+        this.#groups = buildGroups(D_CLUSTER);
         log(
             `built ${this.#groups.length} group(s) from ` +
             `${spawnerTiles.length} spawner tiles: ` +
@@ -107,13 +105,9 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
             && parcels.carriedBy(me.id).length < missionConstraints.requiredStackSize;
 
         // ── build eligible spawner set ───────────────────────────────────────
-        // Apply mission zone constraint first.
-        const zonedPool = (missionConstraints.allowedSpawnerTiles?.size > 0)
-            ? spawnerTiles.filter(t =>
-                missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`)
-              )
-            : spawnerTiles;
-        const basePool = zonedPool.length > 0 ? zonedPool : spawnerTiles;
+        // Apply mission zone constraint first (falls back to the full set if the
+        // constraint filters to nothing reachable).
+        const basePool = this._allowedSpawnerPool();
 
         // Keep only reachable tiles; prefer the sustainable-loop region.
         const reachable = basePool.filter(t => this.isReachable(t));
