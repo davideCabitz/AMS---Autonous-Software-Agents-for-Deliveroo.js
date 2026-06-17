@@ -8,56 +8,44 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('highcap');
 
-// Max walkable-path steps for two spawners to merge into one group (same value
-// the stochastic strategy uses, so group shapes match across strategies).
+// Max walkable-path steps for two spawners to merge into one group (matches the
+// stochastic strategy, so group shapes agree across strategies).
 const D_CLUSTER = 2;
-// Dry-spell timeout: with no eligible parcel sensed for this long, the agent
-// stops camping the current group and either hops to a neighbour or banks.
+// Dry-spell timeout: no eligible parcel sensed for this long → hop or bank.
 export const PATIENCE_MS = 3000;
-// Max A* path length for an en-route detour (parcel or speculative group visit)
-// while travelling to a delivery with spare capacity.
+// Max A* length for an en-route detour (parcel or speculative group) while delivering.
 export const DETOUR_MAX_TILES = 5;
-// Soft load floor: at or above this fraction of capacity a patience expiry
-// banks the load instead of hopping to another group.
+// Soft load floor: at/above this fraction of capacity, a patience expiry banks.
 const MIN_LOAD_FRACTION = 0.6;
-// Extra tiles above the direct farm route that a delivery detour may add and
-// still be considered "on the way" to the farm group.
+// Extra tiles over the direct farm route a delivery detour may add and still be
+// "on the way".
 const ENROUTE_DELIVERY_SLACK = 3;
-// A hop while carrying is viable only when the decay it inflicts on the load
-// stays below this fraction of the carried reward.
+// A hop while carrying is viable only if its decay stays below this fraction of reward.
 const HOP_MAX_LOSS_FRACTION = 0.25;
-// En-route farm switch: while walking to the chosen farm group, re-target a
-// different group only when its yield-per-distance score (count / A* dist from the
-// CURRENT position) beats the committed group's by at least this factor. The
-// margin (>1) is hysteresis — it stops two comparable groups from flip-flopping
-// the farm target every tick as the agent moves between them.
+// En-route farm switch: re-target only when another group's yield-per-distance
+// (count / A* dist from CURRENT position) beats the committed one by this factor.
+// The >1 margin is hysteresis against flip-flopping between comparable groups.
 const FARM_SWITCH_MARGIN = 1.3;
-// Cap on patrol waypoints per group so the farm sweep stays snappy on big groups.
+// Patrol-waypoint cap per group so the sweep stays snappy on big groups.
 const MAX_WAYPOINTS = 6;
 
 /**
  * @class StrategyHighCapacity
- * High-capacity maps: farm spawner group, deliver in bulk
- * loads — wasted trips when the hold is large. This strategy farms instead:
+ * High-capacity maps: farm a spawner group, deliver in bulk. The farm→bank cycle:
  *
- *  FARM    — head to the spawner group with the most cells (ties broken by A*
- *            distance) and greedily pick up every positive-value parcel there,
- *            skipping LookAhead's bank-first comparison while below capacity.
- *  HOP     — when no eligible parcel has been seen for PATIENCE_MS, move to the
- *            best other group (count / A* distance), unless the load is already
- *            ≥ MIN_LOAD_FRACTION of capacity or the hop's decay cost is too
- *            high — then bank instead.
- *  DELIVER — at capacity, go straight to the nearest escapable delivery. With
- *            spare capacity, detour to parcels OR unvisited spawner groups
- *            within DETOUR_MAX_TILES of the current position (speculative —
- *            no sensed parcel required); an empty group is marked visited for
- *            the rest of the trip and delivery resumes. After banking, groups
- *            are re-ranked and the cycle restarts at FARM.
+ *  FARM    — head to the group with the most cells (ties by A* distance) and grab
+ *            every positive-value parcel, skipping the bank-first gate below capacity.
+ *  HOP     — after PATIENCE_MS with no eligible parcel, move to the best other group
+ *            (count / A* dist), unless the load is ≥ MIN_LOAD_FRACTION of capacity or
+ *            the hop's decay is too high — then bank.
+ *  DELIVER — at capacity, go to the nearest escapable delivery. With spare capacity,
+ *            detour to parcels OR unvisited groups within DETOUR_MAX_TILES
+ *            (speculative); an empty group is marked visited and delivery resumes.
+ *            After banking, groups re-rank and the cycle restarts at FARM.
  *
- * Inherits the value model, pathLen, parcel memory and hysteresis from
- * StrategyLookAhead; eligibility filters (reachable, safe-region) are
- * unchanged — only the ranking/commitment logic differs. Falls back to plain
- * LookAhead behaviour on maps with no spawner groups.
+ * Inherits the value model, pathLen, memory and hysteresis from StrategyLookAhead;
+ * eligibility filters are unchanged — only ranking/commitment differs. Falls back to
+ * plain LookAhead on maps with no spawner groups.
  */
 export class StrategyHighCapacity extends StrategyLookAhead {
     /** @type {number} Heartbeat so the patience timer fires even with no sensing events */
@@ -87,16 +75,15 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     /** @type {boolean} Whether the agent was inside the farm group's sensing area last tick */
     #wasAtFarm = false;
 
-    /** @type {number|null} Group just hopped AWAY from because it went dry; excluded from en-route
-     *  farm switching (it's still nearby, so its score is high) until the agent
-     *  reaches a farm group, so a dry group can't immediately pull us back */
+    /** @type {number|null} Group just hopped away from (dry); excluded from en-route
+     *  farm switching until a farm is reached, so it can't immediately pull us back */
     #hopFromIdx = null;
 
-    /** @type {Set<number>} Group indices already speculatively visited during the current delivery trip */
+    /** @type {Set<number>} Group indices speculatively visited this delivery trip */
     #visitedDetours = new Set();
 
-    /** @type {string|null} Signature of the allowedSpawnerTiles constraint the groups were built
-     *  under — a restrict_exploration mission applied mid-run rebuilds them */
+    /** @type {string|null} allowedSpawnerTiles signature the groups were built under
+     *  (a mid-run restrict_exploration rebuilds them) */
     #groupsSig = null;
 
     // ── constructor config (set once, not virtual) ───────────────────────────
@@ -124,7 +111,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Run the FARM / HOP / DELIVER cycle; falls back to LookAhead when there are no groups
+     * Run the FARM / HOP / DELIVER cycle; falls back to LookAhead with no groups
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
@@ -135,7 +122,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const carrying = parcels.carriedBy(me.id);
         const now = Date.now();
 
-        // Load banked → fresh farming cycle: re-rank groups, reset trip state.
+        // Load banked → fresh cycle: re-rank groups, reset trip state.
         if (this.#phase === 'deliver' && carrying.length === 0) {
             this.#phase   = 'farm';
             this.#farmIdx = null;
@@ -148,9 +135,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const eligible = this.#eligibleParcels();
         if (eligible.some(p => this._countsForPatience(p))) this.#lastParcelTs = now;
 
-        // Mission gates (LLM layer): maxBundleValue → single-parcel trips, so the
-        // hold is "full" at 1; requiredStackSize → never enter DELIVER before the
-        // stack is complete (stackReady), exactly like the other strategies.
+        // Mission gates: maxBundleValue → "full" at 1; requiredStackSize → don't enter
+        // DELIVER before the stack is complete (stackReady), like the other strategies.
         const effectiveCap = this.singleParcelBundles() ? 1 : this.#deliveryCap;
         if (carrying.length >= effectiveCap && this.stackReady(carrying)) {
             this.#phase = 'deliver';
@@ -175,10 +161,9 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             }
         }
 
-        // The patience timer counts only while actually sensing the farm area:
-        // a far group can take longer than PATIENCE_MS just to walk to, and
-        // counting travel as a dry spell made the agent hop back and forth
-        // between groups without ever arriving at either.
+        // Patience counts only while sensing the farm area: a far group can take
+        // longer than PATIENCE_MS to walk to, and counting travel as a dry spell
+        // made the agent hop between groups without ever arriving.
         const atFarm = this.#isAtFarm();
         if (atFarm && !this.#wasAtFarm) this.#lastParcelTs = now; // just arrived
         this.#wasAtFarm = atFarm;
@@ -193,9 +178,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── subclass hooks ───────────────────────────────────────────────────────
 
     /**
-     * Which parcel to pick up opportunistically while delivering. Base policy:
-     * best pickupValue within DETOUR_MAX_TILES A* path. Subclasses may tighten
-     * the filter (quality bar, in-sight only, etc.)
+     * Which parcel to grab opportunistically while delivering. Base policy: best
+     * pickupValue within DETOUR_MAX_TILES. Subclasses may tighten the filter.
      * @param {Array<Object>} eligible - Candidate parcels
      * @returns {{p: Object, value: number}|undefined} Best detour pickup, or undefined
      */
@@ -207,9 +191,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Whether a visible parcel counts as a "sighting" that resets the patience
-     * timer. Subclasses with a quality bar exclude parcels they'd never take,
-     * so trash spawns can't keep the agent camping a dry group forever
+     * Whether a sighted parcel resets the patience timer. Subclasses with a quality
+     * bar exclude parcels they'd never take, so trash spawns can't keep camping a dry group.
      * @param {Object} _parcel - Parcel sighted
      * @returns {boolean} True if it resets the patience timer
      */
@@ -218,10 +201,10 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * FARM pickup policy: which eligible parcel to go for next. Default is the
-     * best positive pickupValue (greedy on value, no bank-first gate)
+     * FARM pickup policy: which eligible parcel to go for next. Default: best
+     * positive pickupValue (greedy on value, no bank-first gate).
      * @param {Array<Object>} eligible - Candidate parcels
-     * @returns {{p: Object, value: number}|undefined} Best farm pickup (value used by hysteresis check), or undefined
+     * @returns {{p: Object, value: number}|undefined} Best farm pickup, or undefined
      */
     _pickFarmTarget(eligible) {
         return eligible
@@ -233,13 +216,12 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── groups ───────────────────────────────────────────────────────────────
 
     /**
-     * Lazily build (and cache) spawner groups, rebuilding when the
-     * allowedSpawnerTiles mission constraint changes
+     * Lazily build (and cache) groups, rebuilding when allowedSpawnerTiles changes
      * @returns {void}
      */
     #initGroups() {
-        // Rebuild whenever the allowedSpawnerTiles mission constraint changes
-        // (restrict_exploration can arrive mid-run), not just on first use.
+        // Rebuild whenever allowedSpawnerTiles changes (restrict_exploration can
+        // arrive mid-run), not just on first use.
         const sig = spawnerConstraintSig();
         if (this.#groups !== null && sig === this.#groupsSig) return;
         this.#groupsSig = sig;
@@ -253,7 +235,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Nearest tile of a group from the agent, by A* path length
+     * Nearest tile of a group, by A* path length
      * @param {Array<{x: number, y: number}>} group - Spawner group
      * @returns {{tile: {x: number, y: number}|null, dist: number}} Nearest tile and its path cost
      */
@@ -267,10 +249,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Yield-per-distance score of a group from the agent's current position:
-     * cell count / A* distance. Higher = a richer and/or closer group. Matches
-     * the score #bestNeighbourGroup uses for hops, so farm selection, en-route
-     * switching and hopping all agree on what "best" means
+     * Yield-per-distance score of a group from the current position (count / A*
+     * dist). Same score #bestNeighbourGroup uses, so farm/switch/hop agree on "best".
      * @param {{count: number, dist: number}} e - Group entry with cell count and path distance
      * @returns {number} Yield-per-distance score
      */
@@ -279,17 +259,11 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Group to farm, by yield-per-distance (count / A* distance) — NOT raw cell
-     * count, which would always lock onto the single biggest group even when it's
-     * across the map and a nearly-as-big one sits on the way.
-     *
-     * The chosen group is cached in #farmIdx so the agent commits to a target, but
-     * while still travelling to it we re-evaluate from the CURRENT position: as the
-     * agent approaches another large group its distance shrinks, its score climbs,
-     * and once it beats the committed group's score by FARM_SWITCH_MARGIN we switch
-     * to it. The margin is hysteresis against flip-flopping between comparable
-     * groups. Re-evaluation stops once the agent is actually at the farm (#isAtFarm)
-     * so it doesn't abandon a group it just arrived to patrol.
+     * Group to farm, by yield-per-distance (NOT raw count, which would lock onto the
+     * single biggest group even across the map). Cached in #farmIdx, but while
+     * travelling we re-evaluate from the CURRENT position: as the agent nears another
+     * large group its score climbs, and once it beats the committed group's by
+     * FARM_SWITCH_MARGIN we switch. Re-evaluation stops once at the farm (#isAtFarm).
      * @returns {number|null} Index of the group to farm, or null if none reachable
      */
     #selectFarmGroup() {
@@ -305,10 +279,9 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             return this.#farmIdx;
         }
 
-        // En-route switch: not yet at the committed group, and a different group
-        // now scores clearly higher from where we are → re-target it. The group we
-        // just hopped away from (dry) is excluded so it can't immediately pull us
-        // back; the exclusion clears once we actually reach a farm.
+        // En-route switch: not yet at the committed group and another now scores
+        // clearly higher → re-target. The just-hopped-from (dry) group is excluded
+        // until we reach a farm, so it can't immediately pull us back.
         if (this.#isAtFarm()) {
             this.#hopFromIdx = null;
         } else {
@@ -324,23 +297,19 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * If a delivery tile lies at most ENROUTE_DELIVERY_SLACK extra tiles off
-     * the direct route from the agent to `farmTarget`, return that delivery
-     * tile (the nearest such one). Returns null when no delivery qualifies.
-     *
-     * Condition: dist(me→D) + dist(D→farm) ≤ dist(me→farm) + SLACK
+     * Nearest delivery tile at most ENROUTE_DELIVERY_SLACK extra tiles off the direct
+     * route to `farmTarget`, or null. Condition: dist(me→D)+dist(D→farm) ≤ dist(me→farm)+SLACK.
      * @param {{x: number, y: number}} farmTarget - Farm waypoint being headed to
      * @returns {{x: number, y: number}|null} Nearest qualifying delivery tile, or null
      */
     #enRouteDelivery(farmTarget) {
-        // A deliveryMultipliers mission is active: skip the nearest-tile en-route
-        // shortcut (it ignores the multiplier and could short-bank at a 1×/0× tile)
-        // and defer to the multiplier-aware nearestEscapableDelivery on the main
-        // DELIVER path. No-op when no such mission is set.
+        // With a deliveryMultipliers mission, skip this nearest-tile shortcut (it
+        // ignores the multiplier and could short-bank at a 1×/0× tile) and defer to
+        // the multiplier-aware nearestEscapableDelivery. No-op without such a mission.
         if (missionConstraints.deliveryMultipliers?.size > 0) return null;
         const directDist = this.pathLen(me, farmTarget);
         if (!Number.isFinite(directDist)) return null;
-        // allowedDeliveryTiles mission: only constraint-approved tiles qualify.
+        // allowedDeliveryTiles mission: only approved tiles qualify.
         const tiles = this._allowedDeliveryPool();
         const candidates = [];
         for (const d of tiles) {
@@ -356,8 +325,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * True when at least one spawner of the current farm group is within
-     * sensing range — i.e. the agent has arrived and is actually farming
+     * Whether a spawner of the current farm group is within sensing range (arrived)
      * @returns {boolean}
      */
     #isAtFarm() {
@@ -369,8 +337,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── FARM movement ────────────────────────────────────────────────────────
 
     /**
-     * Walk the patrol loop across the chosen farm group, banking en route if a
-     * delivery tile is nearly on the way
+     * Walk the patrol loop across the farm group, banking en route if a delivery
+     * tile is nearly on the way
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} go_explore / go_deliver predicate, or null while walking
      */
@@ -378,8 +346,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
         const idx = this.#selectFarmGroup();
         if (idx === null) return this.exploreIfIdle(currentIntent);
 
-        // (Re)build the patrol when the farm group changed, starting from the
-        // waypoint nearest to the agent.
+        // (Re)build the patrol when the farm group changed, starting nearest the agent.
         if (this.#patrolGroupIdx !== idx) {
             this.#patrol = this.#buildPatrol(this.#groups[idx]);
             this.#patrolGroupIdx = idx;
@@ -393,8 +360,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
                 + this.#patrol.map(t => `(${t.x},${t.y})`).join(' '));
         }
 
-        // Patrol: keep moving across the group so every spawner
-        // cell passes through sensing range while waiting for spawns.
+        // Patrol: keep moving so every spawner cell passes through sensing range
+        // while waiting for spawns.
         if (Math.round(me.x) === this.#patrol[this.#patrolIdx].x
                 && Math.round(me.y) === this.#patrol[this.#patrolIdx].y)
             this.#patrolIdx = (this.#patrolIdx + 1) % this.#patrol.length;
@@ -405,10 +372,9 @@ export class StrategyHighCapacity extends StrategyLookAhead {
                 if (currentIntent?.[0] === 'go_explore'
                         && currentIntent[1] === target.x && currentIntent[2] === target.y)
                     return null;
-                // En-route delivery: if carrying parcels and a delivery tile lies
-                // ≤ ENROUTE_DELIVERY_SLACK extra tiles off the path to the farm
-                // waypoint, stop and deliver now — the farm group index is kept
-                // so the agent resumes the same group after banking.
+                // En-route delivery: if carrying and a delivery tile is ≤
+                // ENROUTE_DELIVERY_SLACK off the path, deliver now — the farm index
+                // is kept so the agent resumes the same group after banking.
                 const carried = parcels.carriedBy(me.id);
                 if (carried.length > 0 && this.stackReady(carried)) {
                     const deliver = this.#enRouteDelivery(target);
@@ -430,16 +396,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Patrol waypoints for the group. The agent always keeps moving so every
-     * spawner cell passes through sensing range during the dry-spell window.
-     *
-     * Strategy: compute the group centroid, then pick waypoints by sorting
-     * spawner tiles by angle around the centroid (clockwise). This gives a
-     * loop that naturally covers the spatial extent of the group regardless
-     * of sensing radius. At least 2 waypoints are always returned even for a
-     * single-tile group (centroid tile used twice would be a no-op, so we
-     * add the nearest-to-centroid and farthest-from-centroid tiles as the two
-     * extremes). The number of waypoints is capped so the patrol stays snappy
+     * Centroid-angle clockwise patrol loop for the group, capped at MAX_WAYPOINTS
      * @param {Array<{x: number, y: number}>} group - Spawner group
      * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints
      */
@@ -450,8 +407,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── HOP / bank decision ──────────────────────────────────────────────────
 
     /**
-     * After a dry spell: hop to the best neighbouring group, or bank the load
-     * (gated by mission stack rules)
+     * After a dry spell: hop to the best neighbour group, or bank (gated by mission
+     * stack rules)
      * @param {Array|null} currentIntent - Current intention predicate
      * @param {Array<Object>} carrying - Parcels currently carried
      * @returns {Array|null} Next intention, or null while walking
@@ -471,11 +428,11 @@ export class StrategyHighCapacity extends StrategyLookAhead {
                 return this.#goFarm(currentIntent);
             }
         }
-        // stackReady (LLM layer): a requiredStackSize mission forbids banking a
-        // short stack — keep hunting parcels instead of delivering early.
+        // stackReady: a requiredStackSize mission forbids banking a short stack —
+        // keep hunting instead of delivering early.
         if (carrying.length > 0 && this.stackReady(carrying)) {
             this.#phase = 'deliver';
-            // The current group is dry — don't speculatively revisit it en route.
+            // Current group is dry — don't speculatively revisit it en route.
             if (this.#farmIdx !== null) this.#visitedDetours.add(this.#farmIdx);
             log(`patience expired with ${carrying.length}/${cap} carried → DELIVER`);
             return this.#deliver(
@@ -491,9 +448,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     }
 
     /**
-     * Best other group by count/distance score. While carrying, the hop is
-     * viable only if its decay loss stays under HOP_MAX_LOSS_FRACTION of the
-     * carried reward; otherwise null (→ bank instead)
+     * Best other group by count/distance. While carrying, viable only if its decay
+     * loss stays under HOP_MAX_LOSS_FRACTION of the carried reward (else null → bank).
      * @param {Array<Object>} carrying - Parcels currently carried
      * @returns {{idx: number, count: number, tile: {x: number, y: number}|null, dist: number}|null} Best hop target, or null
      */
@@ -518,15 +474,15 @@ export class StrategyHighCapacity extends StrategyLookAhead {
 
     /**
      * Deliver the load, optionally detouring for opportunistic pickups and
-     * speculative unvisited-group visits along the way
+     * speculative unvisited-group visits
      * @param {Array|null} currentIntent - Current intention predicate
-     * @param {boolean} allowPickup - Allow opportunistic parcel pickups en route
+     * @param {boolean} allowPickup - Allow opportunistic pickups en route
      * @param {boolean} allowSpeculative - Allow speculative nearby-group visits
      * @param {Array<Object>} eligible - Candidate parcels for opportunistic pickup
      * @returns {Array|null} Next intention, or null while walking
      */
     #deliver(currentIntent, allowPickup, allowSpeculative, eligible) {
-        // 1. Opportunistic parcel pickup: qualifying parcel already in view.
+        // 1. Opportunistic pickup: qualifying parcel already in view.
         if (allowPickup) {
             const near = this._pickDeliveryTarget(eligible);
             if (near) {
@@ -536,13 +492,13 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             }
         }
 
-        // 2. Speculative group visit: go_explore an unvisited nearby spawner group.
+        // 2. Speculative group visit: go_explore an unvisited nearby group.
         if (allowSpeculative) {
             if (currentIntent?.[0] === 'go_explore') {
-                // Mid-speculative-detour: keep going until the group is in reach;
-                // a parcel sensed on the way is caught by check 1 above.
+                // Mid-detour: keep going until in reach; a parcel sensed on the way
+                // is caught by check 1 above.
                 if (distance(me, { x: currentIntent[1], y: currentIntent[2] }) > 1) return null;
-                // Arrived and nothing eligible — fall through and resume delivery.
+                // Arrived, nothing eligible — fall through and resume delivery.
             } else {
                 const spec = this.#groups
                     .map((g, idx) => ({ idx, ...this.#nearestTile(g) }))
@@ -570,8 +526,8 @@ export class StrategyHighCapacity extends StrategyLookAhead {
     // ── candidate pool (same eligibility filters as LookAhead) ──────────────
 
     /**
-     * Eligible parcels: free live + worth-pursuing remembered, passing mission
-     * gates, reachable, and in the sustainable-loop region
+     * Eligible parcels: free live + worth-pursuing remembered, passing mission gates,
+     * reachable, and in the sustainable-loop region
      * @returns {Array<Object>} Eligible parcels
      */
     #eligibleParcels() {
@@ -580,7 +536,7 @@ export class StrategyHighCapacity extends StrategyLookAhead {
             ...parcels.free(),
             ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
         ];
-        // missionPickupOk (LLM layer): maxParcelReward / maxBundleValue ceilings.
+        // missionPickupOk: maxParcelReward / maxBundleValue ceilings.
         return all.filter(p => this.missionPickupOk(p) && this.isReachable(p) && this.inSafe(p));
     }
 }

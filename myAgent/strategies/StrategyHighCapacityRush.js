@@ -5,26 +5,23 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('rush');
 
-// Manual delivery cap used when the server reports infinite carrying capacity:
-// "full" has to mean something for the farm→bank cycle to ever bank.
+// Manual delivery cap when the server reports infinite capacity — "full" must mean
+// something for the farm→bank cycle to ever bank.
 export const RUSH_INFINITE_CAP = 10;
-// Quality bar for pickups:
-//   avg ≤ 30  →  bar = avg − RUSH_REWARD_MARGIN   (relative to map average)
-//   avg  > 30  →  bar = RUSH_HIGH_AVG_FLOOR        (fixed floor when avg is high,
-//                   so the agent never discards actually-valuable parcels)
+// Pickup quality bar: avg ≤ 30 → avg − RUSH_REWARD_MARGIN; avg > 30 → fixed
+// RUSH_HIGH_AVG_FLOOR (so high-avg maps never discard valuable parcels).
 export const RUSH_REWARD_MARGIN   = 10;
 export const RUSH_HIGH_AVG_FLOOR  = 20;
 
 /**
  * @class StrategyHighCapacityRush
- * Abundance maps: high capacity + fast spawn + high population → fill and bank straight
- * FARM greedy filling, the 3s patience HOP between groups, and the no-viable-hop
- * bank fallback (so a dried-up map can't deadlock the agent) are all inherited.
+ * Abundance maps: high capacity + fast spawn + high population → fill and bank
+ * straight. Inherits the FARM filling, 3s patience HOP, and bank fallback.
  */
 export class StrategyHighCapacityRush extends StrategyHighCapacity {
     /**
-     * Configure the inherited farm→bank cycle for abundance maps: a concrete
-     * delivery cap (10 when capacity is infinite) and no speculative detours
+     * Configure the inherited cycle for abundance maps: concrete delivery cap (10
+     * when capacity is infinite) and no speculative detours
      */
     constructor() {
         super({
@@ -35,10 +32,9 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * Minimum reward a parcel must currently have to be worth picking up.
-     * mustStack (LLM layer): while a requiredStackSize mission still needs
-     * parcels, the bar is dropped — a mandated stack must be filled even
-     * with parcels the quality filter would normally discard
+     * Minimum reward a parcel must have to be worth picking up. While a
+     * requiredStackSize mission still needs parcels (mustStack), the bar drops so the
+     * mandated stack fills even with parcels the filter would discard.
      * @returns {number} Reward threshold (-Infinity while a stack must be filled)
      */
     _rewardBar() {
@@ -49,9 +45,8 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * Delivery pickup policy: only parcels already within sensing range
-     * (no off-route detour) that meet the quality bar. Sorted by closest first
-     * so the agent grabs the least disruptive one and keeps moving
+     * Delivery pickup policy: only in-sensing-range parcels (no off-route detour)
+     * meeting the quality bar, closest first (least disruptive)
      * @param {Array<Object>} eligible - Candidate parcels
      * @returns {{p: Object, value: number, d: number}|undefined} Closest qualifying pickup, or undefined
      */
@@ -65,14 +60,14 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * Abandon an in-flight pickup whose parcel has decayed below the reward bar,
-     * then defer to the inherited farm→bank cycle
+     * Abandon an in-flight pickup whose parcel decayed below the bar, then defer to
+     * the inherited cycle
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
     decide(currentIntent) {
-        // Mid-trip abandonment: if we're walking to a parcel that has decayed
-        // below the bar, drop it and let the patrol/patience logic take over.
+        // Mid-trip abandonment: if the target parcel has decayed below the bar, drop
+        // it and let the patrol/patience logic take over.
         if (currentIntent?.[0] === 'go_pick_up') {
             const p = parcels.get(currentIntent[3]);
             if (p && !p.carriedBy && p.reward < this._rewardBar()) {
@@ -84,13 +79,9 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * FARM pickup policy: instead of greedily chasing the best-value parcel,
-     * accept ONLY parcels whose reward is ≥ (map average spawn reward −
-     * RUSH_REWARD_MARGIN) and go for the CLOSEST one (A* path length). With
-     * abundant spawns this fills the hold faster than crossing the area for
-     * marginally better parcels. Below-bar parcels are never taken — when
-     * nothing qualifies the agent keeps patrolling and the patience timer
-     * decides hop/bank
+     * FARM pickup policy: accept only parcels at/above the quality bar and go for the
+     * CLOSEST (A*) — with abundant spawns this fills the hold faster than chasing
+     * marginally better ones. Nothing qualifies ⇒ keep patrolling (patience decides).
      * @param {Array<Object>} eligible - Candidate parcels
      * @returns {{p: Object, value: number, d: number}|undefined} Closest good parcel, or undefined
      */
@@ -109,8 +100,8 @@ export class StrategyHighCapacityRush extends StrategyHighCapacity {
     }
 
     /**
-     * Below-bar parcels don't reset the dry-spell timer either — a group
-     * spawning only trash must still trigger a hop after PATIENCE_MS
+     * Below-bar parcels don't reset the dry-spell timer — a group spawning only
+     * trash must still trigger a hop after PATIENCE_MS
      * @param {Object} parcel - Parcel sighted
      * @returns {boolean} True if the parcel meets the reward bar
      */

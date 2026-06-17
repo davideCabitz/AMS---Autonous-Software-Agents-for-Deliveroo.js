@@ -1,21 +1,18 @@
 /**
- * Shared anti-lock exploration mechanism for the sensing-poor strategies
- * (StrategyBlind, StrategyHurry). Both commit to an explore target, detect when
- * the agent is physically stuck (blocked/bounced) or has spent too long on one
- * target, and blacklist abandoned targets briefly so exploration fans out instead
- * of ping-ponging between the two closest spawners.
+ * Shared anti-lock exploration bookkeeping for the sensing-poor strategies
+ * (StrategyBlind, StrategyHurry): commit to a target, detect when the agent is
+ * stuck or has spent too long on one, and blacklist abandoned targets briefly so
+ * exploration fans out instead of ping-ponging between the two closest spawners.
  *
- * This object owns ONLY that shared bookkeeping — movement tracking, commit state,
- * stall/timeout detection and the blacklist. Each strategy keeps its own distinct
- * target-selection logic (Blind: grab-underfoot + distance-0 "reached"; Hurry:
- * persistent #visited frontier sweep) and drives this helper through its primitives.
+ * Owns ONLY this shared state (movement tracking, commit, stall/timeout, blacklist);
+ * each strategy keeps its own target-selection logic and drives these primitives.
  */
 
-// If the agent's tile hasn't changed for this long it's stuck → give up the target.
+// Tile unchanged for this long ⇒ stuck → give up the target.
 export const EXPLORE_STALL_MS     = 1500;
 // Re-evaluate / cap a single target at least this often, even while committed.
 export const EXPLORE_COMMIT_MS    = 4000;
-// How long a given-up target stays excluded before it can be chosen again.
+// How long a given-up target stays excluded before it can be re-chosen.
 export const EXPLORE_BLACKLIST_MS = 5000;
 
 export class AntiLockExplorer {
@@ -31,8 +28,7 @@ export class AntiLockExplorer {
     #blacklist   = new Map();
 
     /**
-     * Record the agent's current tile so the stall detector can tell whether it has
-     * physically moved. Resets the stall clock on any tile change.
+     * Record the agent's current tile (resets the stall clock on any change)
      * @param {number} px - Rounded agent x
      * @param {number} py - Rounded agent y
      * @param {number} now - Current timestamp (ms)
@@ -46,8 +42,7 @@ export class AntiLockExplorer {
     }
 
     /**
-     * Commit to an explore target, (re)starting its commit clock only when the
-     * target key actually changes. No-op if already committed to `key`.
+     * Commit to a target, restarting its commit clock only when the key changes
      * @param {string} key - "x_y" target key
      * @param {number} now - Current timestamp (ms)
      * @returns {void}
@@ -60,9 +55,8 @@ export class AntiLockExplorer {
     }
 
     /**
-     * Commit to a freshly selected target, ALWAYS (re)starting the commit clock —
-     * even if the key matches the current one. Used at the point a new explore
-     * target is chosen, where the original code reset commitSince unconditionally.
+     * Commit to a freshly selected target, ALWAYS restarting the commit clock
+     * (even if the key is unchanged)
      * @param {string} key - "x_y" target key
      * @param {number} now - Current timestamp (ms)
      * @returns {void}

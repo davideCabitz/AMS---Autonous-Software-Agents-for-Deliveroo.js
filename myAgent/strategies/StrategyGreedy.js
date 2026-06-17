@@ -7,11 +7,11 @@ const log = createLogger('greedy');
 
 /**
  * @class StrategyGreedy
- * Greedy strategy: accumulate parcels within sensing range, deliver when no nearby value
+ * Accumulate parcels within sensing range; deliver when no nearby value remains.
  */
 export class StrategyGreedy extends Strategy {
     /**
-     * Decide next intention
+     * Decide the next intention
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
@@ -19,27 +19,24 @@ export class StrategyGreedy extends Strategy {
         const carrying = parcels.carriedBy(me.id);
         const bankNow  = this.bankNowValue(); // value A: deliver current load now
 
-        // Free parcels in sensing range, A*-reachable, whose pickup nets at least
-        // MIN_DELIVERY_REWARD over just delivering now (ΔB = B(p) − A). Unreachable
-        // parcels are dropped so they can never be selected. Ranked by value B(p).
-        // maxBundleValue missions forbid a second parcel — each delivery must be a
-        // single cheap parcel so its total stays under the threshold.
+        // Free, in-range, reachable parcels whose pickup nets ≥ MIN_DELIVERY_REWARD
+        // over delivering now (ΔB = B(p) − A), ranked by value B(p). maxBundleValue
+        // missions forbid a second parcel (each delivery a single cheap parcel).
         const worthwhileInRange = this.singleParcelBundles() && carrying.length > 0 ? [] : parcels.free()
             .filter(p => this.missionPickupOk(p))
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
-            // A mandated stack (requiredStackSize) must be filled even when the
-            // marginal parcel isn't "worth it" by the decay model alone.
+            // A mandated stack (requiredStackSize) must fill even if the marginal
+            // parcel isn't "worth it" by the decay model alone.
             .filter(({ p, value }) => this.mustStack(carrying) || value - this.bankFirstValue(p) >= MULTI_PICKUP_MIN)
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
-            // Hysteresis: while there's room, stick with the current pickup as long
-            // as it's still valid and not clearly beaten — prevents flip-flopping
-            // between pick-up and deliver each tick.
+            // Hysteresis: while there's room, keep the current pickup as long as it's
+            // valid and not clearly beaten — prevents pickup/deliver flip-flopping.
             if (!this.atCapacity() && this.shouldKeepCurrentPickup(currentIntent, worthwhileInRange[0]))
                 return null;
-            // Only consider another pickup if there's still room to carry it.
+            // Only consider another pickup if there's still room.
             if (!this.atCapacity() && worthwhileInRange.length > 0) {
                 const { p } = worthwhileInRange[0];
                 log(`→ multi-pickup ${this.pickupDebug(p)}`);
@@ -48,17 +45,16 @@ export class StrategyGreedy extends Strategy {
 
             const stackOk = this.stackReady(carrying);
             if (stackOk) {
-                // Hysteresis: keep heading to the current delivery tile unless a
-                // clearer/closer zone beats it by the switch margin (congestion-aware).
+                // Hysteresis: keep the current delivery tile unless a clearer zone
+                // beats it by the switch margin (congestion-aware).
                 if (this.betterDelivery(currentIntent)) return null;
                 const target = this.nearestEscapableDelivery();
                 if (target) {
                     log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                     return ['go_deliver', target.x, target.y];
                 }
-                // No delivery currently reachable (agents/crates wall every route). Fall
-                // through to explore/idle to reposition until a path opens, instead of
-                // committing to an unreachable delivery and spinning.
+                // No delivery reachable (every route walled) — explore/idle to
+                // reposition until a path opens, rather than spinning.
                 log('no reachable delivery — repositioning');
             } else {
                 log(`stack ${carrying.length}/${missionConstraints.requiredStackSize} — need more parcels`);

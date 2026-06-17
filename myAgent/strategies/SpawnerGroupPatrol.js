@@ -2,20 +2,15 @@ import { spawnerTiles, walkableTiles, missionConstraints } from '../context.js';
 import { buildSpawnerGroups } from '../beliefs/SpawnerGroups.js';
 
 /**
- * Shared spawner-group machinery used by the group-patrol strategies
- * (StrategyHighCapacity, StrategyLookAhead, StrategyLookAheadStochastic).
- *
- * These were three near-identical copies of the same two operations — building
- * path-clustered spawner groups and turning a group into a centroid-angle patrol
- * loop. Centralised here so the strategies share one implementation; each caller
- * keeps its own clustering distance and waypoint cap (passed as arguments) so no
- * behaviour shifts.
+ * Shared spawner-group machinery for the group-patrol strategies
+ * (StrategyHighCapacity, StrategyLookAhead, StrategyLookAheadStochastic): build
+ * path-clustered groups and turn a group into a centroid-angle patrol loop. Each
+ * caller passes its own clustering distance and waypoint cap, so no behaviour shifts.
  */
 
 /**
- * The signature string that detects when an allowedSpawnerTiles mission constraint
- * has changed (so cached groups can be rebuilt). Empty string ⇒ no constraint.
- * @returns {string} Stable signature of the current allowedSpawnerTiles set
+ * Signature detecting when allowedSpawnerTiles changed (to rebuild cached groups)
+ * @returns {string} Stable signature of the current set; empty ⇒ no constraint
  */
 export function spawnerConstraintSig() {
     return missionConstraints.allowedSpawnerTiles?.size > 0
@@ -24,11 +19,9 @@ export function spawnerConstraintSig() {
 }
 
 /**
- * Build path-clustered spawner groups, applying the allowedSpawnerTiles mission
- * constraint (falling back to the full spawner set if the filter empties it), and
- * return them alongside the constraint signature for rebuild detection. Mirrors the
- * old StrategyHighCapacity#initGroups / StrategyLookAhead._initIdleGroups bodies.
- * @param {number} dCluster - Max walkable steps to merge two spawners into one group
+ * Build path-clustered groups under the allowedSpawnerTiles constraint (falling back
+ * to the full set if the filter empties it), with the constraint signature
+ * @param {number} dCluster - Max walkable steps to merge two spawners into a group
  * @returns {{ groups: Array<Array<{x: number, y: number}>>, sig: string }}
  */
 export function buildGroupsWithSig(dCluster) {
@@ -44,10 +37,9 @@ export function buildGroupsWithSig(dCluster) {
 }
 
 /**
- * Build path-clustered spawner groups from the full spawner set, with NO mission
- * constraint applied (the stochastic sampler caches once and never rebuilds).
- * Mirrors the old StrategyLookAheadStochastic#initGroups body.
- * @param {number} dCluster - Max walkable steps to merge two spawners into one group
+ * Build path-clustered groups from the full spawner set, NO mission constraint
+ * applied (the stochastic sampler caches once and never rebuilds)
+ * @param {number} dCluster - Max walkable steps to merge two spawners into a group
  * @returns {Array<Array<{x: number, y: number}>>} Spawner groups
  */
 export function buildGroups(dCluster) {
@@ -57,10 +49,8 @@ export function buildGroups(dCluster) {
 }
 
 /**
- * Turn a spawner group into an ordered patrol loop: a clockwise sweep of the
- * group's tiles by angle around the centroid, capped at `maxWaypoints` stops so
- * large groups stay snappy. Singletons and pairs are returned as-is. Identical
- * output to the old StrategyHighCapacity#buildPatrol / StrategyLookAhead._buildIdlePatrol.
+ * Turn a group into an ordered patrol loop: a clockwise sweep by angle around the
+ * centroid, capped at maxWaypoints stops. Singletons and pairs returned as-is.
  * @param {Array<{x: number, y: number}>} group - Spawner group
  * @param {number} maxWaypoints - Maximum number of patrol stops
  * @returns {Array<{x: number, y: number}>} Ordered patrol waypoints

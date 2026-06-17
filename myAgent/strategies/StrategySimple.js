@@ -6,11 +6,11 @@ const log = createLogger('simple');
 
 /**
  * @class StrategySimple
- * Simple strategy: deliver immediately when carrying, otherwise pick best free parcel
+ * Deliver immediately when carrying, else pick the best free parcel.
  */
 export class StrategySimple extends Strategy {
     /**
-     * Decide next intention
+     * Decide the next intention
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */

@@ -7,30 +7,28 @@ const log = createLogger('memory');
 
 /**
  * @class StrategyMemory
- * Greedy with persistent memory for out-of-range parcels with decay
+ * Greedy plus persistent, decaying memory for out-of-range parcels.
  */
 export class StrategyMemory extends StrategyGreedy {
     /**
-     * Decide next intention with memory-augmented candidate pool
+     * Decide the next intention over a memory-augmented candidate pool
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
     decide(currentIntent) {
         const carrying  = parcels.carriedBy(me.id);
         const bankNow   = this.bankNowValue();
-        const remembered = parcels.remembered();  // current-reward snapshots, decay applied
+        const remembered = parcels.remembered();  // decay-applied snapshots
 
-        // Build merged candidate pool (free live + remembered that aren't live again).
-        // Mission gates (maxParcelReward / maxBundleValue) exclude parcels that may
-        // never be picked up, for live and remembered candidates alike.
+        // Merged pool (free live + remembered not live again). Mission gates
+        // (maxParcelReward / maxBundleValue) exclude un-pickable parcels in both.
         let allFree = [
             ...parcels.free(),
             ...remembered.filter(r => !parcels.get(r.id) && this.rememberedWorthPursuing(r)),
         ].filter(p => this.missionPickupOk(p));
 
-        // Pre-filter to topN by raw reward when carrying capacity is finite.
-        // This is a cheap O(n log n) screen; the full A*-based scoring runs next.
-        // N = CARRYING_CAPACITY matches the user requirement "topN where N = agent.capacity".
+        // Cheap O(n log n) pre-filter to topN by raw reward (N = capacity) before the
+        // full A*-based scoring below.
         if (Number.isFinite(CARRYING_CAPACITY) && allFree.length > CARRYING_CAPACITY) {
             allFree = allFree
                 .sort((a, b) => b.reward - a.reward)
@@ -38,12 +36,10 @@ export class StrategyMemory extends StrategyGreedy {
         }
 
         if (carrying.length > 0) {
-            // Multi-pickup candidates from full pool — no OBSERVATION_DISTANCE cap.
-            // pickupValue() naturally penalises far parcels through the decay term;
-            // an artificial distance filter would exclude the remembered parcels we
-            // specifically want to pursue. maxBundleValue missions skip multi-pickup
-            // entirely (single-parcel bundles); a mandated requiredStackSize relaxes
-            // the value gate (the stack must be filled even at marginal value).
+            // Multi-pickup candidates from the full pool (no distance cap — pickupValue
+            // already penalises far parcels via decay, and a cap would exclude the
+            // remembered parcels we want). maxBundleValue → no multi-pickup; a mandated
+            // requiredStackSize relaxes the value gate.
             const worthwhile = this.singleParcelBundles() ? [] : allFree
                 .filter(p => this.isReachable(p) && this.inSafe(p))
                 .map(p => ({ p, value: this.pickupValue(p) }))
@@ -59,8 +55,8 @@ export class StrategyMemory extends StrategyGreedy {
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
-            // Stack mission not yet complete and no parcel in sight worth grabbing:
-            // keep accumulating (explore towards spawners) instead of delivering early.
+            // Stack mission incomplete and nothing worth grabbing: keep accumulating
+            // (explore toward spawners) instead of delivering early.
             if (!this.stackReady(carrying)) {
                 log(`stack incomplete (${carrying.length} carried) — hunting more parcels`);
                 return this.exploreIfIdle(currentIntent);
@@ -93,14 +89,14 @@ export class StrategyMemory extends StrategyGreedy {
     }
 
     /**
-     * Hysteresis for pickup commitment, extended to cover remembered targets.
-     * The base shouldKeepCurrentPickup() calls parcels.get(curId) only — it returns
-     * undefined for a remembered parcel, losing the SWITCH_MARGIN protection.
+     * Pickup-commitment hysteresis extended to remembered targets. The base
+     * shouldKeepCurrentPickup() queries only parcels.get(curId), returning undefined
+     * for a remembered parcel and losing the SWITCH_MARGIN protection.
      */
     #shouldKeepWithMemory(currentIntent, candidate) {
         if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
         const curId = currentIntent[3];
-        // Check live map first, then memory — mirrors the #isValid() pattern.
+        // Live map first, then memory — mirrors #isValid().
         const cur = parcels.get(curId) ?? parcels.getRemembered(curId);
         if (!cur || cur.carriedBy) return false;
         if (!this.isReachable(cur)) return false;

@@ -8,7 +8,7 @@ const log = createLogger('hurry');
 
 /**
  * @class StrategyHurry
- * Spawner-dense map strategy: persistent frontier sweep with visited set
+ * Spawner-dense maps: persistent frontier sweep with a visited set.
  */
 export class StrategyHurry extends StrategyGreedy {
     /** @type {number} Re-deliberation interval for stall detection */
@@ -17,17 +17,17 @@ export class StrategyHurry extends StrategyGreedy {
     /** @type {AntiLockExplorer} Commit/stall/blacklist/movement bookkeeping */
     #explorer = new AntiLockExplorer();
 
-    /** @type {Set<string>} "x_y" of spawners observed this sweep (persistent coverage memory) */
+    /** @type {Set<string>} "x_y" of spawners observed this sweep (coverage memory) */
     #visited     = new Set();
 
     /**
-     * Persistent frontier sweep: keep heading to the nearest unobserved spawner,
-     * with stall detection and a coverage-memory visited set
+     * Persistent frontier sweep to the nearest unobserved spawner, with stall
+     * detection and a coverage-memory visited set
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
      */
     exploreIfIdle(currentIntent) {
-        // A pickup/deliver currently running takes priority — let it finish.
+        // A running pickup/deliver takes priority — let it finish.
         if (currentIntent && (currentIntent[0] === 'go_pick_up' || currentIntent[0] === 'go_deliver')) {
             return null;
         }
@@ -46,8 +46,8 @@ export class StrategyHurry extends StrategyGreedy {
         // Expire stall-blacklist entries.
         this.#explorer.pruneBlacklist(now);
 
-        // Stay committed to the current frontier target until it's been observed
-        // (entered sensing), unless we've stalled (blocked) or timed out.
+        // Stay committed to the frontier target until it's observed (entered
+        // sensing), unless stalled or timed out.
         if (currentIntent && currentIntent[0] === 'go_explore') {
             const [, tx, ty] = currentIntent;
             const key = `${tx}_${ty}`;
@@ -66,11 +66,10 @@ export class StrategyHurry extends StrategyGreedy {
             this.#explorer.clearCommit();
         }
 
-        // Pick the nearest spawner not yet observed this sweep (skip blacklisted /
-        // our tile). Reachability is NOT checked per tile here — doing an A* search
-        // for each of the 895+ spawner tiles on a large map blocks the event loop
-        // for ~15 seconds and breaks navigation. Unreachable targets are handled by
-        // the stall detector (gives up after EXPLORE_STALL_MS and blacklists the tile).
+        // Nearest spawner not yet observed this sweep (skip blacklisted / our tile).
+        // Reachability is NOT checked per tile — an A* per spawner on a large map
+        // blocks the event loop for ~15s. Unreachable targets are handled by the
+        // stall detector (gives up after EXPLORE_STALL_MS and blacklists the tile).
         const pool = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
         const here = `${px}_${py}`;
         let candidates = pool.filter(t => {
@@ -92,9 +91,8 @@ export class StrategyHurry extends StrategyGreedy {
         const safe = candidates.filter(t => this.inSafe(t));
         if (safe.length > 0) candidates = safe;
 
-        // Sort by Manhattan distance (O(1) per comparison) rather than A* path length.
-        // Exact path cost is unnecessary here — closest unvisited tile is a good enough
-        // heuristic, and avoids the O(n²·A*) cost that stalls the event loop.
+        // Sort by Manhattan distance, not A* — closest-unvisited is good enough here
+        // and avoids the O(n²·A*) cost that stalls the event loop.
         const target = [...candidates].sort((a, b) => distance(me, a) - distance(me, b))[0];
         if (target) {
             this.#explorer.recommit(`${target.x}_${target.y}`, now);

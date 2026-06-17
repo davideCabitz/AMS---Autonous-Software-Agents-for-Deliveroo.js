@@ -8,17 +8,17 @@ const log = createLogger('blind');
 
 /**
  * @class StrategyBlind
- * Strategy for zero-sensing maps with anti-lock exploration and stall detection
+ * Zero-sensing maps: anti-lock exploration with stall detection.
  */
 export class StrategyBlind extends Strategy {
-    /** @type {number} Re-deliberation interval for blind agents (no sensing events) */
+    /** @type {number} Re-deliberation interval (no sensing events) */
     tickIntervalMs = 100;
 
     /** @type {AntiLockExplorer} Commit/stall/blacklist/movement bookkeeping */
     #explorer = new AntiLockExplorer();
 
     /**
-     * Decide next intention with anti-lock exploration
+     * Decide the next intention with anti-lock exploration
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
@@ -31,10 +31,8 @@ export class StrategyBlind extends Strategy {
 
         // ── Grab what we step on, then deliver ──────────────────────────────
         // Blind agents sense parcels only on their own tile, so pickup is purely
-        // opportunistic. Grab a parcel under us if it's worth carrying (cost
-        // heuristic at distance 0 = reward minus decay over the trip to the
-        // nearest known delivery) — even while already carrying, since sightings
-        // are scarce. Both branches reset the explore commitment.
+        // opportunistic — grab a worthwhile parcel under us even while carrying,
+        // since sightings are scarce. Both branches reset the explore commitment.
         const onTileParcel = parcels.free()
             .filter(p => distance(me, p) === 0)
             .filter(p => this.missionPickupOk(p))
@@ -56,16 +54,15 @@ export class StrategyBlind extends Strategy {
             }
         }
 
-        // While heading to a target we haven't reached yet, stay committed unless
-        // we've timed out or stalled.
+        // While heading to an unreached target, stay committed unless timed out or stalled.
         if (currentIntent && currentIntent[0] === 'go_explore') {
             const [, tx, ty] = currentIntent;
             const key      = `${tx}_${ty}`;
             const reached  = distance(me, { x: tx, y: ty }) === 0;
 
             if (reached) {
-                // Arrived: blacklist briefly so exploration fans out across the map
-                // instead of ping-ponging between the two closest spawners.
+                // Arrived: blacklist briefly so exploration fans out instead of
+                // ping-ponging between the two closest spawners.
                 this.#explorer.blacklist(key, now);
                 this.#explorer.clearCommit();
             } else {

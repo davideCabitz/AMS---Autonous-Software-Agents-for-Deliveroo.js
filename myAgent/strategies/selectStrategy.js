@@ -22,27 +22,27 @@ export { StrategySimple }       from './StrategySimple.js';
 export { StrategyNotTooGreedy } from './StrategyNotTooGreedy.js';
 export { StrategyGreedy, StrategyBlind, StrategyHurry, StrategyMemory, StrategyLookAhead };
 
-/** @type {number} Fraction of walkable tiles that must be spawners to trigger StrategyHurry */
+/** @type {number} Spawner fraction of walkable tiles that triggers StrategyHurry */
 const HURRY_SPAWNER_RATIO = 0.5;
 
-/** @type {number} Carrying capacity above which the farm-then-bank StrategyHighCapacity is used */
+/** @type {number} Capacity above which farm-then-bank StrategyHighCapacity is used */
 const HIGH_CAPACITY_MIN = 5;
 
-/** @type {number} Maximum parcel generation interval (ms) for StrategyHighCapacityRush */
+/** @type {number} Max parcel generation interval (ms) for StrategyHighCapacityRush */
 const RUSH_MAX_GENERATION_MS = 1000;
 
-/** @type {number} Minimum parcels-max population cap for StrategyHighCapacityRush */
+/** @type {number} Min population cap for StrategyHighCapacityRush */
 const RUSH_MIN_PARCELS_MAX   = 15;
 
-/** @type {number} Minimum spawner tiles in the largest group to justify StrategyHighCapacityRush */
+/** @type {number} Min largest-group size to justify StrategyHighCapacityRush */
 const RUSH_MIN_GROUP_SIZE = 5;
 
-/** @type {number} Minimum spawner tiles in the largest group to justify StrategyHighCapacity */
+/** @type {number} Min largest-group size to justify StrategyHighCapacity */
 const HC_MIN_GROUP_SIZE   = 3;
 
 /**
- * Select the best strategy based on game map properties and server configuration
- * @returns {import('./Strategy.js').Strategy} Instantiated strategy appropriate for the current map
+ * Select the best strategy for the current map and server configuration
+ * @returns {import('./Strategy.js').Strategy} Instantiated strategy
  */
 export function selectStrategy() {
     const blind = OBSERVATION_DISTANCE >= -1 && OBSERVATION_DISTANCE <= 1;
@@ -72,11 +72,9 @@ export function selectStrategy() {
     const groups       = buildSpawnerGroups(spawnerTiles, walkableSet, 2);
     const maxGroupSize = groups.reduce((m, g) => Math.max(m, g.length), 0);
 
-    // Abundance maps: high capacity (incl. infinite) + fast spawning + high
-    // population cap → fill the hold completely, then deliver in a straight
-    // line (no detours, no early banking). Infinite capacity banks at 10.
-    // Only worthwhile when there is a dense group to farm (≥ RUSH_MIN_GROUP_SIZE);
-    // sparse groups can't fill the hold and the agent just idles at one cluster.
+    // Abundance maps: high capacity + fast spawning + high population cap → fill the
+    // hold, then deliver straight (no detours/early banking). Infinite capacity banks
+    // at 10. Only worthwhile with a dense group to farm (≥ RUSH_MIN_GROUP_SIZE).
     if (CARRYING_CAPACITY > HIGH_CAPACITY_MIN
             && PARCEL_GENERATION_MS <= RUSH_MAX_GENERATION_MS
             && PARCELS_MAX >= RUSH_MIN_PARCELS_MAX
@@ -85,32 +83,28 @@ export function selectStrategy() {
         return new StrategyHighCapacityRush();
     }
 
-    // High-capacity maps: farm the richest spawner cluster, bank in bulk.
-    // Takes precedence over stochastic exploration — with a big hold, staying
-    // on the densest group beats spreading visits across many groups.
-    // Skip when all groups are very small (< HC_MIN_GROUP_SIZE): HighCapacity's
-    // farm loop stalls immediately and hopping/stochastic exploration is better.
+    // High-capacity maps: farm the richest cluster, bank in bulk. Precedes
+    // stochastic exploration — with a big hold, camping the densest group beats
+    // spreading visits. Skip when all groups are tiny (< HC_MIN_GROUP_SIZE): the
+    // farm loop stalls and hopping/stochastic is better.
     if (Number.isFinite(CARRYING_CAPACITY) && CARRYING_CAPACITY > HIGH_CAPACITY_MIN
             && maxGroupSize >= HC_MIN_GROUP_SIZE) {
         log(`capacity=${CARRYING_CAPACITY} > ${HIGH_CAPACITY_MIN} maxGroup=${maxGroupSize} → StrategyHighCapacity`);
         return new StrategyHighCapacity();
     }
 
-    // Comb / hallway topology: many regularly-spaced spawner "teeth" along a
-    // spine corridor. Each tooth is its own group, so the stochastic gate below
-    // would fire — but on a linear layout random group sampling wastes movement.
-    // A deterministic nearest-next sweep (StrategyLookAhead) covers the teeth in
-    // spatial order instead. Checked here so it only ever diverts the would-be
-    // stochastic case; Blind/Hurry/HighCapacity above keep precedence.
+    // Comb / hallway topology: regularly-spaced spawner "teeth" along a spine. Each
+    // tooth is its own group, so the stochastic gate below would fire — but on a
+    // linear layout random sampling wastes movement. A deterministic nearest-next
+    // sweep (LookAhead) covers the teeth in order. Only diverts the stochastic case.
     const topo = detectCombTopology(spawnerTiles, walkableTiles, groups);
     if (topo.isComb) {
         log(`comb topology (${topo.axis}: ${topo.reason}) → StrategyLookAhead`);
         return new StrategyLookAhead();
     }
 
-    // Probabilistic group-based exploration: worthwhile only when the map has
-    // enough distinct spatial groups. With < 3 groups the weighted sampler gives
-    // no real diversity gain over the deterministic _prevExploreKey mechanism.
+    // Probabilistic group exploration: only worthwhile with ≥ 3 distinct groups.
+    // Fewer than that gives no diversity gain over the deterministic _prevExploreKey.
     if (groups.length >= 3) {
         log(`${groups.length} groups → StrategyLookAheadStochastic`);
         return new StrategyLookAheadStochastic();

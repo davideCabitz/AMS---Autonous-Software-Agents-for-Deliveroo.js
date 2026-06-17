@@ -15,56 +15,43 @@ const pathlenLog  = createLogger('pathlen');
 const contestLog  = createLogger('contest');
 
 export const MIN_DELIVERY_REWARD = 5;
-// Max extra tiles tolerated when choosing an alternative to the excluded spawner.
-// If every alternative is farther than (prevLen + margin), the exclusion is skipped
-// so the agent doesn't waste time crossing the map to avoid a nearby tile.
+// Max extra tiles tolerated for an alternative to the excluded spawner; beyond
+// (prevLen + margin) the exclusion is skipped so the agent doesn't cross the map.
 const EXPLORE_NEARBY_MARGIN = 4;
-// Gate for adding a second parcel while already carrying: trigger whenever
-// multi-pickup strictly beats bank-first. Intentionally lower than
-// MIN_DELIVERY_REWARD (which filters out near-worthless empty-hand pickups)
-// because here we're comparing two delivery trips, not pickup vs. nothing.
+// Gate for a second parcel while carrying: trigger whenever multi-pickup beats
+// bank-first. Lower than MIN_DELIVERY_REWARD because this compares two delivery
+// trips, not pickup vs. nothing.
 export const MULTI_PICKUP_MIN = 0;
-// A different pickup must beat the CURRENT target's value by at least this much to
-// justify abandoning the in-progress trip. Without it, parcels crossing in/out of
-// the worthwhile set each tick (decay/distance/sensing shifts) make the agent
-// flip between "pick up" and "deliver" every tick → physical back-and-forth.
+// A different pickup must beat the CURRENT target by this much to abandon the trip.
+// Without it, parcels crossing in/out of the worthwhile set each tick make the agent
+// flip between pick-up and deliver (physical back-and-forth).
 export const SWITCH_MARGIN = 5;
 
 // ─── competitor-awareness (Phase 1) ──────────────────────────────────────────
-// contestFactor discounts a parcel's value by an estimated win-probability vs.
-// the nearest competitor racing us to it. Probabilistic, never a hard exclude: a
-// misread competitor self-corrects next tick.
+// contestFactor discounts a parcel's value by an estimated win-probability vs. the
+// nearest competitor. Probabilistic, never a hard exclude (a misread self-corrects).
 //   delta = theirDist − ourDist  (positive ⇒ we're closer)
-// CONTEST_K     — tiles of lead that decide the win-probability (delta ≥ +K ⇒ 1,
-//                 delta ≤ −K ⇒ floor, delta = 0 ⇒ ~0.5).
-// CONTEST_FLOOR — minimum multiplier; a contested parcel is DEPRIORITIZED, never
-//                 inverted (keeps value ≥ 0 so it can't fight MIN_DELIVERY_REWARD /
-//                 bankFirst gates illogically).
-// CONTEST_DEADBAND — |delta| within this counts as a clean tie, so 1-tile
-//                 competitor jitter can't swing the score and re-introduce the
-//                 flip-flop that SWITCH_MARGIN exists to prevent.
+// CONTEST_K        — lead in tiles deciding win-probability (≥+K ⇒ 1, ≤−K ⇒ floor).
+// CONTEST_FLOOR    — min multiplier; a contested parcel is deprioritized, never < 0.
+// CONTEST_DEADBAND — |delta| within this is a tie, so 1-tile jitter can't swing it.
 const CONTEST_K        = 3;
 const CONTEST_FLOOR    = 0.15;
 const CONTEST_DEADBAND = 1;
-// Case 6: additive path-length penalty for an explore/wait spawner that already has
-// a sensed agent on/adjacent to it, so we don't camp a spawner a competitor owns.
-// Additive (not a filter) — a camped spawner is still chosen if it's the only
-// reachable one. Sized like EXPLORE_NEARBY_MARGIN: enough to lose a near-tie, not
-// enough to send us across the map.
+// Case 6: additive penalty for an explore/wait spawner with a sensed agent on/next
+// to it, so we don't camp a competitor's spawner. Additive (still chosen if it's the
+// only reachable one); sized like EXPLORE_NEARBY_MARGIN.
 const SPAWNER_CAMP_PENALTY = EXPLORE_NEARBY_MARGIN;
 
 // ─── remembered-parcel pursuit cap ────────────────────────────────────────────
-// A remembered (out-of-sensing) parcel is abandoned once it is more than this many
-// A* tiles from the agent's CURRENT position: chasing it back across the map (e.g.
-// a forced directional-tile loop) costs more than it's worth. The absolute tile cap
-// is the load-bearing gate on low/no-decay maps, where decayRate≈0 makes pickupValue's
-// distance term vanish and a far parcel looks as good as a near one.
+// Abandon a remembered parcel beyond this many A* tiles from CURRENT position. This
+// absolute cap is load-bearing on low/no-decay maps, where decayRate≈0 makes a far
+// parcel look as good as a near one.
 const MAX_REMEMBERED_DETOUR_TILES   = 20;
-const REMEMBERED_MAX_DECAY_FRACTION = 0.5;  // also abandon if decay would eat >50% of its reward
+const REMEMBERED_MAX_DECAY_FRACTION = 0.5;  // also abandon if decay would eat >50% of reward
 
 /**
  * @class Strategy
- * Base class for parcel delivery strategies (pure decision-makers)
+ * Base class for parcel-delivery strategies (pure decision-makers).
  */
 export class Strategy {
     /** @type {string|null} Key "x_y" of current go_explore target */
@@ -76,24 +63,21 @@ export class Strategy {
     /** @type {Set<string>|null} Spawner keys to exclude from next exploration (idle group patrol) */
     _idleExcludeKeys = null;
 
-    /** @type {number} Milliseconds between re-deliberation ticks (0 = event-driven only) */
+    /** @type {number} Ms between re-deliberation ticks (0 = event-driven only) */
     tickIntervalMs = 0;
 
     /**
      * Decide the next intention to push given the current one
-     * @param {Array|null} _currentIntent - Current intention predicate (e.g., ['go_deliver', x, y])
-     * @returns {Array|null} Predicate to push, or null to keep current intention
+     * @param {Array|null} _currentIntent - Current intention predicate (e.g. ['go_deliver', x, y])
+     * @returns {Array|null} Predicate to push, or null to keep the current intention
      */
     decide(_currentIntent) { return null; }
 
     // ─── shared helpers ──────────────────────────────────────────────────────
 
     /**
-     * Delivery tiles after applying the allowedDeliveryTiles mission constraint.
-     * Filters to constraint-approved tiles when the constraint is active, falling
-     * back to the full pool if the filter would empty it. With no such mission the
-     * input is returned unchanged. Centralises the filter block that was previously
-     * pasted at every delivery-tile selection site.
+     * Delivery tiles under the allowedDeliveryTiles constraint (full pool if the
+     * filter would empty it, or no such mission)
      * @param {Array<{x: number, y: number}>} tiles - Pool to filter (default: all delivery tiles)
      * @returns {Array<{x: number, y: number}>} Allowed delivery tiles
      */
@@ -106,9 +90,8 @@ export class Strategy {
     }
 
     /**
-     * Spawner tiles after applying the allowedSpawnerTiles mission constraint.
-     * Same fall-back-if-empty semantics as _allowedDeliveryPool. Centralises the
-     * filter block pasted across the group-building strategies.
+     * Spawner tiles under the allowedSpawnerTiles constraint (same fall-back-if-empty
+     * semantics as _allowedDeliveryPool)
      * @param {Array<{x: number, y: number}>} tiles - Pool to filter (default: all spawner tiles)
      * @returns {Array<{x: number, y: number}>} Allowed spawner tiles
      */
@@ -121,9 +104,9 @@ export class Strategy {
     }
 
     /**
-     * Get delivery reward multiplier at tile (from mission config)
+     * Delivery reward multiplier at a tile (from mission config)
      * @param {{x: number, y: number}} tile - Tile position
-     * @returns {number} Multiplier (1 = no scaling, or mission multiplier)
+     * @returns {number} Multiplier (1 = no scaling)
      */
     deliveryScale(tile) {
         return missionConstraints.deliveryMultipliers
@@ -131,22 +114,21 @@ export class Strategy {
     }
 
     /**
-     * Find nearest A*-reachable delivery tile
-     * @param {{x: number, y: number}} from - Starting position (default: agent position)
-     * @returns {{x: number, y: number}|undefined} Nearest reachable delivery, or undefined if none
+     * Nearest A*-reachable delivery tile
+     * @param {{x: number, y: number}} from - Start (default: agent position)
+     * @returns {{x: number, y: number}|undefined} Nearest reachable delivery, or undefined
      */
     nearestDelivery(from = me) {
         const tiles = this._allowedDeliveryPool();
         return [...tiles]
             .map(d => ({ d, len: this.pathLen(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
-            // Prefer higher reward multiplier, then nearer. With no multiplier
-            // mission every scale is 1 ⇒ the first term is 0 ⇒ pure nearest (unchanged).
+            // Higher multiplier, then nearer. No multiplier mission ⇒ pure nearest.
             .sort((a, b) => (this.deliveryScale(b.d) - this.deliveryScale(a.d)) || (a.len - b.len))[0]?.d;
     }
 
     /**
-     * Check if tile is in sustainable pick-up→deliver region (trap-avoidance)
+     * Whether a tile is in the sustainable pickup→deliver region (trap-avoidance)
      * @param {{x: number, y: number}} tile - Tile to check
      * @returns {boolean}
      */
@@ -155,10 +137,10 @@ export class Strategy {
     }
 
     /**
-     * Effective cost of delivering at tile (path + congestion penalty)
-     * @param {{x: number, y: number}} from - Starting position
+     * Effective cost of delivering at a tile (path + congestion penalty)
+     * @param {{x: number, y: number}} from - Start position
      * @param {{x: number, y: number}} d - Delivery tile
-     * @returns {number} Cost in tiles (path + penalty for nearby agents)
+     * @returns {number} Cost in tiles (path + nearby-agent penalty)
      */
     deliveryCost(from, d) {
         const base = this.pathLen(from, d);
@@ -169,8 +151,8 @@ export class Strategy {
     }
 
     /**
-     * Find nearest delivery in sustainable loop, with trap-avoidance logic
-     * @param {{x: number, y: number}} from - Starting position (default: agent position)
+     * Nearest delivery in the sustainable loop, with trap-avoidance
+     * @param {{x: number, y: number}} from - Start (default: agent position)
      * @returns {{x: number, y: number}|undefined} Delivery tile, or undefined if all unreachable
      */
     nearestEscapableDelivery(from = me) {
@@ -178,8 +160,7 @@ export class Strategy {
         const reachable = [...tiles]
             .map(d => ({ d, len: this.deliveryCost(from, d) }))
             .filter(({ len }) => Number.isFinite(len))
-            // Multiplier-priority then nearest (no-op without a deliveryMultipliers
-            // mission); a 0× tile sorts last and is taken only as a fallback below.
+            // Multiplier-priority then nearest; a 0× tile sorts last (fallback only).
             .sort((a, b) => (this.deliveryScale(b.d) - this.deliveryScale(a.d)) || (a.len - b.len));
         if (crateTiles.length > 0)
             deliveryLog(`candidates from (${Math.round(from.x)},${Math.round(from.y)}): `
@@ -188,16 +169,12 @@ export class Strategy {
         const usable = reachable.filter(({ d }) => usableDeliverySet.has(`${d.x}_${d.y}`));
         if (usable.length > 0) return this._pickDelivery(usable).d; // safe zone reachable now
 
-        // No SAFE (usable) zone reachable right now — every reachable zone is a trap.
-        // Before diving into one, distinguish WHY the safe zones are unreachable:
-        //   • structurally one-way (a real dead-end map)  → must use the trap,
-        //   • or just a competitor standing in the corridor (transient)  → WAIT.
-        // findRoute treats agents as walls, so an agent-blocked safe zone looks
-        // identical to a walled-off one; reachableIgnoringAgents asks the static
-        // question. If a usable zone is structurally reachable but blocked now, hold
-        // the load (return undefined → the strategies' "no reachable delivery →
-        // reposition/idle" branch) and retry next tick instead of entering a trap we
-        // can't escape. Only fall back to the trap when NO usable zone exists at all.
+        // No safe zone reachable — every reachable zone is a trap. Distinguish WHY:
+        // structurally one-way (must use the trap) vs. a competitor blocking the
+        // corridor (transient → WAIT). findRoute treats agents as walls;
+        // reachableIgnoringAgents asks the static question. If a usable zone is
+        // structurally reachable but blocked now, hold the load (return undefined) and
+        // retry. Only fall back to the trap when NO usable zone exists at all.
         const tiles2 = this._allowedDeliveryPool();
         const safeBlocked = tiles2.some(d =>
             usableDeliverySet.has(`${d.x}_${d.y}`) && reachableIgnoringAgents(from, d));
@@ -209,15 +186,12 @@ export class Strategy {
     }
 
     // ─── deliveryMultipliers (Level-2 bonus-tile missions) ───────────────────
-    // "Deliver in (x,y) for 5× pts" makes some delivery tiles worth more. The
-    // multiplier scales the banked reward at that tile, so the agent both ROUTES
-    // deliveries to the bonus tile (nearestEscapableDelivery → _pickDelivery) and
-    // VALUES its carried load higher when a bonus tile is reachable (the value
-    // functions). With no such mission every tile is ×1, so all of this collapses
-    // to the historical nearest-tile behaviour exactly.
+    // "Deliver in (x,y) for 5× pts" makes some tiles worth more. The multiplier both
+    // ROUTES deliveries to the bonus tile and VALUES the carried load higher when one
+    // is reachable. No mission ⇒ every tile is ×1 ⇒ historical nearest-tile behaviour.
 
     /**
-     * Get delivery multiplier at tile
+     * Delivery multiplier at a tile
      * @param {{x: number, y: number}} tile - Tile position
      * @returns {number} Multiplier (1 = no mission scaling)
      */
@@ -228,10 +202,10 @@ export class Strategy {
     }
 
     /**
-     * Best delivery tile for carrying load R over n parcels (considers multipliers)
-     * @param {{x: number, y: number}} from - Starting position
-     * @param {number} R - Total reward of load
-     * @param {number} n - Number of parcels in load
+     * Best delivery tile for load R over n parcels (multiplier-aware)
+     * @param {{x: number, y: number}} from - Start position
+     * @param {number} R - Total load reward
+     * @param {number} n - Parcels in load
      * @returns {{d: {x: number, y: number}, len: number}|undefined} Best delivery and path cost
      */
     _bestDelivery(from, R, n) {
@@ -245,11 +219,11 @@ export class Strategy {
         const rho = this.decayRate();
         return reachable
             .map(o => ({ ...o, v: R * this.deliveryMultiplierAt(o.d) - n * rho * o.len }))
-            .sort((a, b) => (b.v - a.v) || (a.len - b.len))[0]; // ties → the nearer tile
+            .sort((a, b) => (b.v - a.v) || (a.len - b.len))[0]; // ties → nearer tile
     }
 
     /**
-     * Pick best delivery from reachable pool (considering multipliers and load value)
+     * Best delivery from a reachable pool (multiplier- and load-value-aware)
      * @param {Array<{d: {x: number, y: number}, len: number}>} pool - Reachable deliveries
      * @returns {{d: {x: number, y: number}, len: number}}
      */
@@ -264,24 +238,17 @@ export class Strategy {
     }
 
     /**
-     * Check if the current delivery target should be kept or replaced.
+     * Whether to keep the current delivery target.
      *
-     * BINARY COMMITMENT (restored from commit 561fec2): once committed to a delivery
-     * zone, keep heading there as long as it is still REACHABLE — recompute only when
-     * agents/crates fully wall it off. We do NOT reconsider on a cost margin.
-     *
-     * Why not the competitor-aware comparative version (MULTI_AGENT_AWARENESS.md
-     * Case 2): comparing deliveryCost(cur) vs deliveryCost(alt) on a SWITCH_MARGIN is
-     * unstable. Both costs vary continuously with the agent's sub-tile position and
-     * with which competitors are sensed/pruned each tick, so the `Δ > margin` test
-     * flips sign tick-to-tick. Each flip emits a different go_deliver that preempts
-     * the running plan ('stopped'), and the agent shuffles in place without
-     * delivering. isReachable is a STABLE predicate (true unless structurally walled),
-     * so it can't oscillate. Case 2's doorway-rerouting is intentionally dropped in
-     * favour of never ping-ponging; see MULTI_AGENT_AWARENESS.md.
+     * BINARY COMMITMENT: once committed to a delivery zone, keep heading there while
+     * it stays REACHABLE — recompute only when fully walled off, never on a cost
+     * margin. A comparative deliveryCost(cur) vs deliveryCost(alt) test on SWITCH_MARGIN
+     * is unstable (both costs vary with sub-tile position and sensed competitors each
+     * tick), so it flips sign and the agent shuffles without delivering. isReachable is
+     * stable. See MULTI_AGENT_AWARENESS.md (Case 2 doorway-rerouting dropped on purpose).
      *
      * @param {Array|null} currentIntent - Current intention predicate
-     * @returns {boolean} True to keep current delivery target
+     * @returns {boolean} True to keep the current delivery target
      */
     betterDelivery(currentIntent) {
         if (currentIntent?.[0] !== 'go_deliver') return false;
@@ -289,7 +256,7 @@ export class Strategy {
     }
 
     /**
-     * Simple reward-per-distance score (used by StrategySimple only)
+     * Simple reward-per-distance score (StrategySimple only)
      * @param {Object} parcel - Parcel object
      * @returns {number} Score
      */
@@ -298,7 +265,7 @@ export class Strategy {
     }
 
     /**
-     * Check if agent has reached carrying capacity
+     * Whether the agent is at carrying capacity
      * @returns {boolean}
      */
     atCapacity() {
@@ -306,12 +273,11 @@ export class Strategy {
     }
 
     // ─── mission-constraint gates (Level-2 persistent missions) ──────────────
-    // Shared here so EVERY strategy enforces them — previously only Greedy/Blind
-    // filtered maxParcelReward and only Greedy gated requiredStackSize, so the
-    // default LookAhead/Memory strategies silently ignored those missions.
+    // Shared here so EVERY strategy enforces them (previously only Greedy/Blind
+    // filtered maxParcelReward, only Greedy gated requiredStackSize).
 
     /**
-     * Check if mission constraints allow picking up this parcel
+     * Whether mission constraints allow picking up this parcel
      * @param {Object} parcel - Parcel to check
      * @returns {boolean}
      */
@@ -320,8 +286,8 @@ export class Strategy {
             && parcel.reward > missionConstraints.maxParcelReward) return false;
         if (missionConstraints.maxBundleValue != null
             && parcel.reward > missionConstraints.maxBundleValue) return false;
-        // "= T" missions: never let the running total exceed T. Reject a parcel that
-        // alone overshoots, or that would push the bundle we're already carrying past T.
+        // "= T": never exceed T. Reject a parcel that overshoots alone or pushes the
+        // carried bundle past T.
         if (missionConstraints.exactBundleValue != null) {
             const carriedTotal = parcels.carriedBy(me.id).reduce((s, p) => s + p.reward, 0);
             if (carriedTotal + parcel.reward > missionConstraints.exactBundleValue) return false;
@@ -330,8 +296,8 @@ export class Strategy {
     }
 
     /**
-     * Check if parcel count is forbidden for delivery
-     * @param {number} n - Number of parcels in stack
+     * Whether a parcel count is forbidden for delivery
+     * @param {number} n - Parcels in stack
      * @returns {boolean}
      */
     stackForbidden(n) {
@@ -341,7 +307,7 @@ export class Strategy {
     }
 
     /**
-     * Check if stack is ready for delivery (passes mission gates)
+     * Whether the stack is ready to deliver (passes mission gates)
      * @param {Array<Object>} carrying - Parcels currently carried
      * @returns {boolean}
      */
@@ -363,14 +329,14 @@ export class Strategy {
     }
 
     /**
-     * Check if agent must continue picking up (not yet full for mission)
+     * Whether the agent must keep picking up (not yet full for the mission)
      * @param {Array<Object>} carrying - Parcels currently carried
      * @returns {boolean}
      */
     mustStack(carrying) {
         if (this.stackForbidden(carrying.length)) return true;
         if (missionConstraints.exactBundleValue != null) {
-            // "= T": keep adding parcels until the bundle is worth exactly T.
+            // "= T": keep adding until the bundle is worth exactly T.
             const total = carrying.reduce((s, p) => s + p.reward, 0);
             if (total < missionConstraints.exactBundleValue) return true;
         }
@@ -383,7 +349,7 @@ export class Strategy {
     }
 
     /**
-     * Check if stack has reached mission cap (must deliver now)
+     * Whether the stack has hit the mission cap (must deliver now)
      * @param {Array<Object>} carrying - Parcels currently carried
      * @returns {boolean}
      */
@@ -394,7 +360,7 @@ export class Strategy {
     }
 
     /**
-     * Check if mission forces single-parcel deliveries
+     * Whether a mission forces single-parcel deliveries
      * @returns {boolean}
      */
     singleParcelBundles() {
@@ -403,15 +369,15 @@ export class Strategy {
     }
 
     /**
-     * Get parcel decay rate (reward lost per tile traveled)
-     * @returns {number} Decay per tile (measured from actual movement timing)
+     * Parcel decay rate (reward lost per tile travelled)
+     * @returns {number} Decay per tile (from measured movement timing)
      */
     decayRate() {
         return moveTiming.decayPerTile();
     }
 
     /**
-     * Get A*-path cost accounting for crate pushing
+     * A*-path cost, accounting for crate pushing
      * @param {{x: number, y: number}} from - Start position
      * @param {{x: number, y: number}} to - Goal position
      * @returns {number} Path cost in tiles (Infinity if unreachable)
@@ -427,18 +393,18 @@ export class Strategy {
         const crateSet = new Set(crateTiles.map(c => `${Math.round(c.x)}_${Math.round(c.y)}`));
         const crateBlocked = avoid ? new Set([...crateSet, ...avoid]) : crateSet;
 
-        // Crate-free path: accurate — what A* navigation can actually walk.
+        // Crate-free path: what A* navigation can actually walk.
         const freePath = findRoute(from, to, crateBlocked);
         if (freePath) return freePath.length;
 
-        // All routes blocked by crates — target needs PDDL. Push-aware cost.
+        // All routes crate-blocked — target needs PDDL. Push-aware cost.
         const cost = pushAwareCost(from, to, crateSet, avoid);
         pathlenLog(`(${Math.round(from.x)},${Math.round(from.y)})→(${Math.round(to.x)},${Math.round(to.y)}) push-aware cost=${cost}`);
         return cost;
     }
 
     /**
-     * Check if position is currently reachable via A*
+     * Whether a position is currently A*-reachable
      * @param {{x: number, y: number}} to - Position to check
      * @returns {boolean}
      */
@@ -447,7 +413,7 @@ export class Strategy {
     }
 
     /**
-     * Check if current pickup target should be kept
+     * Whether to keep the current pickup target
      * @param {Array|null} currentIntent - Current intention predicate
      * @param {{p: Object, value: number}|undefined} candidate - Best new pickup option
      * @returns {boolean}
@@ -456,16 +422,16 @@ export class Strategy {
         if (!currentIntent || currentIntent[0] !== 'go_pick_up') return false;
         const curId = currentIntent[3];
         const cur   = parcels.get(curId);
-        // Drop the current target if its parcel is gone, taken, or now unreachable.
+        // Drop if the parcel is gone, taken, or unreachable.
         if (!cur || cur.carriedBy || !this.isReachable(cur)) return false;
         // No alternative, or candidate IS the current target → keep going.
         if (!candidate || candidate.p.id === curId) return true;
-        // Keep unless the candidate beats the current target's value by the margin.
+        // Keep unless the candidate beats the current value by the margin.
         return candidate.value - this.pickupValue(cur) < SWITCH_MARGIN;
     }
 
     /**
-     * Value of delivering current load immediately
+     * Value of delivering the current load immediately
      * @returns {number} Value in reward units (0 when carrying nothing)
      */
     bankNowValue() {
@@ -475,7 +441,7 @@ export class Strategy {
         const R   = carried.reduce((sum, p) => sum + p.reward, 0);
         const del = this.nearestDelivery(me);
         const d0  = del ? this.pathLen(me, del) : Infinity;
-        // Reward is scaled by the chosen delivery tile's multiplier (1× by default).
+        // Scale by the chosen tile's multiplier (1× by default).
         const scale = del ? this.deliveryScale(del) : 1;
         return scale * R - n * this.decayRate() * d0;
     }
@@ -494,32 +460,31 @@ export class Strategy {
     }
 
     /**
-     * Check if agent should divert to one-shot bonus goal
+     * Whether to divert to the one-shot bonus goal
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} ['go_to', x, y] to divert, or null to continue
      */
     bonusDiversion(currentIntent) {
         const b = missionConstraints.oneShotBonus;
         if (!b) return null;
-        // Already there — arrival earns it; don't re-issue go_to and stall on-tile.
+        // Already there — arrival earns it; don't re-issue go_to and stall.
         if (Math.round(me.x) === b.x && Math.round(me.y) === b.y) return null;
         const net = this.bonusGoalValue();
         if (net == null) return null;                 // unreachable → ignore
-        // Compare against the best the agent would otherwise do this tick: bank the
-        // current load now (0 when empty-handed). A positive, margin-beating net
-        // means the literal bonus is worth more than continuing the parcel loop.
+        // Compare against banking the current load now (0 when empty-handed): a
+        // margin-beating net means the bonus beats continuing the parcel loop.
         const baseline = this.bankNowValue();
         if (net - baseline <= SWITCH_MARGIN) return null;
-        // Hysteresis: if we're already heading to the bonus tile, keep going.
+        // Hysteresis: already heading to the bonus tile → keep going.
         if (currentIntent?.[0] === 'go_to'
             && currentIntent[1] === b.x && currentIntent[2] === b.y) return null;
         return ['go_to', b.x, b.y];
     }
 
     /**
-     * Multiplier for parcel value based on competition intensity
+     * Value multiplier discounting a parcel by competition intensity
      * @param {Object} parcel - Parcel to evaluate
-     * @param {number} ourDist - Our distance to parcel (pre-computed)
+     * @param {number} ourDist - Our pre-computed distance to the parcel
      * @returns {number} Multiplier in [CONTEST_FLOOR, 1]
      */
     contestFactor(parcel, ourDist) {
@@ -527,25 +492,21 @@ export class Strategy {
         if (!Number.isFinite(their)) return 1;                 // no contender
         const our = Number.isFinite(ourDist) ? ourDist : this.pathLen(me, parcel);
         let delta = their - our;                               // >0 ⇒ we're closer
-        // Deadband: small leads count as ties so 1-tile jitter doesn't move score.
+        // Deadband: small leads are ties so 1-tile jitter doesn't move score.
         if (Math.abs(delta) <= CONTEST_DEADBAND) delta = 0;
-        // Quality softener: if the nearest agent isn't actually closing on the
-        // parcel, it's probably not racing us — soften the penalty it imposes.
+        // Softener: if the nearest agent isn't closing on the parcel, it's probably
+        // not racing — soften its penalty.
         const id = nearestAgentId(parcel);
         if (id && !isAgentMovingToward(id, parcel)) delta += CONTEST_K / 2;
-        // Discount ONLY when we're losing the race (delta < 0). If we're closer or
-        // tied (delta ≥ 0) we'll win it → factor 1, no haircut. This is the fix for
-        // "walked over a high-score parcel but skipped it": a parcel we're on top of
-        // (ourDist≈0) is a near-certain win and must keep its full value even with a
-        // competitor nearby. The penalty ramps in only as the competitor pulls ahead:
+        // Discount ONLY when losing (delta < 0); closer or tied ⇒ factor 1 (so a parcel
+        // we're standing on keeps full value). Ramps in as the competitor pulls ahead:
         //   delta ≥ 0 → 1 ;  delta = −K → floor ;  linear between.
         let factor = 1;
         if (delta < 0) {
             const t = Math.max(0, 1 + delta / CONTEST_K);     // delta∈[−K,0] → [0,1]
             factor = CONTEST_FLOOR + (1 - CONTEST_FLOOR) * t;  // [floor, 1)
         }
-        // Only logs when a competitor is actually in contention (their is finite),
-        // so the uncontested common case stays silent.
+        // Logs only when a competitor is in contention, so the common case stays silent.
         contestLog(`parcel ${parcel.id} @${parcel.x},${parcel.y}: theirDist=${their} `
             + `ourDist=${our} delta=${delta}${id && !isAgentMovingToward(id, parcel) ? ' (not-racing)' : ''} `
             + `factor=${factor.toFixed(3)}`);
@@ -553,9 +514,9 @@ export class Strategy {
     }
 
     /**
-     * Value of detouring to pick up and deliver a parcel
+     * Value of detouring to pick up and deliver a parcel (competition + decay aware)
      * @param {Object} parcel - Parcel to evaluate
-     * @returns {number} Value in reward units (accounts for competition and decay)
+     * @returns {number} Value in reward units
      */
     pickupValue(parcel) {
         const carried = parcels.carriedBy(me.id);
@@ -564,16 +525,15 @@ export class Strategy {
         const d1  = this.pathLen(me, parcel);
         const del = this.nearestDelivery(parcel);
         const d2  = del ? this.pathLen(parcel, del) : Infinity;
-        // The whole load is delivered at `del`, so scale its reward by that tile's
-        // multiplier (1× by default ⇒ unchanged).
+        // Whole load delivered at `del`, so scale by its multiplier (1× by default).
         const scale = del ? this.deliveryScale(del) : 1;
         return scale * (R + parcel.reward) * this.contestFactor(parcel, d1)
                - (n + 1) * this.decayRate() * (d1 + d2);
     }
 
     /**
-     * Check if a remembered (out-of-range) parcel is worth pursuing
-     * @param {Object} p - Remembered parcel (with pre-decayed reward)
+     * Whether a remembered (out-of-range) parcel is worth pursuing
+     * @param {Object} p - Remembered parcel (pre-decayed reward)
      * @returns {boolean}
      */
     rememberedWorthPursuing(p) {
@@ -586,7 +546,7 @@ export class Strategy {
     }
 
     /**
-     * Value of delivering first, then picking up parcel solo
+     * Value of delivering first, then picking up the parcel solo
      * @param {Object} parcel - Parcel to evaluate
      * @returns {number} Value in reward units (-Infinity when not carrying)
      */
@@ -601,8 +561,7 @@ export class Strategy {
         const d4   = del2 ? this.pathLen(parcel, del2) : Infinity;
         const n    = carried.length;
         const R    = carried.reduce((s, p) => s + p.reward, 0);
-        // Each leg is delivered at its own tile, so scale by that tile's multiplier
-        // (1× by default): the current load at `del`, the new parcel at `del2`.
+        // Each leg scaled by its tile's multiplier: current load at `del`, new at `del2`.
         const scale0 = this.deliveryScale(del);
         const scale2 = del2 ? this.deliveryScale(del2) : 1;
         const bankNow    = scale0 * R - n * this.decayRate() * d0;
@@ -611,7 +570,7 @@ export class Strategy {
     }
 
     /**
-     * Net gain of picking up vs delivering now
+     * Net gain of picking up vs. delivering now
      * @param {Object} parcel - Parcel to evaluate
      * @returns {number} Gain value
      */
@@ -620,9 +579,9 @@ export class Strategy {
     }
 
     /**
-     * Debug string showing parcel score breakdown
+     * Debug string of a parcel's score breakdown
      * @param {Object} parcel - Parcel to debug
-     * @returns {string} Human-readable score breakdown
+     * @returns {string} Human-readable breakdown
      */
     pickupDebug(parcel) {
         const carried = parcels.carriedBy(me.id);
@@ -640,7 +599,7 @@ export class Strategy {
     }
 
     /**
-     * Ranking cost for exploration target (path + camping penalty)
+     * Ranking cost for an exploration target (path + camping penalty)
      * @param {{x: number, y: number}} t - Target tile
      * @returns {number} Cost in tiles
      */
@@ -652,7 +611,7 @@ export class Strategy {
     }
 
     /**
-     * Generate exploration target when idle (no worthwhile parcel work)
+     * Exploration target when idle (no worthwhile parcel work)
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Exploration predicate, or null to stay idle
      */
@@ -660,15 +619,13 @@ export class Strategy {
         if (currentIntent) {
             const [intent, tx, ty] = currentIntent;
 
-            // A go_deliver that was already in flight when a requiredStackSize
-            // mission arrived must NOT run to completion with a short stack:
-            // fall through and pick an explore target that replaces it.
+            // A go_deliver in flight when a requiredStackSize mission arrives must NOT
+            // complete with a short stack — fall through and replace it with an explore.
             const prematureDelivery = intent === 'go_deliver'
                 && this.mustStack(parcels.carriedBy(me.id));
 
             if ((intent === 'go_pick_up' || intent === 'go_deliver') && !prematureDelivery) {
-                // Productive work started — reset explore history so the next
-                // exploration cycle has no stale exclusions.
+                // Productive work started — reset explore history (no stale exclusions).
                 this._lastExploreKey = null;
                 this._prevExploreKey = null;
                 return null;
@@ -682,13 +639,11 @@ export class Strategy {
         const needMoreParcels = missionConstraints.requiredStackSize != null
             && parcels.carriedBy(me.id).length < missionConstraints.requiredStackSize;
 
-        // Only consider tiles the agent can actually A*-reach (walls/crates/agents
-        // respected). Unreachable spawners are never targeted — that caused the
-        // repeated re-selection of an out-of-reach tile and the back-and-forth.
+        // Only A*-reachable tiles — targeting unreachable spawners caused repeated
+        // re-selection and back-and-forth.
         const rawPool = spawnerTiles.length > 0 ? spawnerTiles : walkableTiles;
-        // Apply spawner zone constraint: if active, restrict exploration targets to
-        // the allowed set (e.g. left-half spawners only). Fall back to the full pool
-        // if none of the allowed tiles happen to be reachable.
+        // Spawner zone constraint: restrict to the allowed set if active, falling
+        // back to the full pool if none are reachable.
         const zonedPool = (missionConstraints.allowedSpawnerTiles?.size > 0 && spawnerTiles.length > 0)
             ? spawnerTiles.filter(t => missionConstraints.allowedSpawnerTiles.has(`${t.x}_${t.y}`))
             : rawPool;
@@ -696,9 +651,8 @@ export class Strategy {
         const reachableAll = pool.filter(t => this.isReachable(t));
         if (reachableAll.length === 0) return null; // nothing reachable → stay idle
 
-        // Idle group-patrol may ask us to leave the group it just patrolled: drop
-        // that group's tiles so the next target is OUTSIDE it. Fall back to the
-        // full set if the exclusion would leave nothing reachable.
+        // Idle group-patrol may ask us to leave the group just patrolled: drop its
+        // tiles so the next target is OUTSIDE it (full set if that empties it).
         const excluded  = this._idleExcludeKeys;
         const reachable = excluded
             ? (reachableAll.filter(t => !excluded.has(`${t.x}_${t.y}`)).length > 0
@@ -706,18 +660,17 @@ export class Strategy {
                 : reachableAll)
             : reachableAll;
 
-        // Prefer tiles in the sustainable-loop region (don't explore into a one-way
-        // trap); fall back to all reachable only if none are safe (all-traps map).
+        // Prefer the sustainable-loop region (don't explore into a one-way trap);
+        // fall back to all reachable only on an all-traps map.
         const safe   = reachable.filter(t => this.inSafe(t));
         const usable = safe.length > 0 ? safe : reachable;
 
-        // Prefer reachable tiles outside current sensing (new ground), else any
-        // reachable tile; pick the nearest by real A* path length.
+        // Prefer tiles outside current sensing (new ground), else any; nearest by A*.
         const outOfRange = usable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
         const pool2      = outOfRange.length > 0 ? outOfRange : usable;
 
-        // When accumulating a stack: exclude the tile we're already on so we don't
-        // re-select the same spawner and stall in place.
+        // When accumulating a stack, exclude our own tile so we don't re-select the
+        // same spawner and stall.
         const hereKey    = `${Math.round(me.x)}_${Math.round(me.y)}`;
         const candidates = needMoreParcels
             ? pool2.filter(t => `${t.x}_${t.y}` !== hereKey)
@@ -725,10 +678,8 @@ export class Strategy {
         const baseCandidates = candidates.length > 0 ? candidates : pool2;
 
         // Hard-exclude the spawner committed to just before the current one
-        // (_prevExploreKey) to break A→B→A ping-pong. The exclusion is skipped
-        // when every alternative would require travelling more than
-        // EXPLORE_NEARBY_MARGIN extra tiles — avoids sending the agent across
-        // the whole map just to avoid a nearby tile.
+        // (_prevExploreKey) to break A→B→A ping-pong. Skipped when every alternative
+        // is > EXPLORE_NEARBY_MARGIN extra tiles away (don't cross the map to avoid one).
         let finalCandidates = baseCandidates;
         if (this._prevExploreKey) {
             const without = baseCandidates.filter(t => `${t.x}_${t.y}` !== this._prevExploreKey);
@@ -746,8 +697,8 @@ export class Strategy {
             }
         }
 
-        // Rank by exploreCost (pathLen + Case-6 camping penalty) so a spawner a
-        // competitor is sitting on loses a near-tie to a clear one.
+        // Rank by exploreCost (pathLen + Case-6 camping penalty) so a competitor-camped
+        // spawner loses a near-tie to a clear one.
         const sorted = [...finalCandidates].sort((a, b) => this.exploreCost(a) - this.exploreCost(b));
         const target = sorted[0];
         if (target) {
@@ -759,7 +710,7 @@ export class Strategy {
                 exploreLog(`tie: ${tied.length} at pathLen=${shortestLen} — ${tiedStr} — picking (${target.x},${target.y}), prev-excluded=${this._prevExploreKey ?? 'none'}`);
             }
             exploreLog(`→ spawner (${target.x},${target.y}) pathLen:${shortestLen} prev=${this._prevExploreKey ?? 'none'} last=${this._lastExploreKey ?? 'none'}`);
-            // Slide window: current becomes previous, new target becomes current.
+            // Slide window: current → previous, new target → current.
             this._prevExploreKey = this._lastExploreKey;
             this._lastExploreKey = key;
             return ['go_explore', target.x, target.y];

@@ -9,39 +9,26 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('stochastic');
 
-// Max walkable-path steps for two spawners to be considered neighbours.
+// Max walkable-path steps for two spawners to be neighbours.
 const D_CLUSTER  = 2;
 // Sliding window: how many past group choices to remember.
 const WINDOW_SIZE = 5;
-// How much to penalise distance when computing group weights.
-// α=1.5 → the farthest group gets weight 1/(1+1.5)≈0.4 vs 1.0 for the nearest.
+// Distance penalty weight. α=1.5 → farthest group ~0.4 vs 1.0 for nearest.
 const ALPHA = 1.5;
-// How much to penalise a group that was chosen recently.
-// β=3 → one recent choice roughly halves the weight.
+// Recency penalty weight. β=3 → one recent choice roughly halves the weight.
 const BETA = 3.0;
 
 /**
  * @class StrategyLookAheadStochastic
- * LookAhead with probabilistic group sampling (distance + recency penalties)
+ * LookAhead with probabilistic group sampling: weight = 1 / (1 + α·normDist +
+ * β·recentCount), where normDist is the [0,1]-normalised distance to the group's
+ * nearest reachable spawner and recentCount is its hits in the last WINDOW_SIZE choices.
  *
- * where normDist is distance to the group's nearest reachable spawner
- * normalised to [0,1] across all active groups, and recentCount is how many
- * of the last WINDOW_SIZE choices targeted that group.
+ * Every group keeps a positive weight (no starvation); distance is relative (a far
+ * group is penalised only vs. the nearest); recency decays as the window slides.
  *
- * Properties guaranteed by the formula:
- *  - Every group always has a positive weight → no starvation.
- *  - Distance is relative (normalised), so a far group is penalised only
- *    *compared to* the nearest one, not absolutely zeroed out.
- *  - Recency penalty decays naturally as the window slides forward — a group
- *    chosen 5 decisions ago gets no penalty at all.
- *
- * Edge cases:
- *  - 0 or 1 group  → falls back to parent StrategyLookAhead.exploreIfIdle().
- *  - All groups unreachable → returns null (parent fallback).
- *  - Mission zone constraint (allowedSpawnerTiles) → applied before grouping.
- *  - Stack-accumulation mission (requiredStackSize) → current tile excluded.
- *
- * Toggle with EXPLORE_MODE=stochastic in the environment (see selectStrategy).
+ * Edge cases: 0/1 group or all unreachable → parent fallback; allowedSpawnerTiles
+ * applied before grouping; requiredStackSize → current tile excluded.
  */
 export class StrategyLookAheadStochastic extends StrategyLookAhead {
     /** @type {Array<Array<{x: number, y: number}>>|null} Lazily built group list */
@@ -53,7 +40,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
     // ── group initialisation ────────────────────────────────────────────────
 
     /**
-     * Lazily build (and cache) spawner groups for stochastic sampling
+     * Lazily build (and cache) spawner groups for sampling
      * @returns {void}
      */
     #initGroups() {
@@ -71,16 +58,15 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
     // ── main override ───────────────────────────────────────────────────────
 
     /**
-     * Idle exploration via weighted random group sampling (distance + recency
-     * penalties); falls back to the parent's deterministic logic with ≤ 1 group
+     * Idle exploration via weighted random group sampling (distance + recency); falls
+     * back to the parent's deterministic logic with ≤ 1 group
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Exploration predicate, or null to keep current / stay idle
      */
     exploreIfIdle(currentIntent) {
         this.#initGroups();
 
-        // With 0 or 1 group there is nothing for group-level sampling to do —
-        // delegate entirely to the parent's deterministic logic.
+        // With ≤ 1 group there's nothing to sample — delegate to the parent.
         if (!this.#groups || this.#groups.length <= 1)
             return super.exploreIfIdle(currentIntent);
 
@@ -89,8 +75,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
             const [intent, tx, ty] = currentIntent;
 
             if (intent === 'go_pick_up' || intent === 'go_deliver') {
-                // Productive work started — reset both the stochastic window
-                // and the parent's ping-pong fields.
+                // Productive work started — reset the window and the parent's fields.
                 this.#recentChoices  = [];
                 this._lastExploreKey = null;
                 this._prevExploreKey = null;
@@ -105,22 +90,21 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
             && parcels.carriedBy(me.id).length < missionConstraints.requiredStackSize;
 
         // ── build eligible spawner set ───────────────────────────────────────
-        // Apply mission zone constraint first (falls back to the full set if the
-        // constraint filters to nothing reachable).
+        // Mission zone constraint (full set if it filters to nothing reachable).
         const basePool = this._allowedSpawnerPool();
 
-        // Keep only reachable tiles; prefer the sustainable-loop region.
+        // Reachable only; prefer the sustainable-loop region.
         const reachable = basePool.filter(t => this.isReachable(t));
         if (reachable.length === 0) return null;
 
         const safe   = reachable.filter(t => this.inSafe(t));
         const usable = safe.length > 0 ? safe : reachable;
 
-        // Prefer spawners outside current sensing range (new ground).
+        // Prefer spawners outside current sensing (new ground).
         const outOfRange = usable.filter(t => distance(me, t) > OBSERVATION_DISTANCE);
         const candidates = outOfRange.length > 0 ? outOfRange : usable;
 
-        // When accumulating a required stack, skip the tile we are standing on.
+        // When accumulating a stack, skip our own tile.
         const hereKey = `${Math.round(me.x)}_${Math.round(me.y)}`;
         const filtered = (needMoreParcels
             ? candidates.filter(t => `${t.x}_${t.y}` !== hereKey)
@@ -134,11 +118,11 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
             .map((spawners, idx) => {
                 const eligible = spawners.filter(t => eligibleSet.has(`${t.x}_${t.y}`));
                 if (eligible.length === 0) return null;
-                // Nearest eligible spawner in this group by A* path length.
+                // Nearest eligible spawner by A* path length.
                 const best = eligible
                     .map(t => ({ t, d: this.pathLen(me, t) }))
                     .sort((a, b) => a.d - b.d)[0];
-                // Keep the full spawner list for coverage-target calculation.
+                // Keep the full list for coverage-target calculation.
                 return { idx, spawners, nearest: best.t, dist: best.d };
             })
             .filter(Boolean);
@@ -191,20 +175,12 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
     // ── helpers ─────────────────────────────────────────────────────────────
 
     /**
-     * Best tile to navigate to so the agent senses as much of the group as
-     * possible in one visit.
-     *
-     * Fast path: if every spawner in the group is already within
-     * OBSERVATION_DISTANCE (Euclidean) of the nearest eligible spawner, just
-     * go there — no extra movement needed.
-     *
-     * Slow path: find the walkable tile that maximises the number of group
-     * spawners within OBSERVATION_DISTANCE.  The search space is limited to
-     * the group's bounding box expanded by OBSERVATION_DISTANCE; isReachable
-     * (A*) is called only on the top-K geometrically best candidates to keep
-     * the per-deliberation cost low
+     * Tile that senses as much of the group as possible in one visit. Fast path: if
+     * every spawner is within OBSERVATION_DISTANCE of the nearest eligible spawner, go
+     * there. Slow path: the walkable tile (within the group's bbox + sensing radius)
+     * maximising covered spawners; A* checked only on the top-K geometric candidates.
      * @param {{spawners: Array<{x: number, y: number}>, nearest: {x: number, y: number}}} group - Active group with its nearest eligible spawner
-     * @returns {{x: number, y: number}} Tile maximising sensed group coverage
+     * @returns {{x: number, y: number}} Tile maximising sensed coverage
      */
     #bestCoverageTarget(group) {
         const { spawners, nearest } = group;
@@ -224,9 +200,8 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
         const minY = Math.min(...ys) - OBSERVATION_DISTANCE;
         const maxY = Math.max(...ys) + OBSERVATION_DISTANCE;
 
-        // Score every walkable tile in the box: covered spawners DESC, then
-        // Euclidean distance to agent ASC as a tie-break.  isReachable (A*)
-        // is intentionally deferred — we check only the top-K below.
+        // Score walkable tiles in the box: covered spawners DESC, then distance ASC.
+        // isReachable (A*) is deferred — checked only on the top-K below.
         const scored = walkableTiles
             .filter(t => t.x >= minX && t.x <= maxX && t.y >= minY && t.y <= maxY)
             .map(t => {
@@ -241,7 +216,7 @@ export class StrategyLookAheadStochastic extends StrategyLookAhead {
 
         if (scored.length === 0) return nearest;
 
-        // Verify reachability (A*) only for the best candidates to cap cost.
+        // Verify reachability (A*) only for the best candidates.
         const TOP_K = 10;
         for (const { t, covered } of scored.slice(0, TOP_K)) {
             if (this.isReachable(t)) {

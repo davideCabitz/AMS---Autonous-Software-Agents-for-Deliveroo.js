@@ -5,19 +5,19 @@ import { createLogger } from '../utils/logger.js';
 
 const log = createLogger('not-too-greedy');
 
-// extra tiles beyond OBSERVATION_DISTANCE within which a nearby unseen spawner triggers a detour
+// extra tiles past OBSERVATION_DISTANCE within which an unseen spawner triggers a detour
 const DETOUR_SPAWNER_MAX_DIST = 5;
 
 /**
  * @class StrategyNotTooGreedy
- * Greedy with one-time detour to spawner just outside sensing range
+ * Greedy with a one-time detour to a spawner just outside sensing range.
  */
 export class StrategyNotTooGreedy extends Strategy {
-    /** @type {boolean} Whether detour has been made in current trip */
+    /** @type {boolean} Whether a detour has been made this trip */
     #detourDone = false;
 
     /**
-     * Decide next intention
+     * Decide the next intention
      * @param {Array|null} currentIntent - Current intention predicate
      * @returns {Array|null} Next intention, or null to keep current
      */
@@ -27,9 +27,8 @@ export class StrategyNotTooGreedy extends Strategy {
 
         if (carrying.length === 0) this.#detourDone = false;
 
-        // Free parcels in sensing range, A*-reachable, whose pickup nets at least
-        // MIN_DELIVERY_REWARD over just delivering now (ΔB = B(p) − A). Unreachable
-        // parcels are dropped so they can never be selected. Ranked by value B(p).
+        // Free, in-range, reachable parcels whose pickup nets ≥ MIN_DELIVERY_REWARD
+        // over delivering now (ΔB = B(p) − A), ranked by value B(p).
         const worthwhileInRange = parcels.free()
             .filter(p => distance(me, p) <= OBSERVATION_DISTANCE && this.isReachable(p) && this.inSafe(p))
             .map(p => ({ p, value: this.pickupValue(p) }))
@@ -37,19 +36,19 @@ export class StrategyNotTooGreedy extends Strategy {
             .sort((a, b) => b.value - a.value);
 
         if (carrying.length > 0) {
-            // Hysteresis: while there's room, stick with the current pickup as long
-            // as it's still valid and not clearly beaten — prevents flip-flopping.
+            // Hysteresis: while there's room, keep the current pickup as long as it's
+            // valid and not clearly beaten — prevents flip-flopping.
             if (!this.atCapacity() && this.shouldKeepCurrentPickup(currentIntent, worthwhileInRange[0]))
                 return null;
-            // Only consider another pickup if there's still room to carry it.
+            // Only consider another pickup if there's still room.
             if (!this.atCapacity() && worthwhileInRange.length > 0) {
                 const { p } = worthwhileInRange[0];
                 log(`→ multi-pickup ${this.pickupDebug(p)}`);
                 return ['go_pick_up', p.x, p.y, p.id];
             }
 
-            // One-time detour: peek at the closest spawner just outside sensing range.
-            // #detourDone prevents re-entering this block for the rest of the delivery trip.
+            // One-time detour to the closest spawner just outside sensing range
+            // (#detourDone prevents re-entering this block for the rest of the trip).
             if (!this.#detourDone) {
                 const nearbyUnseenSpawner = spawnerTiles
                     .filter(t =>
@@ -65,7 +64,7 @@ export class StrategyNotTooGreedy extends Strategy {
                 }
             }
 
-            // If the detour go_explore is still running, don't replace it with go_deliver yet.
+            // While the detour go_explore is still running, don't replace it yet.
             if (this.#detourDone && currentIntent?.[0] === 'go_explore') return null;
 
             const target = this.nearestEscapableDelivery();
@@ -73,8 +72,7 @@ export class StrategyNotTooGreedy extends Strategy {
                 log(`→ go_deliver (${carrying.length} parcels) to ${target.x},${target.y}`);
                 return ['go_deliver', target.x, target.y];
             }
-            // No delivery currently reachable — fall through to explore/idle to
-            // reposition until a path opens, instead of spinning on a blocked tile.
+            // No delivery reachable — explore/idle to reposition until a path opens.
             log('no reachable delivery — repositioning');
         }
 
